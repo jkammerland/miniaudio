@@ -22349,6 +22349,8 @@ typedef struct
     volatile ma_uint32 pendingOperations;
     volatile ma_uint32 acceptingNotifications;
     volatile ma_uint32 requestedStarted;
+    volatile ma_uint32 suppressStartedNotification;
+    volatile ma_uint32 suppressStoppedNotification;
     ma_result initResult;
 } ma_device_notification_state__wasapi;
 
@@ -24102,10 +24104,32 @@ done:
     }
 }
 
+#ifndef MA_WASAPI_REINIT_DEVICE_INIT_INTERNAL
+#define MA_WASAPI_REINIT_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData) ma_device_init_internal__wasapi((pContext), (deviceType), (pDeviceID), (pData))
+#endif
+#ifndef MA_WASAPI_REINIT_SET_EVENT_HANDLE
+#define MA_WASAPI_REINIT_SET_EVENT_HANDLE(pAudioClient, hEvent) ma_IAudioClient_SetEventHandle((pAudioClient), (hEvent))
+#endif
+#ifndef MA_WASAPI_REINIT_GET_BUFFER_SIZE
+#define MA_WASAPI_REINIT_GET_BUFFER_SIZE(pAudioClient, pBufferSize) ma_IAudioClient_GetBufferSize((pAudioClient), (pBufferSize))
+#endif
+#ifndef MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT
+#define MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pContext, pAudioClient, pRenderClient, pCaptureClient, pEvent) ma_device_release_audio_client__wasapi((pContext), (pAudioClient), (pRenderClient), (pCaptureClient), (pEvent))
+#endif
+
 static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type deviceType)
 {
     ma_device_init_internal_data__wasapi data;
     ma_event* pReleaseEvent = NULL;
+    ma_IAudioClient* pOldAudioClient;
+    ma_IAudioRenderClient* pOldRenderClient = NULL;
+    ma_IAudioCaptureClient* pOldCaptureClient = NULL;
+    ma_format oldInternalFormat;
+    ma_uint32 oldInternalChannels;
+    ma_uint32 oldInternalSampleRate;
+    ma_channel oldInternalChannelMap[MA_MAX_CHANNELS];
+    ma_uint32 oldInternalPeriodSizeInFrames;
+    ma_uint32 oldInternalPeriods;
     ma_uint32 actualBufferSizeInFrames = 0;
     ma_result result;
     HRESULT hr;
@@ -24123,11 +24147,27 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         data.channelsIn             = pDevice->playback.channels;
         MA_COPY_MEMORY(data.channelMapIn, pDevice->playback.channelMap, sizeof(pDevice->playback.channelMap));
         data.shareMode              = pDevice->playback.shareMode;
+        pOldAudioClient             = (ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback;
+        pOldRenderClient            = (ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient;
+        oldInternalFormat             = pDevice->playback.internalFormat;
+        oldInternalChannels           = pDevice->playback.internalChannels;
+        oldInternalSampleRate         = pDevice->playback.internalSampleRate;
+        MA_COPY_MEMORY(oldInternalChannelMap, pDevice->playback.internalChannelMap, sizeof(oldInternalChannelMap));
+        oldInternalPeriodSizeInFrames = pDevice->playback.internalPeriodSizeInFrames;
+        oldInternalPeriods            = pDevice->playback.internalPeriods;
     } else {
         data.formatIn               = pDevice->capture.format;
         data.channelsIn             = pDevice->capture.channels;
         MA_COPY_MEMORY(data.channelMapIn, pDevice->capture.channelMap, sizeof(pDevice->capture.channelMap));
         data.shareMode              = pDevice->capture.shareMode;
+        pOldAudioClient             = (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture;
+        pOldCaptureClient           = (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient;
+        oldInternalFormat             = pDevice->capture.internalFormat;
+        oldInternalChannels           = pDevice->capture.internalChannels;
+        oldInternalSampleRate         = pDevice->capture.internalSampleRate;
+        MA_COPY_MEMORY(oldInternalChannelMap, pDevice->capture.internalChannelMap, sizeof(oldInternalChannelMap));
+        oldInternalPeriodSizeInFrames = pDevice->capture.internalPeriodSizeInFrames;
+        oldInternalPeriods            = pDevice->capture.internalPeriods;
     }
 
     data.sampleRateIn               = pDevice->sampleRate;
@@ -24149,7 +24189,7 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     }
     #endif
 
-    result = ma_device_init_internal__wasapi(pDevice->pContext, deviceType, NULL, &data);
+    result = MA_WASAPI_REINIT_DEVICE_INIT_INTERNAL(pDevice->pContext, deviceType, NULL, &data);
     if (result != MA_SUCCESS) {
         return result;
     }
@@ -24159,36 +24199,109 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     buffer query must leave the published clients untouched.
     */
     if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
-        hr = ma_IAudioClient_SetEventHandle(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventCapture);
+        hr = MA_WASAPI_REINIT_SET_EVENT_HANDLE(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventCapture);
     } else {
-        hr = ma_IAudioClient_SetEventHandle(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventPlayback);
+        hr = MA_WASAPI_REINIT_SET_EVENT_HANDLE(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventPlayback);
     }
     if (FAILED(hr)) {
-        ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
         return ma_result_from_HRESULT(hr);
     }
 
-    hr = ma_IAudioClient_GetBufferSize(data.pAudioClient, &actualBufferSizeInFrames);
+    hr = MA_WASAPI_REINIT_GET_BUFFER_SIZE(data.pAudioClient, &actualBufferSizeInFrames);
     if (FAILED(hr)) {
-        ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
         return ma_result_from_HRESULT(hr);
     }
 
-    /* Release the old interfaces on their service thread, then publish the complete candidate. */
+    /* Build the generic pipeline in its permanent storage. Initialized converters are not relocatable. */
+    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+        pDevice->capture.internalFormat             = data.formatOut;
+        pDevice->capture.internalChannels           = data.channelsOut;
+        pDevice->capture.internalSampleRate         = data.sampleRateOut;
+        MA_COPY_MEMORY(pDevice->capture.internalChannelMap, data.channelMapOut, sizeof(data.channelMapOut));
+        pDevice->capture.internalPeriodSizeInFrames = data.periodSizeInFramesOut;
+        pDevice->capture.internalPeriods            = data.periodsOut;
+    } else {
+        pDevice->playback.internalFormat             = data.formatOut;
+        pDevice->playback.internalChannels           = data.channelsOut;
+        pDevice->playback.internalSampleRate         = data.sampleRateOut;
+        MA_COPY_MEMORY(pDevice->playback.internalChannelMap, data.channelMapOut, sizeof(data.channelMapOut));
+        pDevice->playback.internalPeriodSizeInFrames = data.periodSizeInFramesOut;
+        pDevice->playback.internalPeriods            = data.periodsOut;
+    }
+
+    result = ma_device__post_init_setup(pDevice, deviceType);
+    if (result != MA_SUCCESS) {
+        if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+            pDevice->capture.internalFormat             = oldInternalFormat;
+            pDevice->capture.internalChannels           = oldInternalChannels;
+            pDevice->capture.internalSampleRate         = oldInternalSampleRate;
+            MA_COPY_MEMORY(pDevice->capture.internalChannelMap, oldInternalChannelMap, sizeof(oldInternalChannelMap));
+            pDevice->capture.internalPeriodSizeInFrames = oldInternalPeriodSizeInFrames;
+            pDevice->capture.internalPeriods            = oldInternalPeriods;
+        } else {
+            pDevice->playback.internalFormat             = oldInternalFormat;
+            pDevice->playback.internalChannels           = oldInternalChannels;
+            pDevice->playback.internalSampleRate         = oldInternalSampleRate;
+            MA_COPY_MEMORY(pDevice->playback.internalChannelMap, oldInternalChannelMap, sizeof(oldInternalChannelMap));
+            pDevice->playback.internalPeriodSizeInFrames = oldInternalPeriodSizeInFrames;
+            pDevice->playback.internalPeriods            = oldInternalPeriods;
+        }
+        MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        return result;
+    }
+
+    /*
+    Remove the old COM owners before asking their service thread to release them. If command
+    delivery itself fails, teardown still sees an explicitly empty, destroyable endpoint rather
+    than stale interface pointers whose release status is unknown.
+    */
+    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+        pDevice->wasapi.pAudioClientCapture = NULL;
+        pDevice->wasapi.pCaptureClient      = NULL;
+    } else {
+        pDevice->wasapi.pAudioClientPlayback = NULL;
+        pDevice->wasapi.pRenderClient        = NULL;
+    }
+
+    result = MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(
+        pDevice->pContext,
+        pOldAudioClient,
+        pOldRenderClient,
+        pOldCaptureClient,
+        pReleaseEvent
+    );
+    if (result != MA_SUCCESS) {
+        if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+            ma_data_converter_uninit(&pDevice->capture.converter, &pDevice->pContext->allocationCallbacks);
+            MA_ZERO_OBJECT(&pDevice->capture.converter);
+            pDevice->capture.internalFormat             = oldInternalFormat;
+            pDevice->capture.internalChannels           = oldInternalChannels;
+            pDevice->capture.internalSampleRate         = oldInternalSampleRate;
+            MA_COPY_MEMORY(pDevice->capture.internalChannelMap, oldInternalChannelMap, sizeof(oldInternalChannelMap));
+            pDevice->capture.internalPeriodSizeInFrames = oldInternalPeriodSizeInFrames;
+            pDevice->capture.internalPeriods            = oldInternalPeriods;
+        } else {
+            ma_data_converter_uninit(&pDevice->playback.converter, &pDevice->pContext->allocationCallbacks);
+            MA_ZERO_OBJECT(&pDevice->playback.converter);
+            ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
+            pDevice->playback.pInputCache                 = NULL;
+            pDevice->playback.inputCacheCap               = 0;
+            pDevice->playback.inputCacheConsumed          = 0;
+            pDevice->playback.inputCacheRemaining         = 0;
+            pDevice->playback.internalFormat              = oldInternalFormat;
+            pDevice->playback.internalChannels            = oldInternalChannels;
+            pDevice->playback.internalSampleRate          = oldInternalSampleRate;
+            MA_COPY_MEMORY(pDevice->playback.internalChannelMap, oldInternalChannelMap, sizeof(oldInternalChannelMap));
+            pDevice->playback.internalPeriodSizeInFrames  = oldInternalPeriodSizeInFrames;
+            pDevice->playback.internalPeriods             = oldInternalPeriods;
+        }
+        MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        return result;
+    }
 
     if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
-        result = ma_device_release_audio_client__wasapi(
-            pDevice->pContext,
-            (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture,
-            NULL,
-            (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient,
-            pReleaseEvent
-        );
-        if (result != MA_SUCCESS) {
-            ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, NULL, data.pCaptureClient, pReleaseEvent);
-            return result;
-        }
-
         pDevice->wasapi.pAudioClientCapture         = data.pAudioClient;
         pDevice->wasapi.pCaptureClient              = data.pCaptureClient;
 
@@ -24208,18 +24321,6 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     }
 
     if (deviceType == ma_device_type_playback) {
-        result = ma_device_release_audio_client__wasapi(
-            pDevice->pContext,
-            (ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback,
-            (ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient,
-            NULL,
-            pReleaseEvent
-        );
-        if (result != MA_SUCCESS) {
-            ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, NULL, pReleaseEvent);
-            return result;
-        }
-
         pDevice->wasapi.pAudioClientPlayback         = data.pAudioClient;
         pDevice->wasapi.pRenderClient                = data.pRenderClient;
 
@@ -24519,6 +24620,8 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     ma_atomic_store_32(&pNotificationState->pendingOperations, 0);
     ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
     ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
+    ma_atomic_store_32(&pNotificationState->suppressStartedNotification, MA_FALSE);
+    ma_atomic_store_32(&pNotificationState->suppressStoppedNotification, MA_FALSE);
 
     /* Publish the fully initialized sidecar before registration can invoke a callback. */
     pDevice->wasapi.pDeviceEnumerator = (ma_ptr)pNotificationState;
@@ -24668,6 +24771,141 @@ static ma_bool32 ma_device_endpoint_is_active__wasapi(ma_device_notification_sta
     return (state & MA_MM_DEVICE_STATE_ACTIVE) != 0;
 }
 
+#ifndef MA_WASAPI_DEVICE_ENDPOINT_IS_ACTIVE
+#define MA_WASAPI_DEVICE_ENDPOINT_IS_ACTIVE(pState, deviceType) ma_device_endpoint_is_active__wasapi((pState), (deviceType))
+#endif
+#ifndef MA_WASAPI_DEVICE_STOP_INTERNAL
+#define MA_WASAPI_DEVICE_STOP_INTERNAL(pDevice) ma_device_stop__internal((pDevice), MA_FALSE)
+#endif
+#ifndef MA_WASAPI_DEVICE_START_INTERNAL
+#define MA_WASAPI_DEVICE_START_INTERNAL(pDevice) ma_device_start__internal((pDevice), MA_FALSE)
+#endif
+#ifndef MA_WASAPI_DEVICE_REINIT
+#define MA_WASAPI_DEVICE_REINIT(pDevice, deviceType) ma_device_reinit__wasapi((pDevice), (deviceType))
+#endif
+#ifndef MA_WASAPI_DEVICE_NOTIFY_REROUTED
+#define MA_WASAPI_DEVICE_NOTIFY_REROUTED(pDevice) ma_device__on_notification_rerouted((pDevice))
+#endif
+
+static ma_result ma_device_process_notifications__wasapi(ma_device_notification_state__wasapi* pState, ma_uint32 pendingOperations)
+{
+    ma_device* pDevice;
+    ma_uint32 rerouteOperations;
+    ma_uint32 completedOperations = 0;
+    ma_bool32 rerouteSucceeded = MA_TRUE;
+    ma_result result = MA_SUCCESS;
+
+    MA_ASSERT(pState != NULL);
+    pDevice = pState->pDevice;
+    MA_ASSERT(pDevice != NULL);
+
+    if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
+        return MA_CANCELLED;
+    }
+
+    rerouteOperations = pendingOperations & (MA_WASAPI_NOTIFICATION_OP_RENDER | MA_WASAPI_NOTIFICATION_OP_CAPTURE);
+
+    ma_mutex_lock(&pState->operationLock);
+    {
+        if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE || ma_device_get_state(pDevice) == ma_device_state_uninitialized) {
+            result = MA_CANCELLED;
+            goto unlock_operation;
+        }
+
+        if ((pendingOperations & MA_WASAPI_NOTIFICATION_OP_STATE) != 0) {
+            if (pDevice->wasapi.allowPlaybackAutoStreamRouting && pDevice->playback.shareMode != ma_share_mode_exclusive &&
+                (pDevice->type == ma_device_type_playback || pDevice->type == ma_device_type_duplex)) {
+                if (!MA_WASAPI_DEVICE_ENDPOINT_IS_ACTIVE(pState, ma_device_type_playback)) {
+                    pDevice->wasapi.isDetachedPlayback = MA_TRUE;
+                    rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                } else if (pDevice->wasapi.isDetachedPlayback) {
+                    rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                }
+            }
+
+            if (pDevice->wasapi.allowCaptureAutoStreamRouting && pDevice->capture.shareMode != ma_share_mode_exclusive &&
+                (pDevice->type == ma_device_type_capture || pDevice->type == ma_device_type_duplex || pDevice->type == ma_device_type_loopback)) {
+                ma_device_type endpointType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
+                if (!MA_WASAPI_DEVICE_ENDPOINT_IS_ACTIVE(pState, endpointType)) {
+                    pDevice->wasapi.isDetachedCapture = MA_TRUE;
+                    rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                } else if (pDevice->wasapi.isDetachedCapture) {
+                    rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                }
+            }
+        }
+
+        if (rerouteOperations == 0 || ma_device_get_state(pDevice) == ma_device_state_starting || ma_device_get_state(pDevice) == ma_device_state_stopping) {
+            goto unlock_operation;
+        }
+
+        if (ma_device_get_state(pDevice) == ma_device_state_started) {
+            ma_atomic_store_32(&pState->suppressStoppedNotification, MA_TRUE);
+            result = MA_WASAPI_DEVICE_STOP_INTERNAL(pDevice);
+            if (result != MA_SUCCESS) {
+                ma_atomic_store_32(&pState->suppressStoppedNotification, MA_FALSE);
+                rerouteSucceeded = MA_FALSE;
+                goto unlock_operation;
+            }
+        }
+
+        ma_mutex_lock(&pDevice->wasapi.rerouteLock);
+        {
+            if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_RENDER) != 0) {
+                result = MA_WASAPI_DEVICE_REINIT(pDevice, ma_device_type_playback);
+
+                if (result == MA_SUCCESS) {
+                    pDevice->wasapi.isDetachedPlayback = MA_FALSE;
+                    completedOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                } else {
+                    pDevice->wasapi.isDetachedPlayback = MA_TRUE;
+                    rerouteSucceeded = MA_FALSE;
+                }
+            }
+
+            if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_CAPTURE) != 0) {
+                ma_device_type deviceType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
+                result = MA_WASAPI_DEVICE_REINIT(pDevice, deviceType);
+
+                if (result == MA_SUCCESS) {
+                    pDevice->wasapi.isDetachedCapture = MA_FALSE;
+                    completedOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                } else {
+                    pDevice->wasapi.isDetachedCapture = MA_TRUE;
+                    rerouteSucceeded = MA_FALSE;
+                }
+            }
+        }
+        ma_mutex_unlock(&pDevice->wasapi.rerouteLock);
+
+        if (rerouteSucceeded && ma_atomic_load_32(&pState->requestedStarted) &&
+            pDevice->wasapi.isDetachedPlayback == MA_FALSE && pDevice->wasapi.isDetachedCapture == MA_FALSE) {
+            ma_atomic_store_32(&pState->suppressStartedNotification, MA_TRUE);
+            result = MA_WASAPI_DEVICE_START_INTERNAL(pDevice);
+            if (result != MA_SUCCESS) {
+                ma_atomic_store_32(&pState->suppressStartedNotification, MA_FALSE);
+                rerouteSucceeded = MA_FALSE;
+            }
+        }
+    }
+
+unlock_operation:
+    ma_mutex_unlock(&pState->operationLock);
+
+    if (completedOperations != 0) {
+        MA_WASAPI_DEVICE_NOTIFY_REROUTED(pDevice);
+    }
+
+    if (!rerouteSucceeded) {
+        ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_WARNING, "[WASAPI] Device rerouting failed; the device remains stopped and detached.");
+        if (result == MA_SUCCESS) {
+            result = MA_ERROR;
+        }
+    }
+
+    return result;
+}
+
 static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void* pUserData)
 {
     ma_device_notification_state__wasapi* pState = (ma_device_notification_state__wasapi*)pUserData;
@@ -24697,10 +24935,6 @@ static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void
 
     for (;;) {
         ma_uint32 pendingOperations;
-        ma_uint32 rerouteOperations;
-        ma_uint32 completedOperations = 0;
-        ma_bool32 rerouteSucceeded = MA_TRUE;
-        ma_result result;
 
         if (ma_event_wait(&pState->wakeEvent) != MA_SUCCESS) {
             break;
@@ -24710,107 +24944,8 @@ static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void
         if ((pendingOperations & MA_WASAPI_NOTIFICATION_OP_QUIT) != 0) {
             break;
         }
-        if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
-            continue;
-        }
 
-        rerouteOperations = pendingOperations & (MA_WASAPI_NOTIFICATION_OP_RENDER | MA_WASAPI_NOTIFICATION_OP_CAPTURE);
-
-        ma_mutex_lock(&pState->operationLock);
-        {
-            if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE || ma_device_get_state(pDevice) == ma_device_state_uninitialized) {
-                ma_mutex_unlock(&pState->operationLock);
-                continue;
-            }
-
-            if ((pendingOperations & MA_WASAPI_NOTIFICATION_OP_STATE) != 0) {
-                if (pDevice->wasapi.allowPlaybackAutoStreamRouting && pDevice->playback.shareMode != ma_share_mode_exclusive &&
-                    (pDevice->type == ma_device_type_playback || pDevice->type == ma_device_type_duplex)) {
-                    if (!ma_device_endpoint_is_active__wasapi(pState, ma_device_type_playback)) {
-                        pDevice->wasapi.isDetachedPlayback = MA_TRUE;
-                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
-                    } else if (pDevice->wasapi.isDetachedPlayback) {
-                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
-                    }
-                }
-
-                if (pDevice->wasapi.allowCaptureAutoStreamRouting && pDevice->capture.shareMode != ma_share_mode_exclusive &&
-                    (pDevice->type == ma_device_type_capture || pDevice->type == ma_device_type_duplex || pDevice->type == ma_device_type_loopback)) {
-                    ma_device_type endpointType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
-                    if (!ma_device_endpoint_is_active__wasapi(pState, endpointType)) {
-                        pDevice->wasapi.isDetachedCapture = MA_TRUE;
-                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
-                    } else if (pDevice->wasapi.isDetachedCapture) {
-                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
-                    }
-                }
-            }
-
-            if (rerouteOperations == 0 || ma_device_get_state(pDevice) == ma_device_state_starting || ma_device_get_state(pDevice) == ma_device_state_stopping) {
-                ma_mutex_unlock(&pState->operationLock);
-                continue;
-            }
-
-            if (ma_device_get_state(pDevice) == ma_device_state_started) {
-                result = ma_device_stop__internal(pDevice, MA_FALSE);
-                if (result != MA_SUCCESS) {
-                    ma_mutex_unlock(&pState->operationLock);
-                    continue;
-                }
-            }
-
-            ma_mutex_lock(&pDevice->wasapi.rerouteLock);
-            {
-                if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_RENDER) != 0) {
-                    result = ma_device_reinit__wasapi(pDevice, ma_device_type_playback);
-                    if (result == MA_SUCCESS) {
-                        result = ma_device__post_init_setup(pDevice, ma_device_type_playback);
-                    }
-
-                    if (result == MA_SUCCESS) {
-                        pDevice->wasapi.isDetachedPlayback = MA_FALSE;
-                        completedOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
-                    } else {
-                        pDevice->wasapi.isDetachedPlayback = MA_TRUE;
-                        rerouteSucceeded = MA_FALSE;
-                    }
-                }
-
-                if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_CAPTURE) != 0) {
-                    ma_device_type deviceType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
-                    result = ma_device_reinit__wasapi(pDevice, deviceType);
-                    if (result == MA_SUCCESS) {
-                        result = ma_device__post_init_setup(pDevice, deviceType);
-                    }
-
-                    if (result == MA_SUCCESS) {
-                        pDevice->wasapi.isDetachedCapture = MA_FALSE;
-                        completedOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
-                    } else {
-                        pDevice->wasapi.isDetachedCapture = MA_TRUE;
-                        rerouteSucceeded = MA_FALSE;
-                    }
-                }
-            }
-            ma_mutex_unlock(&pDevice->wasapi.rerouteLock);
-
-            if (rerouteSucceeded && ma_atomic_load_32(&pState->requestedStarted) &&
-                pDevice->wasapi.isDetachedPlayback == MA_FALSE && pDevice->wasapi.isDetachedCapture == MA_FALSE) {
-                result = ma_device_start__internal(pDevice, MA_FALSE);
-                if (result != MA_SUCCESS) {
-                    rerouteSucceeded = MA_FALSE;
-                }
-            }
-        }
-        ma_mutex_unlock(&pState->operationLock);
-
-        if (completedOperations != 0) {
-            ma_device__on_notification_rerouted(pDevice);
-        }
-
-        if (!rerouteSucceeded) {
-            ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_WARNING, "[WASAPI] Device rerouting failed; the device remains stopped and detached.");
-        }
+        ma_device_process_notifications__wasapi(pState, pendingOperations);
     }
 
     #if !defined(MA_XBOX)
@@ -42784,11 +42919,31 @@ static ma_bool32 ma_context_is_backend_asynchronous(ma_context* pContext)
 
 static ma_result ma_device__post_init_setup(ma_device* pDevice, ma_device_type deviceType)
 {
-    ma_result result;
+    ma_result result = MA_SUCCESS;
+    ma_data_converter_config captureConverterConfig;
+    ma_data_converter_config playbackConverterConfig;
+    ma_bool32 setupCaptureConverter;
+    ma_bool32 setupPlaybackConverter;
+    ma_bool32 isCaptureConverterRetired = MA_FALSE;
+    ma_bool32 isPlaybackConverterRetired = MA_FALSE;
+    ma_bool32 isCaptureConverterInitialized = MA_FALSE;
+    ma_bool32 isPlaybackConverterInitialized = MA_FALSE;
+    void* pNewCaptureConverterHeap = NULL;
+    void* pNewPlaybackConverterHeap = NULL;
+    size_t newCaptureConverterHeapSize = 0;
+    size_t newPlaybackConverterHeapSize = 0;
+    void* pNewInputCache = NULL;
+    ma_uint64 newInputCacheCap = 0;
+    ma_bool32 isInputCacheRequired = MA_FALSE;
 
     MA_ASSERT(pDevice != NULL);
 
-    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_duplex || deviceType == ma_device_type_loopback) {
+    setupCaptureConverter = (deviceType == ma_device_type_capture || deviceType == ma_device_type_duplex || deviceType == ma_device_type_loopback);
+    setupPlaybackConverter = (deviceType == ma_device_type_playback || deviceType == ma_device_type_duplex);
+    captureConverterConfig = ma_data_converter_config_init_default();
+    playbackConverterConfig = ma_data_converter_config_init_default();
+
+    if (setupCaptureConverter) {
         if (pDevice->capture.format == ma_format_unknown) {
             pDevice->capture.format = pDevice->capture.internalFormat;
         }
@@ -42809,7 +42964,7 @@ static ma_result ma_device__post_init_setup(ma_device* pDevice, ma_device_type d
         }
     }
 
-    if (deviceType == ma_device_type_playback || deviceType == ma_device_type_duplex) {
+    if (setupPlaybackConverter) {
         if (pDevice->playback.format == ma_format_unknown) {
             pDevice->playback.format = pDevice->playback.internalFormat;
         }
@@ -42839,66 +42994,67 @@ static ma_result ma_device__post_init_setup(ma_device* pDevice, ma_device_type d
     }
 
     /* Data converters. */
-    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_duplex || deviceType == ma_device_type_loopback) {
+    if (setupCaptureConverter) {
         /* Converting from internal device format to client format. */
-        ma_data_converter_config converterConfig = ma_data_converter_config_init_default();
-        converterConfig.formatIn                        = pDevice->capture.internalFormat;
-        converterConfig.channelsIn                      = pDevice->capture.internalChannels;
-        converterConfig.sampleRateIn                    = pDevice->capture.internalSampleRate;
-        converterConfig.pChannelMapIn                   = pDevice->capture.internalChannelMap;
-        converterConfig.formatOut                       = pDevice->capture.format;
-        converterConfig.channelsOut                     = pDevice->capture.channels;
-        converterConfig.sampleRateOut                   = pDevice->sampleRate;
-        converterConfig.pChannelMapOut                  = pDevice->capture.channelMap;
-        converterConfig.channelMixMode                  = pDevice->capture.channelMixMode;
-        converterConfig.calculateLFEFromSpatialChannels = pDevice->capture.calculateLFEFromSpatialChannels;
-        converterConfig.allowDynamicSampleRate          = MA_FALSE;
-        converterConfig.resampling.algorithm            = pDevice->resampling.algorithm;
-        converterConfig.resampling.linear.lpfOrder      = pDevice->resampling.linear.lpfOrder;
-        converterConfig.resampling.pBackendVTable       = pDevice->resampling.pBackendVTable;
-        converterConfig.resampling.pBackendUserData     = pDevice->resampling.pBackendUserData;
+        captureConverterConfig.formatIn                        = pDevice->capture.internalFormat;
+        captureConverterConfig.channelsIn                      = pDevice->capture.internalChannels;
+        captureConverterConfig.sampleRateIn                    = pDevice->capture.internalSampleRate;
+        captureConverterConfig.pChannelMapIn                   = pDevice->capture.internalChannelMap;
+        captureConverterConfig.formatOut                       = pDevice->capture.format;
+        captureConverterConfig.channelsOut                     = pDevice->capture.channels;
+        captureConverterConfig.sampleRateOut                   = pDevice->sampleRate;
+        captureConverterConfig.pChannelMapOut                  = pDevice->capture.channelMap;
+        captureConverterConfig.channelMixMode                  = pDevice->capture.channelMixMode;
+        captureConverterConfig.calculateLFEFromSpatialChannels = pDevice->capture.calculateLFEFromSpatialChannels;
+        captureConverterConfig.allowDynamicSampleRate          = MA_FALSE;
+        captureConverterConfig.resampling.algorithm            = pDevice->resampling.algorithm;
+        captureConverterConfig.resampling.linear.lpfOrder      = pDevice->resampling.linear.lpfOrder;
+        captureConverterConfig.resampling.pBackendVTable       = pDevice->resampling.pBackendVTable;
+        captureConverterConfig.resampling.pBackendUserData     = pDevice->resampling.pBackendUserData;
 
-        /* Make sure the old converter is uninitialized first. */
-        if (ma_device_get_state(pDevice) != ma_device_state_uninitialized) {
-            ma_data_converter_uninit(&pDevice->capture.converter, &pDevice->pContext->allocationCallbacks);
-        }
-
-        result = ma_data_converter_init(&converterConfig, &pDevice->pContext->allocationCallbacks, &pDevice->capture.converter);
+        result = ma_data_converter_get_heap_size(&captureConverterConfig, &newCaptureConverterHeapSize);
         if (result != MA_SUCCESS) {
-            return result;
+            goto done;
+        }
+        if (newCaptureConverterHeapSize > 0) {
+            pNewCaptureConverterHeap = ma_malloc(newCaptureConverterHeapSize, &pDevice->pContext->allocationCallbacks);
+            if (pNewCaptureConverterHeap == NULL) {
+                result = MA_OUT_OF_MEMORY;
+                goto done;
+            }
         }
     }
 
-    if (deviceType == ma_device_type_playback || deviceType == ma_device_type_duplex) {
+    if (setupPlaybackConverter) {
         /* Converting from client format to device format. */
-        ma_data_converter_config converterConfig = ma_data_converter_config_init_default();
-        converterConfig.formatIn                        = pDevice->playback.format;
-        converterConfig.channelsIn                      = pDevice->playback.channels;
-        converterConfig.sampleRateIn                    = pDevice->sampleRate;
-        converterConfig.pChannelMapIn                   = pDevice->playback.channelMap;
-        converterConfig.formatOut                       = pDevice->playback.internalFormat;
-        converterConfig.channelsOut                     = pDevice->playback.internalChannels;
-        converterConfig.sampleRateOut                   = pDevice->playback.internalSampleRate;
-        converterConfig.pChannelMapOut                  = pDevice->playback.internalChannelMap;
-        converterConfig.channelMixMode                  = pDevice->playback.channelMixMode;
-        converterConfig.calculateLFEFromSpatialChannels = pDevice->playback.calculateLFEFromSpatialChannels;
-        converterConfig.allowDynamicSampleRate          = MA_FALSE;
-        converterConfig.resampling.algorithm            = pDevice->resampling.algorithm;
-        converterConfig.resampling.linear.lpfOrder      = pDevice->resampling.linear.lpfOrder;
-        converterConfig.resampling.pBackendVTable       = pDevice->resampling.pBackendVTable;
-        converterConfig.resampling.pBackendUserData     = pDevice->resampling.pBackendUserData;
+        playbackConverterConfig.formatIn                        = pDevice->playback.format;
+        playbackConverterConfig.channelsIn                      = pDevice->playback.channels;
+        playbackConverterConfig.sampleRateIn                    = pDevice->sampleRate;
+        playbackConverterConfig.pChannelMapIn                   = pDevice->playback.channelMap;
+        playbackConverterConfig.formatOut                       = pDevice->playback.internalFormat;
+        playbackConverterConfig.channelsOut                     = pDevice->playback.internalChannels;
+        playbackConverterConfig.sampleRateOut                   = pDevice->playback.internalSampleRate;
+        playbackConverterConfig.pChannelMapOut                  = pDevice->playback.internalChannelMap;
+        playbackConverterConfig.channelMixMode                  = pDevice->playback.channelMixMode;
+        playbackConverterConfig.calculateLFEFromSpatialChannels = pDevice->playback.calculateLFEFromSpatialChannels;
+        playbackConverterConfig.allowDynamicSampleRate          = MA_FALSE;
+        playbackConverterConfig.resampling.algorithm            = pDevice->resampling.algorithm;
+        playbackConverterConfig.resampling.linear.lpfOrder      = pDevice->resampling.linear.lpfOrder;
+        playbackConverterConfig.resampling.pBackendVTable       = pDevice->resampling.pBackendVTable;
+        playbackConverterConfig.resampling.pBackendUserData     = pDevice->resampling.pBackendUserData;
 
-        /* Make sure the old converter is uninitialized first. */
-        if (ma_device_get_state(pDevice) != ma_device_state_uninitialized) {
-            ma_data_converter_uninit(&pDevice->playback.converter, &pDevice->pContext->allocationCallbacks);
-        }
-
-        result = ma_data_converter_init(&converterConfig, &pDevice->pContext->allocationCallbacks, &pDevice->playback.converter);
+        result = ma_data_converter_get_heap_size(&playbackConverterConfig, &newPlaybackConverterHeapSize);
         if (result != MA_SUCCESS) {
-            return result;
+            goto done;
+        }
+        if (newPlaybackConverterHeapSize > 0) {
+            pNewPlaybackConverterHeap = ma_malloc(newPlaybackConverterHeapSize, &pDevice->pContext->allocationCallbacks);
+            if (pNewPlaybackConverterHeap == NULL) {
+                result = MA_OUT_OF_MEMORY;
+                goto done;
+            }
         }
     }
-
 
     /*
     If the device is doing playback (ma_device_type_playback or ma_device_type_duplex), there's
@@ -42919,49 +43075,123 @@ static ma_result ma_device__post_init_setup(ma_device* pDevice, ma_device_type d
     in fixed sized chunks and then cache any residual unused input frames, those of which will be
     processed at a later stage.
     */
-    if (deviceType == ma_device_type_playback || deviceType == ma_device_type_duplex) {
-        ma_uint64 unused;
+    if (setupPlaybackConverter && pDevice->type == ma_device_type_duplex) {
+        ma_uint64 newInputCacheSizeInBytes;
+        ma_uint32 bytesPerFrame;
 
-        pDevice->playback.inputCacheConsumed  = 0;
-        pDevice->playback.inputCacheRemaining = 0;
+        isInputCacheRequired = MA_TRUE;
+        newInputCacheCap = ma_calculate_frame_count_after_resampling(pDevice->playback.internalSampleRate, pDevice->sampleRate, pDevice->playback.internalPeriodSizeInFrames);
+        bytesPerFrame = ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels);
+        if (bytesPerFrame == 0 || newInputCacheCap > MA_UINT64_MAX / bytesPerFrame) {
+            result = MA_OUT_OF_MEMORY;
+            goto done;
+        }
 
-        if (pDevice->type == ma_device_type_duplex ||                                                                       /* Duplex. backend may decide to use ma_device_handle_backend_data_callback() which will require this cache. */
-            ma_data_converter_get_required_input_frame_count(&pDevice->playback.converter, 1, &unused) != MA_SUCCESS)       /* Data conversion required input frame calculation not supported. */
-        {
-            /* We need a heap allocated cache. We want to size this based on the period size. */
-            void* pNewInputCache;
-            ma_uint64 newInputCacheCap;
-            ma_uint64 newInputCacheSizeInBytes;
+        newInputCacheSizeInBytes = newInputCacheCap * bytesPerFrame;
+        if (newInputCacheSizeInBytes > MA_SIZE_MAX) {
+            result = MA_OUT_OF_MEMORY;
+            goto done;
+        }
 
-            newInputCacheCap = ma_calculate_frame_count_after_resampling(pDevice->playback.internalSampleRate, pDevice->sampleRate, pDevice->playback.internalPeriodSizeInFrames);
-
-            newInputCacheSizeInBytes = newInputCacheCap * ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels);
-            if (newInputCacheSizeInBytes > MA_SIZE_MAX) {
-                ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
-                pDevice->playback.pInputCache   = NULL;
-                pDevice->playback.inputCacheCap = 0;
-                return MA_OUT_OF_MEMORY;    /* Allocation too big. Should never hit this, but makes the cast below safer for 32-bit builds. */
-            }
-
-            pNewInputCache = ma_realloc(pDevice->playback.pInputCache, (size_t)newInputCacheSizeInBytes, &pDevice->pContext->allocationCallbacks);
-            if (pNewInputCache == NULL) {
-                ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
-                pDevice->playback.pInputCache   = NULL;
-                pDevice->playback.inputCacheCap = 0;
-                return MA_OUT_OF_MEMORY;
-            }
-
-            pDevice->playback.pInputCache   = pNewInputCache;
-            pDevice->playback.inputCacheCap = newInputCacheCap;
-        } else {
-            /* Heap allocation not required. Make sure we clear out the old cache just in case this function was called in response to a route change. */
-            ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
-            pDevice->playback.pInputCache   = NULL;
-            pDevice->playback.inputCacheCap = 0;
+        pNewInputCache = ma_malloc((size_t)newInputCacheSizeInBytes, &pDevice->pContext->allocationCallbacks);
+        if (pNewInputCache == NULL) {
+            result = MA_OUT_OF_MEMORY;
+            goto done;
         }
     }
 
-    return MA_SUCCESS;
+    /* Initialize converters at their permanent addresses; converter internals contain self-relative pointers. */
+    if (setupCaptureConverter) {
+        if (ma_device_get_state(pDevice) != ma_device_state_uninitialized) {
+            ma_data_converter_uninit(&pDevice->capture.converter, &pDevice->pContext->allocationCallbacks);
+        }
+        MA_ZERO_OBJECT(&pDevice->capture.converter);
+        isCaptureConverterRetired = MA_TRUE;
+
+        result = ma_data_converter_init_preallocated(&captureConverterConfig, pNewCaptureConverterHeap, &pDevice->capture.converter);
+        if (result != MA_SUCCESS) {
+            goto done;
+        }
+        pDevice->capture.converter._ownsHeap = MA_TRUE;
+        pNewCaptureConverterHeap = NULL;
+        isCaptureConverterInitialized = MA_TRUE;
+    }
+
+    if (setupPlaybackConverter) {
+        if (ma_device_get_state(pDevice) != ma_device_state_uninitialized) {
+            ma_data_converter_uninit(&pDevice->playback.converter, &pDevice->pContext->allocationCallbacks);
+        }
+        MA_ZERO_OBJECT(&pDevice->playback.converter);
+        isPlaybackConverterRetired = MA_TRUE;
+
+        result = ma_data_converter_init_preallocated(&playbackConverterConfig, pNewPlaybackConverterHeap, &pDevice->playback.converter);
+        if (result != MA_SUCCESS) {
+            goto done;
+        }
+        pDevice->playback.converter._ownsHeap = MA_TRUE;
+        pNewPlaybackConverterHeap = NULL;
+        isPlaybackConverterInitialized = MA_TRUE;
+
+        if (!isInputCacheRequired) {
+            ma_uint64 unused;
+            isInputCacheRequired = ma_data_converter_get_required_input_frame_count(&pDevice->playback.converter, 1, &unused) != MA_SUCCESS;
+        }
+
+        if (isInputCacheRequired && pNewInputCache == NULL) {
+            ma_uint64 newInputCacheSizeInBytes;
+            ma_uint32 bytesPerFrame;
+
+            newInputCacheCap = ma_calculate_frame_count_after_resampling(pDevice->playback.internalSampleRate, pDevice->sampleRate, pDevice->playback.internalPeriodSizeInFrames);
+            bytesPerFrame = ma_get_bytes_per_frame(pDevice->playback.format, pDevice->playback.channels);
+            if (bytesPerFrame == 0 || newInputCacheCap > MA_UINT64_MAX / bytesPerFrame) {
+                result = MA_OUT_OF_MEMORY;
+                goto done;
+            }
+
+            newInputCacheSizeInBytes = newInputCacheCap * bytesPerFrame;
+            if (newInputCacheSizeInBytes > MA_SIZE_MAX) {
+                result = MA_OUT_OF_MEMORY;
+                goto done;
+            }
+
+            pNewInputCache = ma_malloc((size_t)newInputCacheSizeInBytes, &pDevice->pContext->allocationCallbacks);
+            if (pNewInputCache == NULL) {
+                result = MA_OUT_OF_MEMORY;
+                goto done;
+            }
+        }
+
+        ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
+        pDevice->playback.pInputCache        = pNewInputCache;
+        pDevice->playback.inputCacheCap      = newInputCacheCap;
+        pDevice->playback.inputCacheConsumed = 0;
+        pDevice->playback.inputCacheRemaining = 0;
+        pNewInputCache = NULL;
+    }
+
+    result = MA_SUCCESS;
+
+done:
+    if (result != MA_SUCCESS) {
+        if (isCaptureConverterInitialized) {
+            ma_data_converter_uninit(&pDevice->capture.converter, &pDevice->pContext->allocationCallbacks);
+        }
+        if (isCaptureConverterRetired) {
+            MA_ZERO_OBJECT(&pDevice->capture.converter);
+        }
+        if (isPlaybackConverterInitialized) {
+            ma_data_converter_uninit(&pDevice->playback.converter, &pDevice->pContext->allocationCallbacks);
+        }
+        if (isPlaybackConverterRetired) {
+            MA_ZERO_OBJECT(&pDevice->playback.converter);
+        }
+    }
+
+    ma_free(pNewCaptureConverterHeap, &pDevice->pContext->allocationCallbacks);
+    ma_free(pNewPlaybackConverterHeap, &pDevice->pContext->allocationCallbacks);
+    ma_free(pNewInputCache, &pDevice->pContext->allocationCallbacks);
+
+    return result;
 }
 
 MA_API ma_result ma_device_post_init(ma_device* pDevice, ma_device_type deviceType, const ma_device_descriptor* pDescriptorPlayback, const ma_device_descriptor* pDescriptorCapture)
@@ -43048,6 +43278,28 @@ MA_API ma_result ma_device_post_init(ma_device* pDevice, ma_device_type deviceTy
     return ma_device__post_init_setup(pDevice, deviceType); /* TODO: Should probably rename ma_device__post_init_setup() to something better. */
 }
 
+static ma_bool32 ma_device__consume_internal_notification_suppression(ma_device* pDevice, ma_device_notification_type notificationType)
+{
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (pDevice != NULL && pDevice->pContext != NULL && pDevice->pContext->backend == ma_backend_wasapi) {
+        ma_device_notification_state__wasapi* pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        if (pNotificationState != NULL) {
+            if (notificationType == ma_device_notification_type_started) {
+                return ma_atomic_exchange_32(&pNotificationState->suppressStartedNotification, MA_FALSE);
+            }
+            if (notificationType == ma_device_notification_type_stopped) {
+                return ma_atomic_exchange_32(&pNotificationState->suppressStoppedNotification, MA_FALSE);
+            }
+        }
+    }
+#else
+    (void)pDevice;
+    (void)notificationType;
+#endif
+
+    return MA_FALSE;
+}
+
 
 static ma_thread_result MA_THREADCALL ma_worker_thread(void* pData)
 {
@@ -43074,6 +43326,8 @@ static ma_thread_result MA_THREADCALL ma_worker_thread(void* pData)
     for (;;) {  /* <-- This loop just keeps the thread alive. The main audio loop is inside. */
         ma_result startResult;
         ma_result stopResult;   /* <-- This will store the result from onDeviceStop(). If it returns an error, we don't fire the stopped notification callback. */
+        ma_bool32 suppressStartedNotification;
+        ma_bool32 suppressStoppedNotification;
 
         /* We wait on an event to know when something has requested that the device be started and the main loop entered. */
         ma_event_wait(&pDevice->wakeupEvent);
@@ -43099,6 +43353,7 @@ static ma_thread_result MA_THREADCALL ma_worker_thread(void* pData)
         } else {
             startResult = MA_SUCCESS;
         }
+        suppressStartedNotification = ma_device__consume_internal_notification_suppression(pDevice, ma_device_notification_type_started);
 
         /*
         If starting was not successful we'll need to loop back to the start and wait for something
@@ -43114,7 +43369,9 @@ static ma_thread_result MA_THREADCALL ma_worker_thread(void* pData)
         ma_device__set_state(pDevice, ma_device_state_started); /* <-- Set this before signaling the event so that the state is always guaranteed to be good after ma_device_start() has returned. */
         ma_event_signal(&pDevice->startEvent);
 
-        ma_device__on_notification_started(pDevice);
+        if (suppressStartedNotification == MA_FALSE) {
+            ma_device__on_notification_started(pDevice);
+        }
 
         if (pDevice->pContext->callbacks.onDeviceDataLoop != NULL) {
             pDevice->pContext->callbacks.onDeviceDataLoop(pDevice);
@@ -43129,13 +43386,14 @@ static ma_thread_result MA_THREADCALL ma_worker_thread(void* pData)
         } else {
             stopResult = MA_SUCCESS;    /* No stop callback with the backend. Just assume successful. */
         }
+        suppressStoppedNotification = ma_device__consume_internal_notification_suppression(pDevice, ma_device_notification_type_stopped);
 
         /*
         After the device has stopped, make sure an event is posted. Don't post a stopped event if
         stopping failed. This can happen on some backends when the underlying stream has been
         stopped due to the device being physically unplugged or disabled via an OS setting.
         */
-        if (stopResult == MA_SUCCESS) {
+        if (stopResult == MA_SUCCESS && suppressStoppedNotification == MA_FALSE) {
             ma_device__on_notification_stopped(pDevice);
         }
 

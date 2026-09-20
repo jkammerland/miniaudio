@@ -767,6 +767,9 @@ if(MINIAUDIO_BUILD_TESTS)
     add_miniaudio_test(miniaudio_hardening_engine_eof hardening/hardening_engine_eof.c)
     add_test(NAME miniaudio_hardening_engine_eof COMMAND miniaudio_hardening_engine_eof)
 
+    add_miniaudio_test(miniaudio_hardening_device_post_init hardening/hardening_device_post_init.c)
+    add_test(NAME miniaudio_hardening_device_post_init COMMAND miniaudio_hardening_device_post_init)
+
     if(WIN32)
         add_miniaudio_test(miniaudio_hardening_wasapi_lifecycle hardening/hardening_wasapi_lifecycle.c)
         add_test(NAME miniaudio_hardening_wasapi_lifecycle COMMAND miniaudio_hardening_wasapi_lifecycle)
