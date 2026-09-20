@@ -756,6 +756,13 @@ if(MINIAUDIO_BUILD_TESTS)
 
     add_miniaudio_test(miniaudio_hardening_mp3 hardening/hardening_mp3.c)
     add_test(NAME miniaudio_hardening_mp3 COMMAND miniaudio_hardening_mp3)
+
+    add_miniaudio_test(miniaudio_hardening_gainer hardening/hardening_gainer.c)
+    add_test(NAME miniaudio_hardening_gainer COMMAND miniaudio_hardening_gainer)
+
+    add_miniaudio_test(miniaudio_hardening_gainer_scalar hardening/hardening_gainer.c)
+    target_compile_definitions(miniaudio_hardening_gainer_scalar PRIVATE MA_NO_SSE2)
+    add_test(NAME miniaudio_hardening_gainer_scalar COMMAND miniaudio_hardening_gainer_scalar)
 endif()
 
 # Examples
