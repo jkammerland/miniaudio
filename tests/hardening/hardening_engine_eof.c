@@ -65,12 +65,12 @@ static int engine_eof_test_format(ma_format format)
     ma_sound_start(&sound);
     result = ma_engine_read_pcm_frames(&engine, output, EOF_TEST_RENDER_FRAMES, &framesRead);
     if (result != MA_SUCCESS || framesRead != EOF_TEST_RENDER_FRAMES) {
-        printf("engine render failed for format %d: result=%d frames=%llu\n", format, result, (unsigned long long)framesRead);
+        printf("engine render failed for format %d: result=%d frames=%u:%08u\n", format, result, (ma_uint32)(framesRead >> 32), (ma_uint32)framesRead);
         failed = 1;
     }
     for (i = 0; i < EOF_TEST_RENDER_FRAMES; i += 1) {
         float expected = i < EOF_TEST_SOURCE_FRAMES ? 0.5f : 0.0f;
-        if (fabsf(output[i] - expected) > 0.00001f) {
+        if (fabs((double)output[i] - (double)expected) > 0.00001) {
             printf("engine EOF mismatch for format %d at frame %u: %f != %f\n", format, i, output[i], expected);
             failed = 1;
             break;

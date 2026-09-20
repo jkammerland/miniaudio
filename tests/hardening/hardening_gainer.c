@@ -10,7 +10,7 @@
 
 static int gainer_near(float actual, float expected)
 {
-    return fabsf(actual - expected) <= 0.00001f;
+    return fabs((double)actual - (double)expected) <= 0.00001;
 }
 
 static int gainer_run_ramp(ma_uint32 channels, ma_uint32 smoothFrames, const ma_uint32* pBlocks, ma_uint32 blockCount, ma_bool32 inPlace)

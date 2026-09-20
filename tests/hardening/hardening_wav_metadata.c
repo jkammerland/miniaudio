@@ -179,7 +179,7 @@ static int metadata_test_smpl(void)
         ma_dr_wav_uninit(&wav);
     }
     if (state.largestRequest > 1024 * 1024) {
-        printf("hostile SMPL requested %zu bytes\n", state.largestRequest);
+        printf("hostile SMPL requested %lu bytes\n", (unsigned long)state.largestRequest);
         return 1;
     }
 

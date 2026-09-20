@@ -69,9 +69,9 @@ static int mp3_test_frame_count(void)
         return 1;
     }
     if (mp3.totalPCMFrameCount != expectedFrameCount) {
-        printf("MP3 frame count was %llu, expected %llu\n",
-            (unsigned long long)mp3.totalPCMFrameCount,
-            (unsigned long long)expectedFrameCount);
+        printf("MP3 frame count was %u:%08u, expected %u:%08u\n",
+            (ma_uint32)(mp3.totalPCMFrameCount >> 32), (ma_uint32)mp3.totalPCMFrameCount,
+            (ma_uint32)(expectedFrameCount >> 32), (ma_uint32)expectedFrameCount);
         ma_dr_mp3_uninit(&mp3);
         return 1;
     }
@@ -99,11 +99,11 @@ static int mp3_test_full_decode_allocation(void)
         ma_free(pFrames, &config.allocationCallbacks);
     }
     if (result != MA_SUCCESS || frameCount == 0) {
-        printf("issue 1117 fixture failed full decode: result=%d frames=%llu\n", result, (unsigned long long)frameCount);
+        printf("issue 1117 fixture failed full decode: result=%d frames=%u:%08u\n", result, (ma_uint32)(frameCount >> 32), (ma_uint32)frameCount);
         return 1;
     }
     if (state.largestRequest > 1024 * 1024) {
-        printf("hostile MP3 length requested %zu bytes\n", state.largestRequest);
+        printf("hostile MP3 length requested %lu bytes\n", (unsigned long)state.largestRequest);
         return 1;
     }
     return 0;
