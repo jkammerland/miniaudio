@@ -8,11 +8,9 @@ By implementing this as a node, it can be plugged into any position within the g
 channel count of this node is always stereo.
 
 Steam Audio requires fixed sized processing, the size of which must be specified at initialization
-time of the IPLBinauralEffect and IPLHRTF objects. To ensure miniaudio and Steam Audio are
-consistent, you must set the period size in the engine config to be consistent with the frame size
-you specify in your IPLAudioSettings object. If for some reason you want the period size of the
-engine to be different to that of your Steam Audio configuration, you'll need to implement a sort
-of buffering solution to your node.
+time of the IPLBinauralEffect and IPLHRTF objects. The node below stages input into fixed Steam
+Audio blocks, so miniaudio callbacks may use any frame count. This adds one Steam Audio block of
+latency and lets the node safely flush a short final block and the effect tail.
 */
 #include "../miniaudio.c"
 
@@ -59,6 +57,63 @@ typedef struct
 MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_init(ma_uint32 channelsIn, IPLAudioSettings iplAudioSettings, IPLContext iplContext, IPLHRTF iplHRTF);
 
 
+#define MA_STEAMAUDIO_DIRECTION_INDEX_MASK  0x00000003U
+#define MA_STEAMAUDIO_DIRECTION_DIRTY       0x80000000U
+
+#ifndef MA_STEAMAUDIO_DIRECTION_PUBLISH_AFTER_WRITE
+    #define MA_STEAMAUDIO_DIRECTION_PUBLISH_AFTER_WRITE()  ((void)0)
+#endif
+#ifndef MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_LOAD
+    #define MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_LOAD()   ((void)0)
+#endif
+#ifndef MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_EXCHANGE
+    #define MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_EXCHANGE() ((void)0)
+#endif
+
+typedef struct
+{
+    ma_vec3f snapshots[3];
+    ma_uint32 frontIndex;              /* Audio thread only. */
+    ma_uint32 backIndex;               /* Control thread only. */
+    volatile ma_uint32 middleState;    /* Shared index plus dirty bit. */
+} ma_steamaudio_direction_state;
+
+static void ma_steamaudio_direction_state_init(ma_steamaudio_direction_state* pState, ma_vec3f direction)
+{
+    pState->snapshots[0] = direction;
+    pState->snapshots[1] = direction;
+    pState->snapshots[2] = direction;
+    pState->frontIndex = 0;
+    pState->backIndex = 2;
+    ma_atomic_store_32(&pState->middleState, 1);
+}
+
+static void ma_steamaudio_direction_state_publish(ma_steamaudio_direction_state* pState, ma_vec3f direction)
+{
+    ma_uint32 previousMiddleState;
+
+    /* This side is single-publisher. The audio thread is the only consumer. */
+    pState->snapshots[pState->backIndex] = direction;
+    MA_STEAMAUDIO_DIRECTION_PUBLISH_AFTER_WRITE();
+    previousMiddleState = ma_atomic_exchange_32(&pState->middleState, pState->backIndex | MA_STEAMAUDIO_DIRECTION_DIRTY);
+    pState->backIndex = previousMiddleState & MA_STEAMAUDIO_DIRECTION_INDEX_MASK;
+}
+
+static ma_vec3f ma_steamaudio_direction_state_consume(ma_steamaudio_direction_state* pState)
+{
+    ma_uint32 middleState = ma_atomic_load_32(&pState->middleState);
+
+    MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_LOAD();
+    if ((middleState & MA_STEAMAUDIO_DIRECTION_DIRTY) != 0) {
+        middleState = ma_atomic_exchange_32(&pState->middleState, pState->frontIndex);
+        pState->frontIndex = middleState & MA_STEAMAUDIO_DIRECTION_INDEX_MASK;
+        MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_EXCHANGE();
+    }
+
+    return pState->snapshots[pState->frontIndex];
+}
+
+
 typedef struct
 {
     ma_node_base baseNode;
@@ -66,7 +121,11 @@ typedef struct
     IPLContext iplContext;
     IPLHRTF iplHRTF;
     IPLBinauralEffect iplEffect;
-    ma_vec3f direction;
+    ma_steamaudio_direction_state directionState;
+    ma_uint32 inputFrameCount;
+    ma_uint32 outputFrameOffset;
+    ma_uint32 outputFrameCount;
+    ma_bool32 tailComplete;
     float* ppBuffersIn[2];      /* Each buffer is an offset of _pHeap. */
     float* ppBuffersOut[2];     /* Each buffer is an offset of _pHeap. */
     void* _pHeap;
@@ -92,58 +151,180 @@ MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_ini
 }
 
 
-static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+static void ma_steamaudio_binaural_node_process_block(ma_steamaudio_binaural_node* pBinauralNode)
 {
-    ma_steamaudio_binaural_node* pBinauralNode = (ma_steamaudio_binaural_node*)pNode;
     IPLBinauralEffectParams binauralParams;
     IPLAudioBuffer inputBufferDesc;
     IPLAudioBuffer outputBufferDesc;
-    ma_uint32 totalFramesToProcess = *pFrameCountOut;
-    ma_uint32 totalFramesProcessed = 0;
+    ma_vec3f direction;
+    IPLAudioEffectState effectState;
 
+    direction = ma_steamaudio_direction_state_consume(&pBinauralNode->directionState);
     MA_ZERO_OBJECT(&binauralParams);
-    binauralParams.direction.x   = pBinauralNode->direction.x;
-    binauralParams.direction.y   = pBinauralNode->direction.y;
-    binauralParams.direction.z   = pBinauralNode->direction.z;
+    binauralParams.direction.x   = direction.x;
+    binauralParams.direction.y   = direction.y;
+    binauralParams.direction.z   = direction.z;
     binauralParams.interpolation = IPL_HRTFINTERPOLATION_NEAREST;
     binauralParams.spatialBlend  = 1.0f;
     binauralParams.hrtf          = pBinauralNode->iplHRTF;
 
-    inputBufferDesc.numChannels = (IPLint32)ma_node_get_input_channels(pNode, 0);
-
-    /* We'll run this in a loop just in case our deinterleaved buffers are too small. */
+    inputBufferDesc.numChannels  = (IPLint32)ma_node_get_input_channels(&pBinauralNode->baseNode, 0);
+    inputBufferDesc.numSamples   = pBinauralNode->iplAudioSettings.frameSize;
+    inputBufferDesc.data         = pBinauralNode->ppBuffersIn;
     outputBufferDesc.numSamples  = pBinauralNode->iplAudioSettings.frameSize;
     outputBufferDesc.numChannels = 2;
     outputBufferDesc.data        = pBinauralNode->ppBuffersOut;
 
-    while (totalFramesProcessed < totalFramesToProcess) {
-        ma_uint32 framesToProcessThisIteration = totalFramesToProcess - totalFramesProcessed;
-        if (framesToProcessThisIteration > (ma_uint32)pBinauralNode->iplAudioSettings.frameSize) {
-            framesToProcessThisIteration = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
-        }
+    effectState = iplBinauralEffectApply(pBinauralNode->iplEffect, &binauralParams, &inputBufferDesc, &outputBufferDesc);
+    pBinauralNode->inputFrameCount = 0;
+    pBinauralNode->outputFrameOffset = 0;
+    pBinauralNode->outputFrameCount = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+    pBinauralNode->tailComplete = (effectState == IPL_AUDIOEFFECTSTATE_TAILCOMPLETE);
+}
 
-        if (inputBufferDesc.numChannels == 1) {
-            /* Fast path. No need for deinterleaving since it's a mono stream. */
-            pBinauralNode->ppBuffersIn[0] = (float*)ma_offset_pcm_frames_const_ptr_f32(ppFramesIn[0], totalFramesProcessed, 1);
-        } else {
-            /* Slow path. Need to deinterleave the input data. */
-            ma_deinterleave_pcm_frames(ma_format_f32, inputBufferDesc.numChannels, framesToProcessThisIteration, ma_offset_pcm_frames_const_ptr_f32(ppFramesIn[0], totalFramesProcessed, inputBufferDesc.numChannels), (void**)&pBinauralNode->ppBuffersIn[0]);
-        }
+static void ma_steamaudio_binaural_node_process_tail_block(ma_steamaudio_binaural_node* pBinauralNode)
+{
+    IPLAudioBuffer outputBufferDesc;
+    IPLAudioEffectState effectState;
 
-        inputBufferDesc.data       = pBinauralNode->ppBuffersIn;
-        inputBufferDesc.numSamples = (IPLint32)framesToProcessThisIteration;
+    outputBufferDesc.numSamples  = pBinauralNode->iplAudioSettings.frameSize;
+    outputBufferDesc.numChannels = 2;
+    outputBufferDesc.data        = pBinauralNode->ppBuffersOut;
 
-        /* Apply the effect. */
-        iplBinauralEffectApply(pBinauralNode->iplEffect, &binauralParams, &inputBufferDesc, &outputBufferDesc);
+    effectState = iplBinauralEffectGetTail(pBinauralNode->iplEffect, &outputBufferDesc);
+    pBinauralNode->outputFrameOffset = 0;
+    pBinauralNode->outputFrameCount = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+    pBinauralNode->tailComplete = (effectState == IPL_AUDIOEFFECTSTATE_TAILCOMPLETE);
+}
 
-        /* Interleave straight into the output buffer. */
-        ma_interleave_pcm_frames(ma_format_f32, 2, framesToProcessThisIteration, (const void**)&pBinauralNode->ppBuffersOut[0], ma_offset_pcm_frames_ptr_f32(ppFramesOut[0], totalFramesProcessed, 2));
+static void ma_steamaudio_binaural_node_copy_input(ma_steamaudio_binaural_node* pBinauralNode, const float* pFramesIn, ma_uint32 frameOffset, ma_uint32 frameCount)
+{
+    ma_uint32 channelsIn = ma_node_get_input_channels(&pBinauralNode->baseNode, 0);
 
-        /* Advance. */
-        totalFramesProcessed += framesToProcessThisIteration;
+    if (channelsIn == 1) {
+        ma_copy_pcm_frames(pBinauralNode->ppBuffersIn[0] + pBinauralNode->inputFrameCount, pFramesIn + frameOffset, frameCount, ma_format_f32, 1);
+    } else {
+        void* ppDeinterleaved[2];
+        ppDeinterleaved[0] = pBinauralNode->ppBuffersIn[0] + pBinauralNode->inputFrameCount;
+        ppDeinterleaved[1] = pBinauralNode->ppBuffersIn[1] + pBinauralNode->inputFrameCount;
+        ma_deinterleave_pcm_frames(ma_format_f32, channelsIn, frameCount, ma_offset_pcm_frames_const_ptr_f32(pFramesIn, frameOffset, channelsIn), ppDeinterleaved);
     }
 
-    (void)pFrameCountIn;    /* Unused. */
+    pBinauralNode->inputFrameCount += frameCount;
+}
+
+static void ma_steamaudio_binaural_node_copy_output(ma_steamaudio_binaural_node* pBinauralNode, float* pFramesOut, ma_uint32 frameOffset, ma_uint32 frameCount)
+{
+    const void* ppDeinterleaved[2];
+
+    if (pFramesOut != NULL) {
+        ppDeinterleaved[0] = pBinauralNode->ppBuffersOut[0] + pBinauralNode->outputFrameOffset;
+        ppDeinterleaved[1] = pBinauralNode->ppBuffersOut[1] + pBinauralNode->outputFrameOffset;
+        ma_interleave_pcm_frames(ma_format_f32, 2, frameCount, ppDeinterleaved, ma_offset_pcm_frames_ptr_f32(pFramesOut, frameOffset, 2));
+    }
+
+    pBinauralNode->outputFrameOffset += frameCount;
+    pBinauralNode->outputFrameCount -= frameCount;
+    if (pBinauralNode->outputFrameCount == 0) {
+        pBinauralNode->outputFrameOffset = 0;
+    }
+}
+
+static void ma_steamaudio_binaural_node_flush_partial_input(ma_steamaudio_binaural_node* pBinauralNode)
+{
+    ma_uint32 iChannel;
+    ma_uint32 channelsIn = ma_node_get_input_channels(&pBinauralNode->baseNode, 0);
+    ma_uint32 frameSize = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+
+    for (iChannel = 0; iChannel < channelsIn; iChannel += 1) {
+        ma_silence_pcm_frames(pBinauralNode->ppBuffersIn[iChannel] + pBinauralNode->inputFrameCount, frameSize - pBinauralNode->inputFrameCount, ma_format_f32, 1);
+    }
+    pBinauralNode->inputFrameCount = frameSize;
+    ma_steamaudio_binaural_node_process_block(pBinauralNode);
+}
+
+static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const float** ppFramesIn, ma_uint32* pFrameCountIn, float** ppFramesOut, ma_uint32* pFrameCountOut)
+{
+    ma_steamaudio_binaural_node* pBinauralNode = (ma_steamaudio_binaural_node*)pNode;
+    const float* pFramesIn = (ppFramesIn != NULL) ? ppFramesIn[0] : NULL;
+    float* pFramesOut = (ppFramesOut != NULL) ? ppFramesOut[0] : NULL;
+    ma_uint32 inputFrameCount = (pFramesIn != NULL && pFrameCountIn != NULL) ? *pFrameCountIn : 0;
+    ma_uint32 outputFrameCapacity = *pFrameCountOut;
+    ma_uint32 inputFramesConsumed = 0;
+    ma_uint32 outputFramesProduced = 0;
+    ma_uint32 frameSize = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+
+    while (outputFramesProduced < outputFrameCapacity) {
+        ma_uint32 framesThisIteration = outputFrameCapacity - outputFramesProduced;
+
+        if (pBinauralNode->inputFrameCount == frameSize && pBinauralNode->outputFrameCount == 0) {
+            ma_steamaudio_binaural_node_process_block(pBinauralNode);
+        }
+
+        if (pFramesIn == NULL && inputFramesConsumed == inputFrameCount && pBinauralNode->outputFrameCount == 0) {
+            if (pBinauralNode->inputFrameCount > 0) {
+                ma_steamaudio_binaural_node_flush_partial_input(pBinauralNode);
+                continue;
+            }
+            if (!pBinauralNode->tailComplete) {
+                ma_steamaudio_binaural_node_process_tail_block(pBinauralNode);
+                continue;
+            }
+
+            if (pFramesOut != NULL) {
+                ma_silence_pcm_frames(ma_offset_pcm_frames_ptr_f32(pFramesOut, outputFramesProduced, 2), outputFrameCapacity - outputFramesProduced, ma_format_f32, 2);
+            }
+            outputFramesProduced = outputFrameCapacity;
+            break;
+        }
+
+        if (pBinauralNode->outputFrameCount > 0 && framesThisIteration > pBinauralNode->outputFrameCount) {
+            framesThisIteration = pBinauralNode->outputFrameCount;
+        }
+
+        if (inputFramesConsumed < inputFrameCount) {
+            ma_uint32 inputFramesRemaining = inputFrameCount - inputFramesConsumed;
+            ma_uint32 inputFrameSpace = frameSize - pBinauralNode->inputFrameCount;
+            if (framesThisIteration > inputFramesRemaining) {
+                framesThisIteration = inputFramesRemaining;
+            }
+            if (framesThisIteration > inputFrameSpace) {
+                framesThisIteration = inputFrameSpace;
+            }
+        } else if (pBinauralNode->outputFrameCount == 0) {
+            if (pFramesOut != NULL) {
+                ma_silence_pcm_frames(ma_offset_pcm_frames_ptr_f32(pFramesOut, outputFramesProduced, 2), outputFrameCapacity - outputFramesProduced, ma_format_f32, 2);
+            }
+            outputFramesProduced = outputFrameCapacity;
+            break;
+        }
+
+        if (framesThisIteration == 0) {
+            break;
+        }
+
+        if (inputFramesConsumed < inputFrameCount) {
+            ma_steamaudio_binaural_node_copy_input(pBinauralNode, pFramesIn, inputFramesConsumed, framesThisIteration);
+            inputFramesConsumed += framesThisIteration;
+        }
+
+        if (pBinauralNode->outputFrameCount > 0) {
+            ma_steamaudio_binaural_node_copy_output(pBinauralNode, pFramesOut, outputFramesProduced, framesThisIteration);
+        } else if (pFramesOut != NULL) {
+            ma_silence_pcm_frames(ma_offset_pcm_frames_ptr_f32(pFramesOut, outputFramesProduced, 2), framesThisIteration, ma_format_f32, 2);
+        }
+        outputFramesProduced += framesThisIteration;
+    }
+
+    /* Prepare a completed fixed block for the next callback without adding callback-time latency. */
+    if (pBinauralNode->inputFrameCount == frameSize && pBinauralNode->outputFrameCount == 0) {
+        ma_steamaudio_binaural_node_process_block(pBinauralNode);
+    }
+
+    if (pFrameCountIn != NULL) {
+        *pFrameCountIn = inputFramesConsumed;
+    }
+    *pFrameCountOut = outputFramesProduced;
 }
 
 static ma_node_vtable g_ma_steamaudio_binaural_node_vtable =
@@ -152,7 +333,7 @@ static ma_node_vtable g_ma_steamaudio_binaural_node_vtable =
     NULL,
     1,  /* 1 input channel. */
     1,  /* 1 output channel. */
-    0
+    MA_NODE_FLAG_CONTINUOUS_PROCESSING | MA_NODE_FLAG_ALLOW_NULL_INPUT
 };
 
 MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, const ma_steamaudio_binaural_node_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_steamaudio_binaural_node* pBinauralNode)
@@ -163,6 +344,8 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
     ma_uint32 channelsOut;
     IPLBinauralEffectSettings iplBinauralEffectSettings;
     size_t heapSizeInBytes;
+    size_t frameSize;
+    ma_vec3f initialDirection;
 
     if (pBinauralNode == NULL) {
         return MA_INVALID_ARGS;
@@ -170,7 +353,7 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
 
     MA_ZERO_OBJECT(pBinauralNode);
 
-    if (pConfig == NULL || pConfig->iplAudioSettings.frameSize == 0 || pConfig->iplContext == NULL || pConfig->iplHRTF == NULL) {
+    if (pConfig == NULL || pConfig->iplAudioSettings.frameSize <= 0 || pConfig->iplAudioSettings.samplingRate <= 0 || pConfig->iplContext == NULL || pConfig->iplHRTF == NULL) {
         return MA_INVALID_ARGS;
     }
 
@@ -182,7 +365,7 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
     channelsIn  = pConfig->channelsIn;
     channelsOut = 2;    /* Always stereo output. */
 
-    baseConfig = ma_node_config_init();
+    baseConfig = pConfig->nodeConfig;
     baseConfig.vtable          = &g_ma_steamaudio_binaural_node_vtable;
     baseConfig.pInputChannels  = &channelsIn;
     baseConfig.pOutputChannels = &channelsOut;
@@ -192,31 +375,52 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
     }
 
     pBinauralNode->iplAudioSettings = pConfig->iplAudioSettings;
-    pBinauralNode->iplContext       = pConfig->iplContext;
-    pBinauralNode->iplHRTF          = pConfig->iplHRTF;
+    pBinauralNode->iplContext       = iplContextRetain(pConfig->iplContext);
+    pBinauralNode->iplHRTF          = iplHRTFRetain(pConfig->iplHRTF);
+    if (pBinauralNode->iplContext == NULL || pBinauralNode->iplHRTF == NULL) {
+        iplHRTFRelease(&pBinauralNode->iplHRTF);
+        iplContextRelease(&pBinauralNode->iplContext);
+        ma_node_uninit(&pBinauralNode->baseNode, pAllocationCallbacks);
+        return MA_ERROR;
+    }
+
+    initialDirection.x = 0;
+    initialDirection.y = 0;
+    initialDirection.z = -1;
+    ma_steamaudio_direction_state_init(&pBinauralNode->directionState, initialDirection);
+    pBinauralNode->tailComplete = MA_TRUE;
 
     MA_ZERO_OBJECT(&iplBinauralEffectSettings);
     iplBinauralEffectSettings.hrtf = pBinauralNode->iplHRTF;
 
     result = ma_result_from_IPLerror(iplBinauralEffectCreate(pBinauralNode->iplContext, &pBinauralNode->iplAudioSettings, &iplBinauralEffectSettings, &pBinauralNode->iplEffect));
     if (result != MA_SUCCESS) {
+        iplHRTFRelease(&pBinauralNode->iplHRTF);
+        iplContextRelease(&pBinauralNode->iplContext);
         ma_node_uninit(&pBinauralNode->baseNode, pAllocationCallbacks);
         return result;
     }
 
-    heapSizeInBytes = 0;
+    frameSize = (size_t)pBinauralNode->iplAudioSettings.frameSize;
+    if (frameSize > MA_SIZE_MAX / sizeof(float) / (channelsIn + channelsOut)) {
+        iplBinauralEffectRelease(&pBinauralNode->iplEffect);
+        iplHRTFRelease(&pBinauralNode->iplHRTF);
+        iplContextRelease(&pBinauralNode->iplContext);
+        ma_node_uninit(&pBinauralNode->baseNode, pAllocationCallbacks);
+        return MA_TOO_BIG;
+    }
+    heapSizeInBytes = sizeof(float) * frameSize * (channelsIn + channelsOut);
 
     /*
     Unfortunately Steam Audio uses deinterleaved buffers for everything so we'll need to use some
     intermediary buffers. We'll allocate one big buffer on the heap and then use offsets. We'll
     use the frame size from the IPLAudioSettings structure as a basis for the size of the buffer.
     */
-    heapSizeInBytes += sizeof(float) * channelsOut * pBinauralNode->iplAudioSettings.frameSize; /* Output buffer. */
-    heapSizeInBytes += sizeof(float) * channelsIn  * pBinauralNode->iplAudioSettings.frameSize; /* Input buffer. */
-
     pBinauralNode->_pHeap = ma_malloc(heapSizeInBytes, pAllocationCallbacks);
     if (pBinauralNode->_pHeap == NULL) {
         iplBinauralEffectRelease(&pBinauralNode->iplEffect);
+        iplHRTFRelease(&pBinauralNode->iplHRTF);
+        iplContextRelease(&pBinauralNode->iplContext);
         ma_node_uninit(&pBinauralNode->baseNode, pAllocationCallbacks);
         return MA_OUT_OF_MEMORY;
     }
@@ -248,6 +452,8 @@ MA_API void ma_steamaudio_binaural_node_uninit(ma_steamaudio_binaural_node* pBin
     first to ensure these objects aren't getting used by the audio thread.
     */
     iplBinauralEffectRelease(&pBinauralNode->iplEffect);
+    iplHRTFRelease(&pBinauralNode->iplHRTF);
+    iplContextRelease(&pBinauralNode->iplContext);
     ma_free(pBinauralNode->_pHeap, pAllocationCallbacks);
 }
 
@@ -257,16 +463,20 @@ MA_API ma_result ma_steamaudio_binaural_node_set_direction(ma_steamaudio_binaura
         return MA_INVALID_ARGS;
     }
 
-    pBinauralNode->direction.x = x;
-    pBinauralNode->direction.y = y;
-    pBinauralNode->direction.z = z;
+    {
+        ma_vec3f direction;
+        direction.x = x;
+        direction.y = y;
+        direction.z = z;
+        ma_steamaudio_direction_state_publish(&pBinauralNode->directionState, direction);
+    }
 
     return MA_SUCCESS;
 }
 
 
 
-
+#ifndef MA_STEAMAUDIO_NO_MAIN
 static ma_engine g_engine;
 static ma_sound g_sound;            /* This example will play only a single sound at once, so we only need one `ma_sound` object. */
 static ma_steamaudio_binaural_node g_binauralNode;   /* The echo effect is achieved using a delay node. */
@@ -292,11 +502,8 @@ int main(int argc, char** argv)
     engineConfig.sampleRate = SAMPLE_RATE;
 
     /*
-    Steam Audio requires processing in fixed sized chunks. Setting the period size in the engine config will
-    ensure our updates happen in predicably sized chunks as required by Steam Audio.
-
-    Note that the configuration of Steam Audio below (IPLAudioSettings) will use this variable to specify the
-    update size to ensure it remains consistent.
+    Steam Audio requires processing in fixed sized chunks. Matching the engine period size avoids extra
+    staging delay in this example, but the node also supports callbacks that are shorter or longer.
     */
     engineConfig.periodSizeInFrames = 256;
 
@@ -318,8 +525,8 @@ int main(int argc, char** argv)
     need not be exposed to the public API. There should be no need for the public API to require a
     fixed sized update.
 
-    It's important that this be set to the periodSizeInFrames specified in the engine config above.
-    This ensures updates on both the miniaudio side and the Steam Audio side are consistent.
+    This example uses the engine period size to keep the relationship easy to understand. The node stages
+    arbitrary miniaudio callback sizes into this fixed Steam Audio frame size.
     */
     iplAudioSettings.frameSize = engineConfig.periodSizeInFrames;
 
@@ -446,3 +653,4 @@ int main(int argc, char** argv)
 
     return 0;
 }
+#endif
