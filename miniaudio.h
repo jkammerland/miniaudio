@@ -21718,7 +21718,11 @@ WASAPI Backend
 #endif
 #endif  /* 0 */
 
-static ma_result ma_device_reroute__wasapi(ma_device* pDevice, ma_device_type deviceType);
+static ma_result ma_device_start__internal(ma_device* pDevice, ma_bool32 updateRequestedState);
+static ma_result ma_device_stop__internal(ma_device* pDevice, ma_bool32 updateRequestedState);
+#if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void* pUserData);
+#endif
 
 /* Some compilers don't define VerifyVersionInfoW. Need to write this ourselves. */
 #define MA_WIN32_WINNT_VISTA    0x0600
@@ -22332,6 +22336,55 @@ static void ma_completion_handler_uwp_wait(ma_completion_handler_uwp* pHandler)
 
 /* We need a virtual table for our notification client object that's used for detecting changes to the default device. */
 #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+typedef struct
+{
+    ma_device* pDevice;
+    ma_IMMDeviceEnumerator* pDeviceEnumerator;
+    ma_thread thread;
+    ma_event wakeEvent;
+    ma_event commandEvent;
+    ma_event quiesceEvent;
+    ma_mutex operationLock;
+    volatile ma_uint32 pendingOperations;
+    volatile ma_uint32 acceptingNotifications;
+    volatile ma_uint32 requestedStarted;
+} ma_device_notification_state__wasapi;
+
+#define MA_WASAPI_NOTIFICATION_OP_RENDER   0x00000001
+#define MA_WASAPI_NOTIFICATION_OP_CAPTURE  0x00000002
+#define MA_WASAPI_NOTIFICATION_OP_STATE    0x00000004
+#define MA_WASAPI_NOTIFICATION_OP_QUIT     0x80000000
+
+static ma_device_notification_state__wasapi* ma_device_notification_state_from_device__wasapi(ma_device* pDevice)
+{
+    if (pDevice == NULL) {
+        return NULL;
+    }
+
+    return (ma_device_notification_state__wasapi*)pDevice->wasapi.pDeviceEnumerator;
+}
+
+static ma_device_notification_state__wasapi* ma_device_notification_state_from_client__wasapi(ma_IMMNotificationClient* pClient)
+{
+    if (pClient == NULL) {
+        return NULL;
+    }
+
+    return ma_device_notification_state_from_device__wasapi(pClient->pDevice);
+}
+
+static void ma_device_notification_publish__wasapi(ma_IMMNotificationClient* pClient, ma_uint32 operations)
+{
+    ma_device_notification_state__wasapi* pState = ma_device_notification_state_from_client__wasapi(pClient);
+
+    if (pState == NULL || ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
+        return;
+    }
+
+    ma_atomic_fetch_or_32(&pState->pendingOperations, operations);
+    ma_event_signal(&pState->wakeEvent);
+}
+
 static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_QueryInterface(ma_IMMNotificationClient* pThis, const IID* const riid, void** ppObject)
 {
     /*
@@ -22357,6 +22410,12 @@ static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_AddRef(ma_IMMNotificatio
 static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_Release(ma_IMMNotificationClient* pThis)
 {
     ma_uint32 newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
+    ma_device_notification_state__wasapi* pState = ma_device_notification_state_from_client__wasapi(pThis);
+
+    if (newRefCount == 1 && pState != NULL && ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
+        ma_event_signal(&pState->quiesceEvent);
+    }
+
     if (newRefCount == 0) {
         return 0;   /* We don't free anything here because we never allocate the object on the heap. */
     }
@@ -22366,84 +22425,11 @@ static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_Release(ma_IMMNotificati
 
 static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDeviceStateChanged(ma_IMMNotificationClient* pThis, const WCHAR* pDeviceID, DWORD dwNewState)
 {
-    ma_bool32 isThisDevice = MA_FALSE;
-    ma_bool32 isCapture    = MA_FALSE;
-    ma_bool32 isPlayback   = MA_FALSE;
+    (void)pDeviceID;
+    (void)dwNewState;
 
-#ifdef MA_DEBUG_OUTPUT
-    /*ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "IMMNotificationClient_OnDeviceStateChanged(pDeviceID=%S, dwNewState=%u)\n", (pDeviceID != NULL) ? pDeviceID : L"(NULL)", (unsigned int)dwNewState);*/
-#endif
-
-    /*
-    There have been reports of a hang when a playback device is disconnected. The idea with this code is to explicitly stop the device if we detect
-    that the device is disabled or has been unplugged.
-    */
-    if (pThis->pDevice->wasapi.allowCaptureAutoStreamRouting && (pThis->pDevice->type == ma_device_type_capture || pThis->pDevice->type == ma_device_type_duplex || pThis->pDevice->type == ma_device_type_loopback)) {
-        isCapture = MA_TRUE;
-        if (ma_strcmp_WCHAR(pThis->pDevice->capture.id.wasapi, pDeviceID) == 0) {
-            isThisDevice = MA_TRUE;
-        }
-    }
-
-    if (pThis->pDevice->wasapi.allowPlaybackAutoStreamRouting && (pThis->pDevice->type == ma_device_type_playback || pThis->pDevice->type == ma_device_type_duplex)) {
-        isPlayback = MA_TRUE;
-        if (ma_strcmp_WCHAR(pThis->pDevice->playback.id.wasapi, pDeviceID) == 0) {
-            isThisDevice = MA_TRUE;
-        }
-    }
-
-
-    /*
-    If the device ID matches our device we need to mark our device as detached and stop it. When a
-    device is added in OnDeviceAdded(), we'll restart it. We only mark it as detached if the device
-    was started at the time of being removed.
-    */
-    if (isThisDevice) {
-        if ((dwNewState & MA_MM_DEVICE_STATE_ACTIVE) == 0) {
-            /*
-            Unplugged or otherwise unavailable. Mark as detached if we were in a playing state. We'll
-            use this to determine whether or not we need to automatically start the device when it's
-            plugged back in again.
-            */
-            if (ma_device_get_state(pThis->pDevice) == ma_device_state_started) {
-                if (isPlayback) {
-                    pThis->pDevice->wasapi.isDetachedPlayback = MA_TRUE;
-                }
-                if (isCapture) {
-                    pThis->pDevice->wasapi.isDetachedCapture = MA_TRUE;
-                }
-
-                ma_device_stop(pThis->pDevice);
-            }
-        }
-
-        if ((dwNewState & MA_MM_DEVICE_STATE_ACTIVE) != 0) {
-            /* The device was activated. If we were detached, we need to start it again. */
-            ma_bool8 tryRestartingDevice = MA_FALSE;
-
-            if (isPlayback) {
-                if (pThis->pDevice->wasapi.isDetachedPlayback) {
-                    pThis->pDevice->wasapi.isDetachedPlayback = MA_FALSE;
-                    ma_device_reroute__wasapi(pThis->pDevice, ma_device_type_playback);
-                    tryRestartingDevice = MA_TRUE;
-                }
-            }
-
-            if (isCapture) {
-                if (pThis->pDevice->wasapi.isDetachedCapture) {
-                    pThis->pDevice->wasapi.isDetachedCapture = MA_FALSE;
-                    ma_device_reroute__wasapi(pThis->pDevice, (pThis->pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture);
-                    tryRestartingDevice = MA_TRUE;
-                }
-            }
-
-            if (tryRestartingDevice) {
-                if (pThis->pDevice->wasapi.isDetachedPlayback == MA_FALSE && pThis->pDevice->wasapi.isDetachedCapture == MA_FALSE) {
-                    ma_device_start(pThis->pDevice);
-                }
-            }
-        }
-    }
+    /* Re-query the endpoints on the control worker. The callback-owned ID is not retained. */
+    ma_device_notification_publish__wasapi(pThis, MA_WASAPI_NOTIFICATION_OP_STATE);
 
     return S_OK;
 }
@@ -22454,8 +22440,7 @@ static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDeviceAdded(ma_IMMNo
     /*ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "IMMNotificationClient_OnDeviceAdded(pDeviceID=%S)\n", (pDeviceID != NULL) ? pDeviceID : L"(NULL)");*/
 #endif
 
-    /* We don't need to worry about this event for our purposes. */
-    (void)pThis;
+    ma_device_notification_publish__wasapi(pThis, MA_WASAPI_NOTIFICATION_OP_STATE);
     (void)pDeviceID;
     return S_OK;
 }
@@ -22466,8 +22451,7 @@ static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDeviceRemoved(ma_IMM
     /*ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "IMMNotificationClient_OnDeviceRemoved(pDeviceID=%S)\n", (pDeviceID != NULL) ? pDeviceID : L"(NULL)");*/
 #endif
 
-    /* We don't need to worry about this event for our purposes. */
-    (void)pThis;
+    ma_device_notification_publish__wasapi(pThis, MA_WASAPI_NOTIFICATION_OP_STATE);
     (void)pDeviceID;
     return S_OK;
 }
@@ -22478,13 +22462,17 @@ static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDefaultDeviceChanged
     /*ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "IMMNotificationClient_OnDefaultDeviceChanged(dataFlow=%d, role=%d, pDefaultDeviceID=%S)\n", dataFlow, role, (pDefaultDeviceID != NULL) ? pDefaultDeviceID : L"(NULL)");*/
 #endif
 
-    (void)role;
+    (void)pDefaultDeviceID;
+
+    /* The device was opened for the console role. Other role changes do not apply. */
+    if (role != ma_eConsole) {
+        return S_OK;
+    }
 
     /* We only care about devices with the same data flow as the current device. */
     if ((pThis->pDevice->type == ma_device_type_playback && dataFlow != ma_eRender)  ||
         (pThis->pDevice->type == ma_device_type_capture  && dataFlow != ma_eCapture) ||
         (pThis->pDevice->type == ma_device_type_loopback && dataFlow != ma_eRender)) {
-        ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "[WASAPI] Stream rerouting abandoned because dataFlow does match device type.\n");
         return S_OK;
     }
 
@@ -22496,7 +22484,6 @@ static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDefaultDeviceChanged
     /* Don't do automatic stream routing if we're not allowed. */
     if ((dataFlow == ma_eRender  && pThis->pDevice->wasapi.allowPlaybackAutoStreamRouting == MA_FALSE) ||
         (dataFlow == ma_eCapture && pThis->pDevice->wasapi.allowCaptureAutoStreamRouting  == MA_FALSE)) {
-        ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "[WASAPI] Stream rerouting abandoned because automatic stream routing has been disabled by the device config.\n");
         return S_OK;
     }
 
@@ -22507,70 +22494,13 @@ static HRESULT STDMETHODCALLTYPE ma_IMMNotificationClient_OnDefaultDeviceChanged
     */
     if ((dataFlow == ma_eRender  && pThis->pDevice->playback.shareMode == ma_share_mode_exclusive) ||
         (dataFlow == ma_eCapture && pThis->pDevice->capture.shareMode  == ma_share_mode_exclusive)) {
-        ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "[WASAPI] Stream rerouting abandoned because the device shared mode is exclusive.\n");
         return S_OK;
     }
 
-
-
-    /*
-    Second attempt at device rerouting. We're going to retrieve the device's state at the time of
-    the route change. We're then going to stop the device, reinitialize the device, and then start
-    it again if the state before stopping was ma_device_state_started.
-    */
-    {
-        ma_uint32 previousState = ma_device_get_state(pThis->pDevice);
-        ma_bool8 restartDevice = MA_FALSE;
-
-        if (previousState == ma_device_state_uninitialized || previousState == ma_device_state_starting) {
-            ma_log_postf(ma_device_get_log(pThis->pDevice), MA_LOG_LEVEL_DEBUG, "[WASAPI] Stream rerouting abandoned because the device is in the process of starting.\n");
-            return S_OK;
-        }
-
-        if (previousState == ma_device_state_started) {
-            ma_device_stop(pThis->pDevice);
-            restartDevice = MA_TRUE;
-        }
-
-        if (pDefaultDeviceID != NULL) { /* <-- The input device ID will be null if there's no other device available. */
-            ma_mutex_lock(&pThis->pDevice->wasapi.rerouteLock);
-            {
-                if (dataFlow == ma_eRender) {
-                    ma_device_reroute__wasapi(pThis->pDevice, ma_device_type_playback);
-
-                    if (pThis->pDevice->wasapi.isDetachedPlayback) {
-                        pThis->pDevice->wasapi.isDetachedPlayback = MA_FALSE;
-
-                        if (pThis->pDevice->type == ma_device_type_duplex && pThis->pDevice->wasapi.isDetachedCapture) {
-                            restartDevice = MA_FALSE;   /* It's a duplex device and the capture side is detached. We cannot be restarting the device just yet. */
-                        }
-                        else {
-                            restartDevice = MA_TRUE;    /* It's not a duplex device, or the capture side is also attached so we can go ahead and restart the device. */
-                        }
-                    }
-                }
-                else {
-                    ma_device_reroute__wasapi(pThis->pDevice, (pThis->pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture);
-
-                    if (pThis->pDevice->wasapi.isDetachedCapture) {
-                        pThis->pDevice->wasapi.isDetachedCapture = MA_FALSE;
-
-                        if (pThis->pDevice->type == ma_device_type_duplex && pThis->pDevice->wasapi.isDetachedPlayback) {
-                            restartDevice = MA_FALSE;   /* It's a duplex device and the playback side is detached. We cannot be restarting the device just yet. */
-                        }
-                        else {
-                            restartDevice = MA_TRUE;    /* It's not a duplex device, or the playback side is also attached so we can go ahead and restart the device. */
-                        }
-                    }
-                }
-            }
-            ma_mutex_unlock(&pThis->pDevice->wasapi.rerouteLock);
-
-            if (restartDevice) {
-                ma_device_start(pThis->pDevice);
-            }
-        }
-    }
+    ma_device_notification_publish__wasapi(
+        pThis,
+        (dataFlow == ma_eRender) ? MA_WASAPI_NOTIFICATION_OP_RENDER : MA_WASAPI_NOTIFICATION_OP_CAPTURE
+    );
 
     return S_OK;
 }
@@ -22623,6 +22553,13 @@ typedef ma_IUnknown ma_WASAPIDeviceInterface;
 #define MA_CONTEXT_COMMAND_CREATE_IAUDIOCLIENT__WASAPI  2
 #define MA_CONTEXT_COMMAND_RELEASE_IAUDIOCLIENT__WASAPI 3
 
+typedef struct
+{
+    ma_IAudioClient* pAudioClient;
+    ma_IAudioRenderClient* pRenderClient;
+    ma_IAudioCaptureClient* pCaptureClient;
+} ma_release_audio_client_data__wasapi;
+
 static ma_context_command__wasapi ma_context_init_command__wasapi(int code)
 {
     ma_context_command__wasapi cmd;
@@ -22652,26 +22589,26 @@ static ma_result ma_context_post_command__wasapi(ma_context* pContext, const ma_
         }
     }
 
-    /* Here is where we add the command to the list. If there's not enough room we'll spin until there is. */
-    ma_mutex_lock(&pContext->wasapi.commandLock);
-    {
+    /* Do not hold the queue lock while waiting for the consumer to make room. */
+    for (;;) {
         ma_uint32 index;
 
-        /* Spin until we've got some space available. */
-        while (pContext->wasapi.commandCount == ma_countof(pContext->wasapi.commands)) {
-            ma_yield();
+        ma_mutex_lock(&pContext->wasapi.commandLock);
+        if (pContext->wasapi.commandCount < ma_countof(pContext->wasapi.commands)) {
+            index = (pContext->wasapi.commandIndex + pContext->wasapi.commandCount) % ma_countof(pContext->wasapi.commands);
+            pContext->wasapi.commands[index]        = *pCmd;
+            pContext->wasapi.commands[index].pEvent = isUsingLocalEvent ? &localEvent : pCmd->pEvent;
+            pContext->wasapi.commandCount += 1;
+            ma_mutex_unlock(&pContext->wasapi.commandLock);
+            break;
         }
+        ma_mutex_unlock(&pContext->wasapi.commandLock);
 
-        /* Space is now available. Can safely add to the list. */
-        index = (pContext->wasapi.commandIndex + pContext->wasapi.commandCount) % ma_countof(pContext->wasapi.commands);
-        pContext->wasapi.commands[index]        = *pCmd;
-        pContext->wasapi.commands[index].pEvent = &localEvent;
-        pContext->wasapi.commandCount += 1;
-
-        /* Now that the command has been added, release the semaphore so ma_context_next_command__wasapi() can return. */
-        ma_semaphore_release(&pContext->wasapi.commandSem);
+        ma_yield();
     }
-    ma_mutex_unlock(&pContext->wasapi.commandLock);
+
+    /* The command is visible before the consumer is released. */
+    ma_semaphore_release(&pContext->wasapi.commandSem);
 
     if (isUsingLocalEvent) {
         ma_event_wait(&localEvent);
@@ -22733,18 +22670,16 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
 
             case MA_CONTEXT_COMMAND_RELEASE_IAUDIOCLIENT__WASAPI:
             {
-                if (cmd.data.releaseAudioClient.deviceType == ma_device_type_playback) {
-                    if (cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientPlayback != NULL) {
-                        ma_IAudioClient_Release((ma_IAudioClient*)cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientPlayback);
-                        cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientPlayback = NULL;
-                    }
-                }
+                ma_release_audio_client_data__wasapi* pReleaseData = (ma_release_audio_client_data__wasapi*)cmd.data.releaseAudioClient.pDevice;
 
-                if (cmd.data.releaseAudioClient.deviceType == ma_device_type_capture) {
-                    if (cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientCapture != NULL) {
-                        ma_IAudioClient_Release((ma_IAudioClient*)cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientCapture);
-                        cmd.data.releaseAudioClient.pDevice->wasapi.pAudioClientCapture = NULL;
-                    }
+                if (pReleaseData->pRenderClient != NULL) {
+                    ma_IAudioRenderClient_Release(pReleaseData->pRenderClient);
+                }
+                if (pReleaseData->pCaptureClient != NULL) {
+                    ma_IAudioCaptureClient_Release(pReleaseData->pCaptureClient);
+                }
+                if (pReleaseData->pAudioClient != NULL) {
+                    ma_IAudioClient_Release(pReleaseData->pAudioClient);
                 }
             } break;
 
@@ -22785,22 +22720,35 @@ static ma_result ma_device_create_IAudioClient_service__wasapi(ma_context* pCont
     return *cmd.data.createAudioClient.pResult;
 }
 
-#if 0   /* Not used at the moment, but leaving here for future use. */
-static ma_result ma_device_release_IAudioClient_service__wasapi(ma_device* pDevice, ma_device_type deviceType)
+static ma_result ma_device_release_audio_client__wasapi(ma_context* pContext, ma_IAudioClient* pAudioClient, ma_IAudioRenderClient* pRenderClient, ma_IAudioCaptureClient* pCaptureClient, ma_event* pCompletionEvent)
 {
     ma_result result;
+    ma_release_audio_client_data__wasapi releaseData;
     ma_context_command__wasapi cmd = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_RELEASE_IAUDIOCLIENT__WASAPI);
-    cmd.data.releaseAudioClient.pDevice    = pDevice;
-    cmd.data.releaseAudioClient.deviceType = deviceType;
 
-    result = ma_context_post_command__wasapi(pDevice->pContext, &cmd);  /* This will not return until the command has actually been run. */
+    releaseData.pAudioClient   = pAudioClient;
+    releaseData.pRenderClient  = pRenderClient;
+    releaseData.pCaptureClient = pCaptureClient;
+
+    /* The command is synchronous, so this stack payload remains valid until completion. */
+    cmd.data.releaseAudioClient.pDevice    = (ma_device*)&releaseData;
+    cmd.data.releaseAudioClient.deviceType = ma_device_type_playback; /* Unused. Preserve the public command layout. */
+    cmd.pEvent = pCompletionEvent;
+
+    result = ma_context_post_command__wasapi(pContext, &cmd);
     if (result != MA_SUCCESS) {
         return result;
     }
 
+    if (pCompletionEvent != NULL) {
+        result = ma_event_wait(pCompletionEvent);
+        if (result != MA_SUCCESS) {
+            return result;
+        }
+    }
+
     return MA_SUCCESS;
 }
-#endif
 
 
 static void ma_add_native_data_format_to_device_info_from_WAVEFORMATEX(const MA_WAVEFORMATEX* pWF, ma_share_mode shareMode, ma_device_info* pInfo)
@@ -23538,16 +23486,26 @@ static ma_result ma_context_get_device_info__wasapi(ma_context* pContext, ma_dev
 
 static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
 {
+#if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+    ma_device_notification_state__wasapi* pNotificationState;
+#endif
+
     MA_ASSERT(pDevice != NULL);
 
     #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
     {
-        if (pDevice->wasapi.pDeviceEnumerator) {
-            ((ma_IMMDeviceEnumerator*)pDevice->wasapi.pDeviceEnumerator)->lpVtbl->UnregisterEndpointNotificationCallback((ma_IMMDeviceEnumerator*)pDevice->wasapi.pDeviceEnumerator, &pDevice->wasapi.notificationClient);
-            ma_IMMDeviceEnumerator_Release((ma_IMMDeviceEnumerator*)pDevice->wasapi.pDeviceEnumerator);
+        pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        if (pNotificationState != NULL) {
+            /* Stop publication first, then unregister/quiesce before joining the control worker. */
+            ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
+            ma_IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(pNotificationState->pDeviceEnumerator, &pDevice->wasapi.notificationClient);
+            if (ma_atomic_load_32(&pDevice->wasapi.notificationClient.counter) > 1) {
+                ma_event_wait(&pNotificationState->quiesceEvent);
+            }
+            ma_atomic_fetch_or_32(&pNotificationState->pendingOperations, MA_WASAPI_NOTIFICATION_OP_QUIT);
+            ma_event_signal(&pNotificationState->wakeEvent);
+            ma_thread_wait(&pNotificationState->thread);
         }
-
-        ma_mutex_uninit(&pDevice->wasapi.rerouteLock);
     }
     #endif
 
@@ -23559,7 +23517,6 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
             pDevice->wasapi.mappedBufferPlaybackLen = 0;
         }
 
-        ma_IAudioRenderClient_Release((ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient);
     }
     if (pDevice->wasapi.pCaptureClient) {
         if (pDevice->wasapi.pMappedBufferCapture != NULL) {
@@ -23569,15 +23526,36 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
             pDevice->wasapi.mappedBufferCaptureLen = 0;
         }
 
-        ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient);
     }
 
-    if (pDevice->wasapi.pAudioClientPlayback) {
-        ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback);
-    }
-    if (pDevice->wasapi.pAudioClientCapture) {
-        ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture);
-    }
+    /* GetService() ran on the context command thread, so final releases must run there too. */
+    ma_device_release_audio_client__wasapi(
+        pDevice->pContext,
+        (ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback,
+        (ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient,
+        NULL,
+        #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+        (pNotificationState != NULL) ? &pNotificationState->commandEvent : NULL
+        #else
+        NULL
+        #endif
+    );
+    ma_device_release_audio_client__wasapi(
+        pDevice->pContext,
+        (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture,
+        NULL,
+        (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient,
+        #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+        (pNotificationState != NULL) ? &pNotificationState->commandEvent : NULL
+        #else
+        NULL
+        #endif
+    );
+
+    pDevice->wasapi.pAudioClientPlayback = NULL;
+    pDevice->wasapi.pRenderClient        = NULL;
+    pDevice->wasapi.pAudioClientCapture  = NULL;
+    pDevice->wasapi.pCaptureClient       = NULL;
 
     if (pDevice->wasapi.hEventPlayback) {
         CloseHandle((HANDLE)pDevice->wasapi.hEventPlayback);
@@ -23585,6 +23563,22 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
     if (pDevice->wasapi.hEventCapture) {
         CloseHandle((HANDLE)pDevice->wasapi.hEventCapture);
     }
+
+    #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+    {
+        if (pNotificationState != NULL) {
+            pDevice->wasapi.pDeviceEnumerator = NULL;
+            ma_IMMDeviceEnumerator_Release(pNotificationState->pDeviceEnumerator);
+            ma_mutex_uninit(&pNotificationState->operationLock);
+            ma_event_uninit(&pNotificationState->quiesceEvent);
+            ma_event_uninit(&pNotificationState->commandEvent);
+            ma_event_uninit(&pNotificationState->wakeEvent);
+            ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        }
+
+        ma_mutex_uninit(&pDevice->wasapi.rerouteLock);
+    }
+    #endif
 
     return MA_SUCCESS;
 }
@@ -24108,6 +24102,7 @@ done:
 static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type deviceType)
 {
     ma_device_init_internal_data__wasapi data;
+    ma_event* pReleaseEvent = NULL;
     ma_result result;
 
     MA_ASSERT(pDevice != NULL);
@@ -24115,41 +24110,6 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     /* We only re-initialize the playback or capture device. Never a full-duplex device. */
     if (deviceType == ma_device_type_duplex) {
         return MA_INVALID_ARGS;
-    }
-
-
-    /*
-    Before reinitializing the device we need to free the previous audio clients.
-
-    There's a known memory leak here. We will be calling this from the routing change callback that
-    is fired by WASAPI. If we attempt to release the IAudioClient we will deadlock. In my opinion
-    this is a bug. I'm not sure what I need to do to handle this cleanly, but I think we'll probably
-    need some system where we post an event, but delay the execution of it until the callback has
-    returned. I'm not sure how to do this reliably, however. I have set up some infrastructure for
-    a command thread which might be useful for this.
-    */
-    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
-        if (pDevice->wasapi.pCaptureClient) {
-            ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient);
-            pDevice->wasapi.pCaptureClient = NULL;
-        }
-
-        if (pDevice->wasapi.pAudioClientCapture) {
-            /*ma_device_release_IAudioClient_service__wasapi(pDevice, ma_device_type_capture);*/
-            pDevice->wasapi.pAudioClientCapture = NULL;
-        }
-    }
-
-    if (deviceType == ma_device_type_playback) {
-        if (pDevice->wasapi.pRenderClient) {
-            ma_IAudioRenderClient_Release((ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient);
-            pDevice->wasapi.pRenderClient = NULL;
-        }
-
-        if (pDevice->wasapi.pAudioClientPlayback) {
-            /*ma_device_release_IAudioClient_service__wasapi(pDevice, ma_device_type_playback);*/
-            pDevice->wasapi.pAudioClientPlayback = NULL;
-        }
     }
 
 
@@ -24180,8 +24140,31 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         return result;
     }
 
-    /* At this point we have some new objects ready to go. We need to uninitialize the previous ones and then set the new ones. */
+    /*
+    The replacement is complete. Release the old interfaces on the same command thread that
+    created their services, then publish the new set as one commit.
+    */
+    #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+    {
+        ma_device_notification_state__wasapi* pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        MA_ASSERT(pNotificationState != NULL);
+        pReleaseEvent = &pNotificationState->commandEvent;
+    }
+    #endif
+
     if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+        result = ma_device_release_audio_client__wasapi(
+            pDevice->pContext,
+            (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture,
+            NULL,
+            (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient,
+            pReleaseEvent
+        );
+        if (result != MA_SUCCESS) {
+            ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, NULL, data.pCaptureClient, pReleaseEvent);
+            return result;
+        }
+
         pDevice->wasapi.pAudioClientCapture         = data.pAudioClient;
         pDevice->wasapi.pCaptureClient              = data.pCaptureClient;
 
@@ -24203,6 +24186,18 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     }
 
     if (deviceType == ma_device_type_playback) {
+        result = ma_device_release_audio_client__wasapi(
+            pDevice->pContext,
+            (ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback,
+            (ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient,
+            NULL,
+            pReleaseEvent
+        );
+        if (result != MA_SUCCESS) {
+            ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, NULL, pReleaseEvent);
+            return result;
+        }
+
         pDevice->wasapi.pAudioClientPlayback         = data.pAudioClient;
         pDevice->wasapi.pRenderClient                = data.pRenderClient;
 
@@ -24233,6 +24228,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
 #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
     HRESULT hr;
     ma_IMMDeviceEnumerator* pDeviceEnumerator;
+    ma_device_notification_state__wasapi* pNotificationState;
 #endif
 
     MA_ASSERT(pDevice != NULL);
@@ -24427,7 +24423,11 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         }
     }
 
-    ma_mutex_init(&pDevice->wasapi.rerouteLock);
+    result = ma_mutex_init(&pDevice->wasapi.rerouteLock);
+    if (result != MA_SUCCESS) {
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
 
     hr = ma_CoCreateInstance(pDevice->pContext, &MA_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &MA_IID_IMMDeviceEnumerator, (void**)&pDeviceEnumerator);
     if (FAILED(hr)) {
@@ -24436,15 +24436,92 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         return ma_result_from_HRESULT(hr);
     }
 
+    pNotificationState = (ma_device_notification_state__wasapi*)ma_calloc(sizeof(*pNotificationState), &pDevice->pContext->allocationCallbacks);
+    if (pNotificationState == NULL) {
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return MA_OUT_OF_MEMORY;
+    }
+
+    pNotificationState->pDevice           = pDevice;
+    pNotificationState->pDeviceEnumerator = pDeviceEnumerator;
+
+    result = ma_event_init(&pNotificationState->wakeEvent);
+    if (result != MA_SUCCESS) {
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
+    result = ma_event_init(&pNotificationState->commandEvent);
+    if (result != MA_SUCCESS) {
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
+    result = ma_mutex_init(&pNotificationState->operationLock);
+    if (result != MA_SUCCESS) {
+        ma_event_uninit(&pNotificationState->commandEvent);
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
+    result = ma_event_init(&pNotificationState->quiesceEvent);
+    if (result != MA_SUCCESS) {
+        ma_mutex_uninit(&pNotificationState->operationLock);
+        ma_event_uninit(&pNotificationState->commandEvent);
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
+    ma_atomic_store_32(&pNotificationState->pendingOperations, 0);
+    ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_TRUE);
+    ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
+
+    /* Publish the fully initialized sidecar before registration can invoke a callback. */
+    pDevice->wasapi.pDeviceEnumerator = (ma_ptr)pNotificationState;
+
+    result = ma_thread_create(&pNotificationState->thread, ma_thread_priority_normal, 0, ma_device_notification_thread__wasapi, pNotificationState, &pDevice->pContext->allocationCallbacks);
+    if (result != MA_SUCCESS) {
+        pDevice->wasapi.pDeviceEnumerator = NULL;
+        ma_mutex_uninit(&pNotificationState->operationLock);
+        ma_event_uninit(&pNotificationState->quiesceEvent);
+        ma_event_uninit(&pNotificationState->commandEvent);
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
     pDevice->wasapi.notificationClient.lpVtbl  = (void*)&g_maNotificationCientVtbl;
     pDevice->wasapi.notificationClient.counter = 1;
     pDevice->wasapi.notificationClient.pDevice = pDevice;
 
     hr = pDeviceEnumerator->lpVtbl->RegisterEndpointNotificationCallback(pDeviceEnumerator, &pDevice->wasapi.notificationClient);
-    if (SUCCEEDED(hr)) {
-        pDevice->wasapi.pDeviceEnumerator = (ma_ptr)pDeviceEnumerator;
-    } else {
+    if (FAILED(hr)) {
         /* Not the end of the world if we fail to register the notification callback. We just won't support automatic stream routing. */
+        ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
+        ma_atomic_fetch_or_32(&pNotificationState->pendingOperations, MA_WASAPI_NOTIFICATION_OP_QUIT);
+        ma_event_signal(&pNotificationState->wakeEvent);
+        ma_thread_wait(&pNotificationState->thread);
+
+        pDevice->wasapi.pDeviceEnumerator = NULL;
+        ma_mutex_uninit(&pNotificationState->operationLock);
+        ma_event_uninit(&pNotificationState->quiesceEvent);
+        ma_event_uninit(&pNotificationState->commandEvent);
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
     }
 #endif
@@ -24511,29 +24588,160 @@ static ma_result ma_device__get_available_frames__wasapi(ma_device* pDevice, ma_
 }
 
 
-static ma_result ma_device_reroute__wasapi(ma_device* pDevice, ma_device_type deviceType)
+#if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+static ma_bool32 ma_device_endpoint_is_active__wasapi(ma_device_notification_state__wasapi* pState, ma_device_type deviceType)
 {
-    ma_result result;
+    const WCHAR* pDeviceID;
+    ma_IMMDevice* pMMDevice = NULL;
+    DWORD state = 0;
+    HRESULT hr;
 
-    if (deviceType == ma_device_type_duplex) {
-        return MA_INVALID_ARGS;
+    if (deviceType == ma_device_type_playback) {
+        pDeviceID = pState->pDevice->playback.id.wasapi;
+    } else {
+        pDeviceID = pState->pDevice->capture.id.wasapi;
     }
 
-    ma_log_postf(ma_device_get_log(pDevice), MA_LOG_LEVEL_DEBUG, "=== CHANGING DEVICE ===\n");
-
-    result = ma_device_reinit__wasapi(pDevice, deviceType);
-    if (result != MA_SUCCESS) {
-        ma_log_postf(ma_device_get_log(pDevice), MA_LOG_LEVEL_WARNING, "[WASAPI] Reinitializing device after route change failed.\n");
-        return result;
+    hr = ma_IMMDeviceEnumerator_GetDevice(pState->pDeviceEnumerator, pDeviceID, &pMMDevice);
+    if (FAILED(hr)) {
+        return MA_FALSE;
     }
 
-    ma_device__post_init_setup(pDevice, deviceType);
-    ma_device__on_notification_rerouted(pDevice);
+    hr = ma_IMMDevice_GetState(pMMDevice, &state);
+    ma_IMMDevice_Release(pMMDevice);
+    if (FAILED(hr)) {
+        return MA_FALSE;
+    }
 
-    ma_log_postf(ma_device_get_log(pDevice), MA_LOG_LEVEL_DEBUG, "=== DEVICE CHANGED ===\n");
-
-    return MA_SUCCESS;
+    return (state & MA_MM_DEVICE_STATE_ACTIVE) != 0;
 }
+
+static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void* pUserData)
+{
+    ma_device_notification_state__wasapi* pState = (ma_device_notification_state__wasapi*)pUserData;
+    ma_device* pDevice = pState->pDevice;
+
+    for (;;) {
+        ma_uint32 pendingOperations;
+        ma_uint32 rerouteOperations;
+        ma_uint32 completedOperations = 0;
+        ma_bool32 rerouteSucceeded = MA_TRUE;
+        ma_result result;
+
+        if (ma_event_wait(&pState->wakeEvent) != MA_SUCCESS) {
+            break;
+        }
+
+        pendingOperations = ma_atomic_exchange_32(&pState->pendingOperations, 0);
+        if ((pendingOperations & MA_WASAPI_NOTIFICATION_OP_QUIT) != 0) {
+            break;
+        }
+        if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
+            continue;
+        }
+
+        rerouteOperations = pendingOperations & (MA_WASAPI_NOTIFICATION_OP_RENDER | MA_WASAPI_NOTIFICATION_OP_CAPTURE);
+
+        ma_mutex_lock(&pState->operationLock);
+        {
+            if (ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE || ma_device_get_state(pDevice) == ma_device_state_uninitialized) {
+                ma_mutex_unlock(&pState->operationLock);
+                continue;
+            }
+
+            if ((pendingOperations & MA_WASAPI_NOTIFICATION_OP_STATE) != 0) {
+                if (pDevice->wasapi.allowPlaybackAutoStreamRouting && pDevice->playback.shareMode != ma_share_mode_exclusive &&
+                    (pDevice->type == ma_device_type_playback || pDevice->type == ma_device_type_duplex)) {
+                    if (!ma_device_endpoint_is_active__wasapi(pState, ma_device_type_playback)) {
+                        pDevice->wasapi.isDetachedPlayback = MA_TRUE;
+                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                    } else if (pDevice->wasapi.isDetachedPlayback) {
+                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                    }
+                }
+
+                if (pDevice->wasapi.allowCaptureAutoStreamRouting && pDevice->capture.shareMode != ma_share_mode_exclusive &&
+                    (pDevice->type == ma_device_type_capture || pDevice->type == ma_device_type_duplex || pDevice->type == ma_device_type_loopback)) {
+                    ma_device_type endpointType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
+                    if (!ma_device_endpoint_is_active__wasapi(pState, endpointType)) {
+                        pDevice->wasapi.isDetachedCapture = MA_TRUE;
+                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                    } else if (pDevice->wasapi.isDetachedCapture) {
+                        rerouteOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                    }
+                }
+            }
+
+            if (rerouteOperations == 0 || ma_device_get_state(pDevice) == ma_device_state_starting || ma_device_get_state(pDevice) == ma_device_state_stopping) {
+                ma_mutex_unlock(&pState->operationLock);
+                continue;
+            }
+
+            if (ma_device_get_state(pDevice) == ma_device_state_started) {
+                result = ma_device_stop__internal(pDevice, MA_FALSE);
+                if (result != MA_SUCCESS) {
+                    ma_mutex_unlock(&pState->operationLock);
+                    continue;
+                }
+            }
+
+            ma_mutex_lock(&pDevice->wasapi.rerouteLock);
+            {
+                if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_RENDER) != 0) {
+                    result = ma_device_reinit__wasapi(pDevice, ma_device_type_playback);
+                    if (result == MA_SUCCESS) {
+                        result = ma_device__post_init_setup(pDevice, ma_device_type_playback);
+                    }
+
+                    if (result == MA_SUCCESS) {
+                        pDevice->wasapi.isDetachedPlayback = MA_FALSE;
+                        completedOperations |= MA_WASAPI_NOTIFICATION_OP_RENDER;
+                    } else {
+                        pDevice->wasapi.isDetachedPlayback = MA_TRUE;
+                        rerouteSucceeded = MA_FALSE;
+                    }
+                }
+
+                if ((rerouteOperations & MA_WASAPI_NOTIFICATION_OP_CAPTURE) != 0) {
+                    ma_device_type deviceType = (pDevice->type == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture;
+                    result = ma_device_reinit__wasapi(pDevice, deviceType);
+                    if (result == MA_SUCCESS) {
+                        result = ma_device__post_init_setup(pDevice, deviceType);
+                    }
+
+                    if (result == MA_SUCCESS) {
+                        pDevice->wasapi.isDetachedCapture = MA_FALSE;
+                        completedOperations |= MA_WASAPI_NOTIFICATION_OP_CAPTURE;
+                    } else {
+                        pDevice->wasapi.isDetachedCapture = MA_TRUE;
+                        rerouteSucceeded = MA_FALSE;
+                    }
+                }
+            }
+            ma_mutex_unlock(&pDevice->wasapi.rerouteLock);
+
+            if (rerouteSucceeded && ma_atomic_load_32(&pState->requestedStarted) &&
+                pDevice->wasapi.isDetachedPlayback == MA_FALSE && pDevice->wasapi.isDetachedCapture == MA_FALSE) {
+                result = ma_device_start__internal(pDevice, MA_FALSE);
+                if (result != MA_SUCCESS) {
+                    rerouteSucceeded = MA_FALSE;
+                }
+            }
+        }
+        ma_mutex_unlock(&pState->operationLock);
+
+        if (completedOperations != 0) {
+            ma_device__on_notification_rerouted(pDevice);
+        }
+
+        if (!rerouteSucceeded) {
+            ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_WARNING, "[WASAPI] Device rerouting failed; the device remains stopped and detached.");
+        }
+    }
+
+    return (ma_thread_result)0;
+}
+#endif
 
 static ma_result ma_device_start__wasapi_nolock(ma_device* pDevice)
 {
@@ -44103,6 +44311,10 @@ MA_API ma_result ma_device_init_ex(const ma_backend backends[], ma_uint32 backen
 
 MA_API void ma_device_uninit(ma_device* pDevice)
 {
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    ma_device_notification_state__wasapi* pNotificationState = NULL;
+#endif
+
     if (!ma_device__is_initialized(pDevice)) {
         return;
     }
@@ -44125,8 +44337,29 @@ MA_API void ma_device_uninit(ma_device* pDevice)
     }
     #endif
 
-    /* Putting the device into an uninitialized state will make the worker thread return. */
+    /*
+    Serialize the terminal state change with pending WASAPI control work. Once publication is
+    disabled, notification callbacks remain bounded no-ops until unregister has quiesced them.
+    */
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (pDevice->pContext->backend == ma_backend_wasapi) {
+        pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        if (pNotificationState != NULL) {
+            ma_mutex_lock(&pNotificationState->operationLock);
+            ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
+            ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
+        }
+    }
+#endif
+
+    /* Putting the device into an uninitialized state will make the audio worker thread return. */
     ma_device__set_state(pDevice, ma_device_state_uninitialized);
+
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (pNotificationState != NULL) {
+        ma_mutex_unlock(&pNotificationState->operationLock);
+    }
+#endif
 
     /* Wake up the worker thread and wait for it to properly terminate. */
     if (!ma_context_is_backend_asynchronous(pDevice->pContext)) {
@@ -44267,7 +44500,7 @@ MA_API ma_result ma_device_get_name(ma_device* pDevice, ma_device_type type, cha
     return MA_SUCCESS;
 }
 
-MA_API ma_result ma_device_start(ma_device* pDevice)
+static ma_result ma_device_start__impl(ma_device* pDevice)
 {
     ma_result result;
 
@@ -44336,7 +44569,42 @@ MA_API ma_result ma_device_start(ma_device* pDevice)
     return result;
 }
 
-MA_API ma_result ma_device_stop(ma_device* pDevice)
+static ma_result ma_device_start__internal(ma_device* pDevice, ma_bool32 updateRequestedState)
+{
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    ma_device_notification_state__wasapi* pNotificationState = NULL;
+#endif
+    ma_result result;
+
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (updateRequestedState && pDevice != NULL && pDevice->pContext != NULL && pDevice->pContext->backend == ma_backend_wasapi) {
+        pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        if (pNotificationState != NULL) {
+            ma_mutex_lock(&pNotificationState->operationLock);
+            ma_atomic_store_32(&pNotificationState->requestedStarted, MA_TRUE);
+        }
+    }
+#else
+    (void)updateRequestedState;
+#endif
+
+    result = ma_device_start__impl(pDevice);
+
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (pNotificationState != NULL) {
+        ma_mutex_unlock(&pNotificationState->operationLock);
+    }
+#endif
+
+    return result;
+}
+
+MA_API ma_result ma_device_start(ma_device* pDevice)
+{
+    return ma_device_start__internal(pDevice, MA_TRUE);
+}
+
+static ma_result ma_device_stop__impl(ma_device* pDevice)
 {
     ma_result result;
 
@@ -44411,6 +44679,41 @@ MA_API ma_result ma_device_stop(ma_device* pDevice)
     ma_mutex_unlock(&pDevice->startStopLock);
 
     return result;
+}
+
+static ma_result ma_device_stop__internal(ma_device* pDevice, ma_bool32 updateRequestedState)
+{
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    ma_device_notification_state__wasapi* pNotificationState = NULL;
+#endif
+    ma_result result;
+
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (updateRequestedState && pDevice != NULL && pDevice->pContext != NULL && pDevice->pContext->backend == ma_backend_wasapi) {
+        pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
+        if (pNotificationState != NULL) {
+            ma_mutex_lock(&pNotificationState->operationLock);
+            ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
+        }
+    }
+#else
+    (void)updateRequestedState;
+#endif
+
+    result = ma_device_stop__impl(pDevice);
+
+#if defined(MA_HAS_WASAPI) && (defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK))
+    if (pNotificationState != NULL) {
+        ma_mutex_unlock(&pNotificationState->operationLock);
+    }
+#endif
+
+    return result;
+}
+
+MA_API ma_result ma_device_stop(ma_device* pDevice)
+{
+    return ma_device_stop__internal(pDevice, MA_TRUE);
 }
 
 MA_API ma_bool32 ma_device_is_started(const ma_device* pDevice)
