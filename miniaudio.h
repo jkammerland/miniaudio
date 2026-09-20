@@ -95010,51 +95010,98 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
         {
             ma_dr_mp3_bs bs;
             ma_dr_mp3_L3_gr_info grInfo[4];
-            ma_dr_mp3_bs_init(&bs, pFirstFrameData + MA_DR_MP3_HDR_SIZE, firstFrameInfo.frame_bytes - MA_DR_MP3_HDR_SIZE);
+            size_t firstFrameOffset;
+            size_t initializedByteCount;
+            size_t frameExtent;
+            size_t tagOffset;
+            size_t tagBeginOffset;
+
+            if (pMP3->memory.pData != NULL) {
+                firstFrameOffset = (size_t)(pFirstFrameData - pMP3->memory.pData);
+                if (firstFrameOffset > pMP3->memory.dataSize) {
+                    goto done_xing_info;
+                }
+                initializedByteCount = pMP3->memory.dataSize - firstFrameOffset;
+            } else {
+                if (pMP3->pData == NULL) {
+                    goto done_xing_info;
+                }
+                firstFrameOffset = (size_t)(pFirstFrameData - pMP3->pData);
+                if (pMP3->dataConsumed > pMP3->dataCapacity || pMP3->dataSize > pMP3->dataCapacity - pMP3->dataConsumed || firstFrameOffset > pMP3->dataConsumed + pMP3->dataSize) {
+                    goto done_xing_info;
+                }
+                initializedByteCount = pMP3->dataConsumed + pMP3->dataSize - firstFrameOffset;
+            }
+            frameExtent = (size_t)firstFrameInfo.frame_bytes;
+            if (frameExtent > initializedByteCount) {
+                frameExtent = initializedByteCount;
+            }
+            if (frameExtent < MA_DR_MP3_HDR_SIZE) {
+                goto done_xing_info;
+            }
+
+            ma_dr_mp3_bs_init(&bs, pFirstFrameData + MA_DR_MP3_HDR_SIZE, (int)(frameExtent - MA_DR_MP3_HDR_SIZE));
             if (MA_DR_MP3_HDR_IS_CRC(pFirstFrameData)) {
                 ma_dr_mp3_bs_get_bits(&bs, 16);
             }
             if (ma_dr_mp3_L3_read_side_info(&bs, grInfo, pFirstFrameData) >= 0) {
                 ma_bool32 isXing = MA_FALSE;
                 ma_bool32 isInfo = MA_FALSE;
-                const ma_uint8* pTagData;
-                const ma_uint8* pTagDataBeg;
-                pTagDataBeg = pFirstFrameData + MA_DR_MP3_HDR_SIZE + (bs.pos/8);
-                pTagData    = pTagDataBeg;
-                isXing = (pTagData[0] == 'X' && pTagData[1] == 'i' && pTagData[2] == 'n' && pTagData[3] == 'g');
-                isInfo = (pTagData[0] == 'I' && pTagData[1] == 'n' && pTagData[2] == 'f' && pTagData[3] == 'o');
+                if (bs.pos < 0 || (size_t)(bs.pos / 8) > frameExtent - MA_DR_MP3_HDR_SIZE) {
+                    goto done_xing_info;
+                }
+                tagOffset = MA_DR_MP3_HDR_SIZE + (size_t)(bs.pos / 8);
+                tagBeginOffset = tagOffset;
+                if (8 > frameExtent - tagOffset) {
+                    goto done_xing_info;
+                }
+                isXing = (pFirstFrameData[tagOffset + 0] == 'X' && pFirstFrameData[tagOffset + 1] == 'i' && pFirstFrameData[tagOffset + 2] == 'n' && pFirstFrameData[tagOffset + 3] == 'g');
+                isInfo = (pFirstFrameData[tagOffset + 0] == 'I' && pFirstFrameData[tagOffset + 1] == 'n' && pFirstFrameData[tagOffset + 2] == 'f' && pFirstFrameData[tagOffset + 3] == 'o');
                 if (isXing || isInfo) {
                     ma_uint32 bytes = 0;
-                    ma_uint32 flags = pTagData[7];
-                    pTagData += 8;
+                    ma_uint32 flags = pFirstFrameData[tagOffset + 7];
+                    tagOffset += 8;
                     if (flags & 0x01) {
-                        detectedMP3FrameCount = (ma_uint32)pTagData[0] << 24 | (ma_uint32)pTagData[1] << 16 | (ma_uint32)pTagData[2] << 8 | (ma_uint32)pTagData[3];
-                        pTagData += 4;
+                        if (tagOffset > frameExtent || 4 > frameExtent - tagOffset) {
+                            goto done_xing_info;
+                        }
+                        detectedMP3FrameCount = (ma_uint32)pFirstFrameData[tagOffset + 0] << 24 | (ma_uint32)pFirstFrameData[tagOffset + 1] << 16 | (ma_uint32)pFirstFrameData[tagOffset + 2] << 8 | (ma_uint32)pFirstFrameData[tagOffset + 3];
+                        tagOffset += 4;
                     }
                     if (flags & 0x02) {
-                        bytes  = (ma_uint32)pTagData[0] << 24 | (ma_uint32)pTagData[1] << 16 | (ma_uint32)pTagData[2] << 8 | (ma_uint32)pTagData[3];
+                        if (tagOffset > frameExtent || 4 > frameExtent - tagOffset) {
+                            goto done_xing_info;
+                        }
+                        bytes  = (ma_uint32)pFirstFrameData[tagOffset + 0] << 24 | (ma_uint32)pFirstFrameData[tagOffset + 1] << 16 | (ma_uint32)pFirstFrameData[tagOffset + 2] << 8 | (ma_uint32)pFirstFrameData[tagOffset + 3];
                         (void)bytes;
-                        pTagData += 4;
+                        tagOffset += 4;
                     }
                     if (flags & 0x04) {
-                        pTagData += 100;
+                        if (tagOffset > frameExtent || 100 > frameExtent - tagOffset) {
+                            goto done_xing_info;
+                        }
+                        tagOffset += 100;
                     }
                     if (flags & 0x08) {
-                        pTagData += 4;
-                    }
-                    if (pTagData[0]) {
-                        pTagData += 21;
-                        if (pTagData - pFirstFrameData + 14 < firstFrameInfo.frame_bytes) {
-                            int delayInPCMFrames;
-                            int paddingInPCMFrames;
-                            delayInPCMFrames   = (( (ma_uint32)pTagData[0]        << 4) | ((ma_uint32)pTagData[1] >> 4)) + (528 + 1);
-                            paddingInPCMFrames = ((((ma_uint32)pTagData[1] & 0xF) << 8) | ((ma_uint32)pTagData[2]     )) - (528 + 1);
-                            if (paddingInPCMFrames < 0) {
-                                paddingInPCMFrames = 0;
-                            }
-                            pMP3->delayInPCMFrames   = (ma_uint32)delayInPCMFrames;
-                            pMP3->paddingInPCMFrames = (ma_uint32)paddingInPCMFrames;
+                        if (tagOffset > frameExtent || 4 > frameExtent - tagOffset) {
+                            goto done_xing_info;
                         }
+                        tagOffset += 4;
+                    }
+                    if (tagOffset < frameExtent && pFirstFrameData[tagOffset] != 0) {
+                        int delayInPCMFrames;
+                        int paddingInPCMFrames;
+                        if (36 > frameExtent - tagOffset) {
+                            goto done_xing_info;
+                        }
+                        tagOffset += 21;
+                        delayInPCMFrames   = (( (ma_uint32)pFirstFrameData[tagOffset + 0]        << 4) | ((ma_uint32)pFirstFrameData[tagOffset + 1] >> 4)) + (528 + 1);
+                        paddingInPCMFrames = ((((ma_uint32)pFirstFrameData[tagOffset + 1] & 0xF) << 8) | ((ma_uint32)pFirstFrameData[tagOffset + 2]     )) - (528 + 1);
+                        if (paddingInPCMFrames < 0) {
+                            paddingInPCMFrames = 0;
+                        }
+                        pMP3->delayInPCMFrames   = (ma_uint32)delayInPCMFrames;
+                        pMP3->paddingInPCMFrames = (ma_uint32)paddingInPCMFrames;
                     }
                     if (isXing) {
                         pMP3->isVBR = MA_TRUE;
@@ -95064,9 +95111,8 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
                     if (onMeta != NULL) {
                         ma_dr_mp3_metadata_type metadataType = isXing ? MA_DR_MP3_METADATA_TYPE_XING : MA_DR_MP3_METADATA_TYPE_VBRI;
                         size_t tagDataSize;
-                        tagDataSize  = (size_t)firstFrameInfo.frame_bytes;
-                        tagDataSize -= (size_t)(pTagDataBeg - pFirstFrameData);
-                        ma_dr_mp3__on_meta(pMP3, metadataType, pTagDataBeg, tagDataSize);
+                        tagDataSize = frameExtent - tagBeginOffset;
+                        ma_dr_mp3__on_meta(pMP3, metadataType, pFirstFrameData + tagBeginOffset, tagDataSize);
                     }
                     pMP3->pcmFramesRemainingInMP3Frame = 0;
                     pMP3->streamStartOffset += (ma_uint32)(firstFrameInfo.frame_bytes);
@@ -95075,6 +95121,7 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
                 }
             } else {
             }
+            done_xing_info:;
         }
         #endif
     } else {
@@ -95082,7 +95129,7 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
         return MA_FALSE;
     }
     if (detectedMP3FrameCount != 0xFFFFFFFF) {
-        pMP3->totalPCMFrameCount = detectedMP3FrameCount * firstFramePCMFrameCount;
+        pMP3->totalPCMFrameCount = (ma_uint64)detectedMP3FrameCount * (ma_uint64)firstFramePCMFrameCount;
     }
     pMP3->channels   = pMP3->mp3FrameChannels;
     pMP3->sampleRate = pMP3->mp3FrameSampleRate;
