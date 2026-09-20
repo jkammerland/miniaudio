@@ -80889,15 +80889,35 @@ MA_PRIVATE size_t ma_dr_wav__metadata_memory_capacity(ma_dr_wav__metadata_parser
 MA_PRIVATE ma_uint8* ma_dr_wav__metadata_get_memory(ma_dr_wav__metadata_parser* pParser, size_t size, size_t align)
 {
     ma_uint8* pResult;
+    size_t capacity;
+    size_t cursorOffset;
+    size_t padding = 0;
+
+    if (pParser == NULL || pParser->pData == NULL || pParser->pDataCursor == NULL) {
+        return NULL;
+    }
+
+    capacity = ma_dr_wav__metadata_memory_capacity(pParser);
+    cursorOffset = (size_t)(pParser->pDataCursor - pParser->pData);
+    if (cursorOffset > capacity) {
+        pParser->hasAllocationError = MA_TRUE;
+        return NULL;
+    }
+
     if (align) {
         ma_uintptr modulo = (ma_uintptr)pParser->pDataCursor % align;
         if (modulo != 0) {
-            pParser->pDataCursor += align - modulo;
+            padding = align - modulo;
         }
     }
-    pResult = pParser->pDataCursor;
-    MA_DR_WAV_ASSERT((pResult + size) <= (pParser->pData + ma_dr_wav__metadata_memory_capacity(pParser)));
-    pParser->pDataCursor += size;
+
+    if (padding > capacity - cursorOffset || size > capacity - cursorOffset - padding) {
+        pParser->hasAllocationError = MA_TRUE;
+        return NULL;
+    }
+
+    pResult = pParser->pDataCursor + padding;
+    pParser->pDataCursor = pResult + size;
     return pResult;
 }
 MA_PRIVATE void ma_dr_wav__metadata_request_extra_memory_for_stage_2(ma_dr_wav__metadata_parser* pParser, size_t bytes, size_t align)
@@ -80918,6 +80938,7 @@ MA_PRIVATE void ma_dr_wav__metadata_request_extra_memory_for_stage_2(ma_dr_wav__
 MA_PRIVATE ma_result ma_dr_wav__metadata_alloc(ma_dr_wav__metadata_parser* pParser, ma_allocation_callbacks* pAllocationCallbacks)
 {
     size_t allocationSize;
+    ma_uint64 metadataSize;
     if (pParser->hasAllocationError) {
         return MA_TOO_BIG;
     }
@@ -80932,7 +80953,21 @@ MA_PRIVATE ma_result ma_dr_wav__metadata_alloc(ma_dr_wav__metadata_parser* pPars
         if (pParser->pData == NULL) {
             return MA_OUT_OF_MEMORY;
         }
-        pParser->pMetadata = (ma_dr_wav_metadata*)ma_dr_wav__metadata_get_memory(pParser, sizeof(ma_dr_wav_metadata) * pParser->metadataCount, 1);
+        metadataSize = sizeof(ma_dr_wav_metadata) * (ma_uint64)pParser->metadataCount;
+        if (metadataSize > MA_SIZE_MAX) {
+            pAllocationCallbacks->onFree(pParser->pData, pAllocationCallbacks->pUserData);
+            pParser->pData = NULL;
+            pParser->pDataCursor = NULL;
+            return MA_TOO_BIG;
+        }
+        pParser->pMetadata = (ma_dr_wav_metadata*)ma_dr_wav__metadata_get_memory(pParser, (size_t)metadataSize, 1);
+        if (pParser->pMetadata == NULL) {
+            pAllocationCallbacks->onFree(pParser->pData, pAllocationCallbacks->pUserData);
+            pParser->pData = NULL;
+            pParser->pDataCursor = NULL;
+            return MA_TOO_BIG;
+        }
+        MA_DR_WAV_ZERO_MEMORY(pParser->pMetadata, (size_t)metadataSize);
         pParser->metadataCursor = 0;
     }
     return MA_SUCCESS;
@@ -80968,14 +81003,15 @@ MA_PRIVATE ma_bool32 ma_dr_wav__metadata_validate_smpl_chunk(const ma_dr_wav_chu
     }
     return MA_TRUE;
 }
-MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_parser* pParser, const ma_dr_wav_chunk_header* pChunkHeader, ma_dr_wav_metadata* pMetadata)
+MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_parser* pParser, const ma_dr_wav_chunk_header* pChunkHeader, ma_dr_wav_metadata* pMetadata, ma_bool32* pAccepted)
 {
     ma_uint8 smplHeaderData[MA_DR_WAV_SMPL_BYTES];
     ma_uint64 totalBytesRead = 0;
     size_t bytesJustRead;
-    if (pMetadata == NULL) {
+    if (pAccepted == NULL) {
         return 0;
     }
+    *pAccepted = MA_FALSE;
     bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, smplHeaderData, sizeof(smplHeaderData), &totalBytesRead);
     MA_DR_WAV_ASSERT(pParser->stage == ma_dr_wav__metadata_parser_stage_read);
     MA_DR_WAV_ASSERT(pChunkHeader != NULL);
@@ -80989,6 +81025,10 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_pa
         if (!ma_dr_wav__metadata_validate_smpl_chunk(pChunkHeader, loopCount, samplerSpecificDataSizeInBytes, &trailingDataSizeInBytes)) {
             return totalBytesRead;
         }
+        if (pMetadata == NULL) {
+            pParser->hasAllocationError = MA_TRUE;
+            return totalBytesRead;
+        }
         pMetadata->type                                     = ma_dr_wav_metadata_type_smpl;
         pMetadata->data.smpl.manufacturerId                 = ma_dr_wav_bytes_to_u32(smplHeaderData + 0);
         pMetadata->data.smpl.productId                      = ma_dr_wav_bytes_to_u32(smplHeaderData + 4);
@@ -80999,7 +81039,13 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_pa
         pMetadata->data.smpl.smpteOffset                    = ma_dr_wav_bytes_to_u32(smplHeaderData + 24);
         pMetadata->data.smpl.sampleLoopCount                = loopCount;
         pMetadata->data.smpl.samplerSpecificDataSizeInBytes = samplerSpecificDataSizeInBytes;
-        pMetadata->data.smpl.pLoops = (ma_dr_wav_smpl_loop*)ma_dr_wav__metadata_get_memory(pParser, sizeof(ma_dr_wav_smpl_loop) * pMetadata->data.smpl.sampleLoopCount, MA_DR_WAV_METADATA_ALIGNMENT);
+        pMetadata->data.smpl.pLoops = NULL;
+        if (pMetadata->data.smpl.sampleLoopCount > 0) {
+            pMetadata->data.smpl.pLoops = (ma_dr_wav_smpl_loop*)ma_dr_wav__metadata_get_memory(pParser, sizeof(ma_dr_wav_smpl_loop) * pMetadata->data.smpl.sampleLoopCount, MA_DR_WAV_METADATA_ALIGNMENT);
+            if (pMetadata->data.smpl.pLoops == NULL) {
+                return totalBytesRead;
+            }
+        }
         for (iSampleLoop = 0; iSampleLoop < pMetadata->data.smpl.sampleLoopCount; ++iSampleLoop) {
             ma_uint8 smplLoopData[MA_DR_WAV_SMPL_LOOP_BYTES];
             bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, smplLoopData, sizeof(smplLoopData), &totalBytesRead);
@@ -81015,11 +81061,15 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_pa
         }
         if (pMetadata->data.smpl.samplerSpecificDataSizeInBytes > 0) {
             pMetadata->data.smpl.pSamplerSpecificData = ma_dr_wav__metadata_get_memory(pParser, pMetadata->data.smpl.samplerSpecificDataSizeInBytes, 1);
-            MA_DR_WAV_ASSERT(pMetadata->data.smpl.pSamplerSpecificData != NULL);
+            if (pMetadata->data.smpl.pSamplerSpecificData == NULL) {
+                return totalBytesRead;
+            }
             bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.smpl.pSamplerSpecificData, pMetadata->data.smpl.samplerSpecificDataSizeInBytes, &totalBytesRead);
             if (bytesJustRead != pMetadata->data.smpl.samplerSpecificDataSizeInBytes) {
                 return totalBytesRead;
             }
+        } else {
+            pMetadata->data.smpl.pSamplerSpecificData = NULL;
         }
         if (trailingDataSizeInBytes > 0) {
             if (!ma_dr_wav__seek_forward(pParser->onSeek, trailingDataSizeInBytes, pParser->pReadSeekUserData)) {
@@ -81027,6 +81077,7 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_smpl_to_metadata_obj(ma_dr_wav__metadata_pa
             }
             totalBytesRead += trailingDataSizeInBytes;
         }
+        *pAccepted = MA_TRUE;
     }
     return totalBytesRead;
 }
@@ -81044,10 +81095,13 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_cue_to_metadata_obj(ma_dr_wav__metadata_par
         pMetadata->type                   = ma_dr_wav_metadata_type_cue;
         pMetadata->data.cue.cuePointCount = ma_dr_wav_bytes_to_u32(cueHeaderSectionData);
         if (pMetadata->data.cue.cuePointCount == (pChunkHeader->sizeInBytes - MA_DR_WAV_CUE_BYTES) / MA_DR_WAV_CUE_POINT_BYTES) {
-            pMetadata->data.cue.pCuePoints    = (ma_dr_wav_cue_point*)ma_dr_wav__metadata_get_memory(pParser, sizeof(ma_dr_wav_cue_point) * pMetadata->data.cue.cuePointCount, MA_DR_WAV_METADATA_ALIGNMENT);
-            MA_DR_WAV_ASSERT(pMetadata->data.cue.pCuePoints != NULL);
+            pMetadata->data.cue.pCuePoints = NULL;
             if (pMetadata->data.cue.cuePointCount > 0) {
                 ma_uint32 iCuePoint;
+                pMetadata->data.cue.pCuePoints = (ma_dr_wav_cue_point*)ma_dr_wav__metadata_get_memory(pParser, sizeof(ma_dr_wav_cue_point) * pMetadata->data.cue.cuePointCount, MA_DR_WAV_METADATA_ALIGNMENT);
+                if (pMetadata->data.cue.pCuePoints == NULL) {
+                    return totalBytesRead;
+                }
                 for (iCuePoint = 0; iCuePoint < pMetadata->data.cue.cuePointCount; ++iCuePoint) {
                     ma_uint8 cuePointData[MA_DR_WAV_CUE_POINT_BYTES];
                     bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, cuePointData, sizeof(cuePointData), &totalBytesRead);
@@ -81253,6 +81307,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_bext_to_metadata_obj(ma_dr_wav__metadata_pa
             pMetadata->data.bext.timeReference = ((ma_uint64)timeReferenceHigh << 32) + timeReferenceLow;
             ma_dr_wav_buffer_reader_read_u16(&reader, &pMetadata->data.bext.version);
             pMetadata->data.bext.pUMID = ma_dr_wav__metadata_get_memory(pParser, MA_DR_WAV_BEXT_UMID_BYTES, 1);
+            if (pMetadata->data.bext.pUMID == NULL) {
+                return bytesRead;
+            }
             ma_dr_wav_buffer_reader_read(&reader, pMetadata->data.bext.pUMID, MA_DR_WAV_BEXT_UMID_BYTES, NULL);
             ma_dr_wav_buffer_reader_read_u16(&reader, &pMetadata->data.bext.loudnessValue);
             ma_dr_wav_buffer_reader_read_u16(&reader, &pMetadata->data.bext.loudnessRange);
@@ -81264,7 +81321,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_bext_to_metadata_obj(ma_dr_wav__metadata_pa
             if (extraBytes > 0) {
                 size_t codingHistoryBytesRead;
                 pMetadata->data.bext.pCodingHistory = (char*)ma_dr_wav__metadata_get_memory(pParser, extraBytes + 1, 1);
-                MA_DR_WAV_ASSERT(pMetadata->data.bext.pCodingHistory != NULL);
+                if (pMetadata->data.bext.pCodingHistory == NULL) {
+                    return bytesRead;
+                }
                 codingHistoryBytesRead = ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.bext.pCodingHistory, extraBytes, NULL);
                 pMetadata->data.bext.pCodingHistory[codingHistoryBytesRead] = '\0';
                 pMetadata->data.bext.codingHistorySize = (ma_uint32)ma_dr_wav__strlen_clamped(pMetadata->data.bext.pCodingHistory, codingHistoryBytesRead);
@@ -81291,7 +81350,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_list_label_or_note_to_metadata_obj(ma_dr_wa
         if (sizeIncludingNullTerminator > 0) {
             pMetadata->data.labelOrNote.stringLength = sizeIncludingNullTerminator - 1;
             pMetadata->data.labelOrNote.pString      = (char*)ma_dr_wav__metadata_get_memory(pParser, sizeIncludingNullTerminator, 1);
-            MA_DR_WAV_ASSERT(pMetadata->data.labelOrNote.pString != NULL);
+            if (pMetadata->data.labelOrNote.pString == NULL) {
+                return totalBytesRead;
+            }
             ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.labelOrNote.pString, sizeIncludingNullTerminator, &totalBytesRead);
         } else {
             pMetadata->data.labelOrNote.stringLength = 0;
@@ -81323,7 +81384,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__read_list_labelled_cue_region_to_metadata_obj(ma
         if (sizeIncludingNullTerminator > 0) {
             pMetadata->data.labelledCueRegion.stringLength = sizeIncludingNullTerminator - 1;
             pMetadata->data.labelledCueRegion.pString      = (char*)ma_dr_wav__metadata_get_memory(pParser, sizeIncludingNullTerminator, 1);
-            MA_DR_WAV_ASSERT(pMetadata->data.labelledCueRegion.pString != NULL);
+            if (pMetadata->data.labelledCueRegion.pString == NULL) {
+                return totalBytesRead;
+            }
             ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.labelledCueRegion.pString, sizeIncludingNullTerminator, &totalBytesRead);
         } else {
             pMetadata->data.labelledCueRegion.stringLength = 0;
@@ -81345,7 +81408,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_info_text_chunk(ma_dr_wav__meta
         if (stringSizeWithNullTerminator > 0) {
             pMetadata->data.infoText.stringLength = stringSizeWithNullTerminator - 1;
             pMetadata->data.infoText.pString = (char*)ma_dr_wav__metadata_get_memory(pParser, stringSizeWithNullTerminator, 1);
-            MA_DR_WAV_ASSERT(pMetadata->data.infoText.pString != NULL);
+            if (pMetadata->data.infoText.pString == NULL) {
+                return 0;
+            }
             bytesRead = ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.infoText.pString, (size_t)stringSizeWithNullTerminator, NULL);
             if (bytesRead == chunkSize) {
                 pParser->metadataCursor += 1;
@@ -81381,7 +81446,9 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_unknown_chunk(ma_dr_wav__metada
         pMetadata->data.unknown.id[3]           = pChunkId[3];
         pMetadata->data.unknown.dataSizeInBytes = (ma_uint32)chunkSize;
         pMetadata->data.unknown.pData           = (ma_uint8 *)ma_dr_wav__metadata_get_memory(pParser, (size_t)chunkSize, 1);
-        MA_DR_WAV_ASSERT(pMetadata->data.unknown.pData != NULL);
+        if (pMetadata->data.unknown.pData == NULL) {
+            return 0;
+        }
         bytesRead = ma_dr_wav__metadata_parser_read(pParser, pMetadata->data.unknown.pData, pMetadata->data.unknown.dataSizeInBytes, NULL);
         if (bytesRead == pMetadata->data.unknown.dataSizeInBytes) {
             pParser->metadataCursor += 1;
@@ -81398,6 +81465,15 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_chunk(ma_dr_wav__metadata_parse
 {
     const ma_uint8 *pChunkID = pChunkHeader->id.fourcc;
     ma_uint64 bytesRead = 0;
+    if (pParser->stage == ma_dr_wav__metadata_parser_stage_read && (pParser->pMetadata == NULL || pParser->metadataCursor >= pParser->metadataCount)) {
+        if (!ma_dr_wav_fourcc_equal(pChunkID, "smpl")) {
+            if (ma_dr_wav_fourcc_equal(pChunkID, "data") || ma_dr_wav_fourcc_equal(pChunkID, "fmt ") || ma_dr_wav_fourcc_equal(pChunkID, "fact")) {
+                return 0;
+            }
+            pParser->hasAllocationError = MA_TRUE;
+            return 0;
+        }
+    }
     if (ma_dr_wav__chunk_matches(allowedMetadataTypes, pChunkID, ma_dr_wav_metadata_type_smpl, "smpl")) {
         if (pChunkHeader->sizeInBytes >= MA_DR_WAV_SMPL_BYTES) {
             if (pParser->stage == ma_dr_wav__metadata_parser_stage_count) {
@@ -81421,10 +81497,20 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_chunk(ma_dr_wav__metadata_parse
                     }
                 }
             } else {
-                bytesRead = ma_dr_wav__read_smpl_to_metadata_obj(pParser, pChunkHeader, &pParser->pMetadata[pParser->metadataCursor]);
-                if (bytesRead == pChunkHeader->sizeInBytes) {
+                ma_bool32 accepted;
+                ma_uint8* pDataCursorBefore = pParser->pDataCursor;
+                ma_dr_wav_metadata* pMetadata = NULL;
+                if (pParser->pMetadata != NULL && pParser->metadataCursor < pParser->metadataCount) {
+                    pMetadata = &pParser->pMetadata[pParser->metadataCursor];
+                }
+                bytesRead = ma_dr_wav__read_smpl_to_metadata_obj(pParser, pChunkHeader, pMetadata, &accepted);
+                if (accepted) {
                     pParser->metadataCursor += 1;
                 } else {
+                    pParser->pDataCursor = pDataCursorBefore;
+                    if (pMetadata != NULL) {
+                        MA_DR_WAV_ZERO_OBJECT(pMetadata);
+                    }
                 }
             }
         } else {
@@ -81821,13 +81907,23 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
     for (;;) {
         ma_dr_wav_chunk_header header;
         ma_uint64 chunkSize;
+        ma_uint64 chunkPaddingSize;
         result = ma_dr_wav__read_chunk_header(pWav->onRead, pWav->pUserData, pWav->container, &cursor, &header);
         if (result != MA_SUCCESS) {
             break;
         }
         chunkSize = header.sizeInBytes;
+        chunkPaddingSize = header.paddingSize;
+        if (pWav->container == ma_dr_wav_container_rf64 && header.sizeInBytes == 0xFFFFFFFF && ma_dr_wav_fourcc_equal(header.id.fourcc, "data")) {
+            chunkSize = dataChunkSize;
+            chunkPaddingSize = ma_dr_wav__chunk_padding_size_riff(chunkSize);
+        }
         if (isProcessingMetadata && hasKnownFileSize) {
-            ma_uint64 chunkSizeWithPadding = header.sizeInBytes + header.paddingSize;
+            ma_uint64 chunkSizeWithPadding;
+            if (chunkSize > MA_UINT64_MAX - chunkPaddingSize) {
+                return MA_FALSE;
+            }
+            chunkSizeWithPadding = chunkSize + chunkPaddingSize;
             if (cursor > fileSize || chunkSizeWithPadding > fileSize - cursor) {
                 return MA_FALSE;
             }
@@ -81908,11 +82004,11 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                 }
                 cursor += leftoverBytes;
             }
-            if (header.paddingSize > 0) {
-                if (ma_dr_wav__seek_forward(pWav->onSeek, header.paddingSize, pWav->pUserData) == MA_FALSE) {
+            if (chunkPaddingSize > 0) {
+                if (ma_dr_wav__seek_forward(pWav->onSeek, chunkPaddingSize, pWav->pUserData) == MA_FALSE) {
                     break;
                 }
-                cursor += header.paddingSize;
+                cursor += chunkPaddingSize;
             }
             continue;
         }
@@ -81926,7 +82022,7 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             if (sequential || !isProcessingMetadata) {
                 break;
             } else {
-                chunkSize += header.paddingSize;
+                chunkSize += chunkPaddingSize;
                 if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSize, pWav->pUserData) == MA_FALSE) {
                     break;
                 }
@@ -81960,7 +82056,7 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                 chunkSize -= 8;
             } else if (pWav->container == ma_dr_wav_container_rf64) {
             }
-            chunkSize += header.paddingSize;
+            chunkSize += chunkPaddingSize;
             if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSize, pWav->pUserData) == MA_FALSE) {
                 break;
             }
@@ -82081,7 +82177,7 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                     return MA_FALSE;
                 }
             } else {
-                chunkSize += header.paddingSize;
+                chunkSize += chunkPaddingSize;
                 chunkSize -= sizeof(offsetAndBlockSizeData);
                 if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSize, pWav->pUserData) == MA_FALSE) {
                     break;
@@ -82096,7 +82192,7 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                 break;
             }
         }
-        chunkSize += header.paddingSize;
+        chunkSize += chunkPaddingSize;
         if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSize, pWav->pUserData) == MA_FALSE) {
             break;
         }
@@ -82133,23 +82229,41 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
         metadataParser.stage = ma_dr_wav__metadata_parser_stage_read;
         for (;;) {
             ma_dr_wav_chunk_header header;
+            ma_uint64 chunkSize;
+            ma_uint64 chunkPaddingSize;
+            ma_uint64 chunkSizeWithPadding;
             ma_uint64 metadataBytesRead;
             result = ma_dr_wav__read_chunk_header(pWav->onRead, pWav->pUserData, pWav->container, &cursor, &header);
             if (result != MA_SUCCESS) {
                 break;
             }
-            metadataBytesRead = ma_dr_wav__metadata_process_chunk(&metadataParser, &header, ma_dr_wav_metadata_type_all_including_unknown);
-            if (metadataBytesRead > header.sizeInBytes + header.paddingSize) {
+            chunkSize = header.sizeInBytes;
+            chunkPaddingSize = header.paddingSize;
+            if (pWav->container == ma_dr_wav_container_rf64 && header.sizeInBytes == 0xFFFFFFFF && ma_dr_wav_fourcc_equal(header.id.fourcc, "data")) {
+                chunkSize = dataChunkSize;
+                chunkPaddingSize = ma_dr_wav__chunk_padding_size_riff(chunkSize);
+            }
+            if (chunkSize > MA_UINT64_MAX - chunkPaddingSize) {
                 ma_dr_wav_free(metadataParser.pMetadata, &pWav->allocationCallbacks);
                 return MA_FALSE;
             }
-            if (ma_dr_wav__seek_forward(pWav->onSeek, (header.sizeInBytes + header.paddingSize) - metadataBytesRead, pWav->pUserData) == MA_FALSE) {
+            chunkSizeWithPadding = chunkSize + chunkPaddingSize;
+            metadataBytesRead = ma_dr_wav__metadata_process_chunk(&metadataParser, &header, ma_dr_wav_metadata_type_all_including_unknown);
+            if (metadataParser.hasAllocationError) {
+                ma_dr_wav_free(metadataParser.pMetadata, &pWav->allocationCallbacks);
+                return MA_FALSE;
+            }
+            if (metadataBytesRead > chunkSizeWithPadding) {
+                ma_dr_wav_free(metadataParser.pMetadata, &pWav->allocationCallbacks);
+                return MA_FALSE;
+            }
+            if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSizeWithPadding - metadataBytesRead, pWav->pUserData) == MA_FALSE) {
                 ma_dr_wav_free(metadataParser.pMetadata, &pWav->allocationCallbacks);
                 return MA_FALSE;
             }
         }
         pWav->pMetadata     = metadataParser.pMetadata;
-        pWav->metadataCount = metadataParser.metadataCount;
+        pWav->metadataCount = (ma_uint32)metadataParser.metadataCursor;
     }
     if (pWav->onTell != NULL && pWav->onSeek != NULL) {
         if (pWav->onSeek(pWav->pUserData, 0, MA_DR_WAV_SEEK_END) == MA_TRUE) {
