@@ -96246,6 +96246,26 @@ static ma_bool32 ma_dr_mp3_seek_forward_by_pcm_frames__brute_force(ma_dr_mp3* pM
     }
     return MA_TRUE;
 }
+static ma_bool32 ma_dr_mp3_seek_forward_by_pcm_frames__raw(ma_dr_mp3* pMP3, ma_uint64 frameOffset)
+{
+    while (frameOffset > 0) {
+        ma_uint32 framesToSkip;
+
+        if (pMP3->pcmFramesRemainingInMP3Frame == 0) {
+            if (ma_dr_mp3_decode_next_frame(pMP3) == 0) {
+                return MA_FALSE;
+            }
+        }
+
+        framesToSkip = (ma_uint32)MA_DR_MP3_MIN(frameOffset, pMP3->pcmFramesRemainingInMP3Frame);
+        pMP3->currentPCMFrame              += framesToSkip;
+        pMP3->pcmFramesConsumedInMP3Frame  += framesToSkip;
+        pMP3->pcmFramesRemainingInMP3Frame -= framesToSkip;
+        frameOffset                        -= framesToSkip;
+    }
+
+    return MA_TRUE;
+}
 static ma_bool32 ma_dr_mp3_seek_to_pcm_frame__brute_force(ma_dr_mp3* pMP3, ma_uint64 frameIndex)
 {
     MA_DR_MP3_ASSERT(pMP3 != NULL);
@@ -96356,7 +96376,8 @@ MA_API ma_bool32 ma_dr_mp3_get_mp3_and_pcm_frame_count(ma_dr_mp3* pMP3, ma_uint6
     if (!ma_dr_mp3_seek_to_start_of_stream(pMP3)) {
         return MA_FALSE;
     }
-    if (!ma_dr_mp3_seek_to_pcm_frame(pMP3, currentPCMFrame)) {
+    /* currentPCMFrame includes frames hidden by encoder delay, so restore it without applying gapless trimming a second time. */
+    if (!ma_dr_mp3_seek_forward_by_pcm_frames__raw(pMP3, currentPCMFrame)) {
         return MA_FALSE;
     }
     if (pMP3FrameCount != NULL) {
@@ -96373,23 +96394,28 @@ MA_API ma_uint64 ma_dr_mp3_get_pcm_frame_count(ma_dr_mp3* pMP3)
     if (pMP3 == NULL) {
         return 0;
     }
-    if (pMP3->totalPCMFrameCount != MA_UINT64_MAX) {
-        totalPCMFrameCount = pMP3->totalPCMFrameCount;
-        if (totalPCMFrameCount >= pMP3->delayInPCMFrames) {
-            totalPCMFrameCount -= pMP3->delayInPCMFrames;
-        } else {
-        }
-        if (totalPCMFrameCount >= pMP3->paddingInPCMFrames) {
-            totalPCMFrameCount -= pMP3->paddingInPCMFrames;
-        } else {
-        }
-        return totalPCMFrameCount;
-    } else {
-        if (!ma_dr_mp3_get_mp3_and_pcm_frame_count(pMP3, NULL, &totalPCMFrameCount)) {
-            return 0;
-        }
-        return totalPCMFrameCount;
+
+    /*
+    The frame count in a Xing/Info header is supplied by the input and is therefore only a hint.
+    Always scan the stream before exposing a length that callers may use for allocation. This also
+    agrees with this API's documented linear-time behavior. Cache the validated raw count so gapless
+    padding is applied against the actual stream extent during subsequent reads.
+    */
+    if (!ma_dr_mp3_get_mp3_and_pcm_frame_count(pMP3, NULL, &totalPCMFrameCount)) {
+        return 0;
     }
+    pMP3->totalPCMFrameCount = totalPCMFrameCount;
+
+    if (totalPCMFrameCount >= pMP3->delayInPCMFrames) {
+        totalPCMFrameCount -= pMP3->delayInPCMFrames;
+    } else {
+    }
+    if (totalPCMFrameCount >= pMP3->paddingInPCMFrames) {
+        totalPCMFrameCount -= pMP3->paddingInPCMFrames;
+    } else {
+    }
+
+    return totalPCMFrameCount;
 }
 MA_API ma_uint64 ma_dr_mp3_get_mp3_frame_count(ma_dr_mp3* pMP3)
 {

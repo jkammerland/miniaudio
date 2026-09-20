@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Original issue #1117 attachment, bad-length.mp3.
    SHA-256: def360067fce53bb73425193784e073216f358a158eaa7ecfe3d06241555e14a. */
@@ -18,6 +19,14 @@ typedef struct
 {
     size_t largestRequest;
 } mp3_allocator_state;
+
+typedef struct
+{
+    ma_vfs_callbacks callbacks;
+    const ma_uint8* pData;
+    size_t dataSize;
+    size_t cursor;
+} mp3_memory_vfs;
 
 static void* mp3_malloc(size_t size, void* pUserData)
 {
@@ -49,6 +58,82 @@ static void mp3_free(void* pMemory, void* pUserData)
     free(pMemory);
 }
 
+static ma_result mp3_memory_vfs_on_open(ma_vfs* pVFS, const char* pFilePath, ma_uint32 openMode, ma_vfs_file* pFile)
+{
+    mp3_memory_vfs* pMemoryVFS = (mp3_memory_vfs*)pVFS;
+
+    (void)pFilePath;
+    if ((openMode & MA_OPEN_MODE_READ) == 0) {
+        return MA_INVALID_OPERATION;
+    }
+
+    pMemoryVFS->cursor = 0;
+    *pFile = (ma_vfs_file)pMemoryVFS;
+    return MA_SUCCESS;
+}
+
+static ma_result mp3_memory_vfs_on_close(ma_vfs* pVFS, ma_vfs_file file)
+{
+    (void)pVFS;
+    (void)file;
+    return MA_SUCCESS;
+}
+
+static ma_result mp3_memory_vfs_on_read(ma_vfs* pVFS, ma_vfs_file file, void* pDst, size_t sizeInBytes, size_t* pBytesRead)
+{
+    mp3_memory_vfs* pMemoryVFS = (mp3_memory_vfs*)pVFS;
+    size_t bytesRemaining;
+
+    (void)file;
+    bytesRemaining = pMemoryVFS->dataSize - pMemoryVFS->cursor;
+    if (sizeInBytes > bytesRemaining) {
+        sizeInBytes = bytesRemaining;
+    }
+
+    if (sizeInBytes > 0) {
+        memcpy(pDst, pMemoryVFS->pData + pMemoryVFS->cursor, sizeInBytes);
+        pMemoryVFS->cursor += sizeInBytes;
+    }
+    if (pBytesRead != NULL) {
+        *pBytesRead = sizeInBytes;
+    }
+
+    return MA_SUCCESS;
+}
+
+static ma_result mp3_memory_vfs_on_seek(ma_vfs* pVFS, ma_vfs_file file, ma_int64 offset, ma_seek_origin origin)
+{
+    mp3_memory_vfs* pMemoryVFS = (mp3_memory_vfs*)pVFS;
+    ma_int64 base;
+
+    (void)file;
+    if (origin == ma_seek_origin_start) {
+        base = 0;
+    } else if (origin == ma_seek_origin_current) {
+        base = (ma_int64)pMemoryVFS->cursor;
+    } else if (origin == ma_seek_origin_end) {
+        base = (ma_int64)pMemoryVFS->dataSize;
+    } else {
+        return MA_INVALID_ARGS;
+    }
+
+    if (offset < -base || offset > (ma_int64)pMemoryVFS->dataSize - base) {
+        return MA_BAD_SEEK;
+    }
+
+    pMemoryVFS->cursor = (size_t)(base + offset);
+    return MA_SUCCESS;
+}
+
+static ma_result mp3_memory_vfs_on_tell(ma_vfs* pVFS, ma_vfs_file file, ma_int64* pCursor)
+{
+    mp3_memory_vfs* pMemoryVFS = (mp3_memory_vfs*)pVFS;
+
+    (void)file;
+    *pCursor = (ma_int64)pMemoryVFS->cursor;
+    return MA_SUCCESS;
+}
+
 static int mp3_test_truncated_metadata(void)
 {
     ma_decoder decoder;
@@ -61,19 +146,51 @@ static int mp3_test_truncated_metadata(void)
 
 static int mp3_test_frame_count(void)
 {
-    const ma_uint64 expectedFrameCount = (ma_uint64)0x73000002 * 1152;
+    const ma_uint64 declaredFrameCount = (ma_uint64)0x73000002 * 1152;
+    const ma_uint64 expectedRawFrameCount = 2304;
+    const ma_uint64 expectedAudibleFrameCount = 210;
+    float frames[32 * 2];
+    ma_uint64 actualFrameCount;
     ma_dr_mp3 mp3;
 
     if (!ma_dr_mp3_init_memory(&mp3, g_mp3_1117, sizeof(g_mp3_1117), NULL)) {
         printf("issue 1117 fixture failed to initialize\n");
         return 1;
     }
-    if (mp3.totalPCMFrameCount != expectedFrameCount) {
-        printf("MP3 frame count was %u:%08u, expected %u:%08u\n",
+    if (mp3.totalPCMFrameCount != declaredFrameCount) {
+        printf("MP3 declared frame count was %u:%08u, expected %u:%08u\n",
             (ma_uint32)(mp3.totalPCMFrameCount >> 32), (ma_uint32)mp3.totalPCMFrameCount,
-            (ma_uint32)(expectedFrameCount >> 32), (ma_uint32)expectedFrameCount);
+            (ma_uint32)(declaredFrameCount >> 32), (ma_uint32)declaredFrameCount);
         ma_dr_mp3_uninit(&mp3);
         return 1;
+    }
+
+    actualFrameCount = ma_dr_mp3_get_pcm_frame_count(&mp3);
+    if (actualFrameCount != expectedAudibleFrameCount || mp3.totalPCMFrameCount != expectedRawFrameCount) {
+        printf("MP3 validated frame count was %u:%08u (raw %u:%08u), expected %u (raw %u)\n",
+            (ma_uint32)(actualFrameCount >> 32), (ma_uint32)actualFrameCount,
+            (ma_uint32)(mp3.totalPCMFrameCount >> 32), (ma_uint32)mp3.totalPCMFrameCount,
+            (ma_uint32)expectedAudibleFrameCount, (ma_uint32)expectedRawFrameCount);
+        ma_dr_mp3_uninit(&mp3);
+        return 1;
+    }
+
+    if (ma_dr_mp3_read_pcm_frames_f32(&mp3, 32, frames) != 32) {
+        printf("MP3 failed to advance before a repeated length query\n");
+        ma_dr_mp3_uninit(&mp3);
+        return 1;
+    }
+    {
+        ma_uint64 cursorBeforeLengthQuery = mp3.currentPCMFrame;
+        actualFrameCount = ma_dr_mp3_get_pcm_frame_count(&mp3);
+        if (actualFrameCount != expectedAudibleFrameCount || mp3.currentPCMFrame != cursorBeforeLengthQuery) {
+            printf("MP3 repeated length query changed cursor from %u:%08u to %u:%08u (length %u:%08u)\n",
+                (ma_uint32)(cursorBeforeLengthQuery >> 32), (ma_uint32)cursorBeforeLengthQuery,
+                (ma_uint32)(mp3.currentPCMFrame >> 32), (ma_uint32)mp3.currentPCMFrame,
+                (ma_uint32)(actualFrameCount >> 32), (ma_uint32)actualFrameCount);
+            ma_dr_mp3_uninit(&mp3);
+            return 1;
+        }
     }
     ma_dr_mp3_uninit(&mp3);
     return 0;
@@ -109,11 +226,96 @@ static int mp3_test_full_decode_allocation(void)
     return 0;
 }
 
+static int mp3_test_resource_manager_allocation(void)
+{
+    const ma_uint64 expectedAudibleFrameCount = 210;
+    mp3_allocator_state state;
+    mp3_memory_vfs vfs;
+    ma_uint8 hostileData[sizeof(g_mp3_1117)];
+    ma_resource_manager_config config;
+    ma_resource_manager resourceManager;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_uint64 frameCount = 0;
+    ma_bool32 resourceManagerInitialized = MA_FALSE;
+    ma_bool32 dataBufferInitialized = MA_FALSE;
+    ma_result result;
+    int failed = 0;
+
+    MA_ZERO_OBJECT(&state);
+    MA_ZERO_OBJECT(&vfs);
+    memcpy(hostileData, g_mp3_1117, sizeof(hostileData));
+    /* Keep the forged allocation below the header's conservative 32-bit MA_SIZE_MAX fallback. */
+    hostileData[44] = 0x00;
+    hostileData[45] = 0x01;
+    hostileData[46] = 0x00;
+    hostileData[47] = 0x00;
+    vfs.callbacks.onOpen  = mp3_memory_vfs_on_open;
+    vfs.callbacks.onClose = mp3_memory_vfs_on_close;
+    vfs.callbacks.onRead  = mp3_memory_vfs_on_read;
+    vfs.callbacks.onSeek  = mp3_memory_vfs_on_seek;
+    vfs.callbacks.onTell  = mp3_memory_vfs_on_tell;
+    vfs.pData = hostileData;
+    vfs.dataSize = sizeof(hostileData);
+
+    config = ma_resource_manager_config_init();
+    config.allocationCallbacks.pUserData = &state;
+    config.allocationCallbacks.onMalloc  = mp3_malloc;
+    config.allocationCallbacks.onRealloc = mp3_realloc;
+    config.allocationCallbacks.onFree    = mp3_free;
+    config.pVFS = (ma_vfs*)&vfs;
+    config.jobThreadCount = 0;
+    config.jobQueueCapacity = 8;
+    config.flags = MA_RESOURCE_MANAGER_FLAG_NO_THREADING;
+
+    result = ma_resource_manager_init(&config, &resourceManager);
+    if (result != MA_SUCCESS) {
+        printf("resource manager init failed: %d\n", result);
+        return 1;
+    }
+    resourceManagerInitialized = MA_TRUE;
+
+    result = ma_resource_manager_data_buffer_init(
+        &resourceManager,
+        "hostile-xing.mp3",
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE,
+        NULL,
+        &dataBuffer);
+    if (result != MA_SUCCESS) {
+        printf("resource manager hostile MP3 decode failed: %d (largest allocation %lu)\n", result, (unsigned long)state.largestRequest);
+        failed = 1;
+        goto done;
+    }
+    dataBufferInitialized = MA_TRUE;
+
+    result = ma_resource_manager_data_buffer_get_length_in_pcm_frames(&dataBuffer, &frameCount);
+    if (result != MA_SUCCESS || frameCount != expectedAudibleFrameCount) {
+        printf("resource manager hostile MP3 length was %u:%08u, expected %u (result %d)\n",
+            (ma_uint32)(frameCount >> 32), (ma_uint32)frameCount,
+            (ma_uint32)expectedAudibleFrameCount, result);
+        failed = 1;
+    }
+    if (state.largestRequest > 1024 * 1024) {
+        printf("resource manager trusted hostile MP3 length for a %lu-byte allocation\n", (unsigned long)state.largestRequest);
+        failed = 1;
+    }
+
+done:
+    if (dataBufferInitialized) {
+        ma_resource_manager_data_buffer_uninit(&dataBuffer);
+    }
+    if (resourceManagerInitialized) {
+        ma_resource_manager_uninit(&resourceManager);
+    }
+
+    return failed;
+}
+
 int main(void)
 {
     int failed = 0;
     failed += mp3_test_truncated_metadata();
     failed += mp3_test_frame_count();
     failed += mp3_test_full_decode_allocation();
+    failed += mp3_test_resource_manager_allocation();
     return failed != 0;
 }
