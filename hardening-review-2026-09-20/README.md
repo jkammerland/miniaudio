@@ -14,6 +14,11 @@ unchanged.
 These documents are proposals. No production source has been changed, and none
 of the proposed fixes should be treated as implemented or validated yet.
 
+The copy/paste-ready implementation handoff is in
+[IMPLEMENTATION-PROMPT.md](IMPLEMENTATION-PROMPT.md). It requires per-issue
+red/green evidence and durable native Windows/macOS validation through the
+offload endpoints.
+
 ## Issue index
 
 | Priority | Issue | Checkout result | Platform |
