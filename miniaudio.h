@@ -71037,6 +71037,8 @@ static ma_result ma_resource_manager_data_buffer_node_decode_next_page(ma_resour
     return result;
 }
 
+static ma_result ma_resource_manager_data_buffer_node_unacquire(ma_resource_manager* pResourceManager, ma_resource_manager_data_buffer_node* pDataBufferNode, const char* pName, const wchar_t* pNameW);
+
 static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(ma_resource_manager* pResourceManager, const char* pFilePath, const wchar_t* pFilePathW, ma_uint32 hashedName32, ma_uint32 flags, const ma_resource_manager_data_supply* pExistingData, ma_fence* pInitFence, ma_fence* pDoneFence, ma_resource_manager_inline_notification* pInitNotification, ma_resource_manager_data_buffer_node** ppDataBufferNode)
 {
     ma_result result = MA_SUCCESS;
@@ -71312,8 +71314,17 @@ done:
         /* If we failed to initialize the data buffer we need to free it. */
         if (result != MA_SUCCESS) {
             if (nodeAlreadyExists == MA_FALSE) {
-                ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
-                ma_free(pDataBufferNode, &pResourceManager->config.allocationCallbacks);
+                ma_result unacquireResult;
+
+                /*
+                The node has been visible since the BST lock was released, so another caller may
+                already own a reference. Publish the failure and release only this caller's
+                reference through the normal locked retirement path.
+                */
+                ma_atomic_exchange_i32(&pDataBufferNode->result, result);
+                unacquireResult = ma_resource_manager_data_buffer_node_unacquire(pResourceManager, pDataBufferNode, NULL, NULL);
+                MA_ASSERT(unacquireResult == MA_SUCCESS);
+                (void)unacquireResult;
                 pDataBufferNode = NULL;
             }
         }
