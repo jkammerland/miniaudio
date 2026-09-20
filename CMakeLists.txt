@@ -774,6 +774,11 @@ if(MINIAUDIO_BUILD_TESTS)
         add_miniaudio_test(miniaudio_hardening_wasapi_lifecycle hardening/hardening_wasapi_lifecycle.c)
         add_test(NAME miniaudio_hardening_wasapi_lifecycle COMMAND miniaudio_hardening_wasapi_lifecycle)
     endif()
+
+    if(APPLE)
+        add_miniaudio_test(miniaudio_hardening_coreaudio_lifecycle hardening/hardening_coreaudio_lifecycle.c)
+        add_test(NAME miniaudio_hardening_coreaudio_lifecycle COMMAND miniaudio_hardening_coreaudio_lifecycle)
+    endif()
 endif()
 
 # Examples
