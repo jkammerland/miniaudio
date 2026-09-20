@@ -747,6 +747,9 @@ if(MINIAUDIO_BUILD_TESTS)
     add_miniaudio_test(miniaudio_hardening_wav hardening/hardening_wav.c)
     add_test(NAME miniaudio_hardening_wav COMMAND miniaudio_hardening_wav)
     set_tests_properties(miniaudio_hardening_wav PROPERTIES TIMEOUT 5)
+
+    add_miniaudio_test(miniaudio_hardening_wav_metadata hardening/hardening_wav_metadata.c)
+    add_test(NAME miniaudio_hardening_wav_metadata COMMAND miniaudio_hardening_wav_metadata)
 endif()
 
 # Examples
