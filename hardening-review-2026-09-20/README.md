@@ -1,5 +1,11 @@
 # Miniaudio 0.11.25 hardening review
 
+> **Current implementation status:** the later implementation is not
+> acceptance-ready. See [UNRESOLVED.md](UNRESOLVED.md) for the authoritative
+> delivery blockers, the independent Astra-max review result, and native
+> validation limits. The proposal language below describes the earlier review
+> phase and is retained as historical context.
+
 This directory contains the phase-one investigation for the miniaudio fork at
 commit `9634bedb5b5a2ca38c1ee7108a9358a4e233f14d` (version 0.11.25). Each
 upstream issue has its own review file with checkout applicability, evidence,
