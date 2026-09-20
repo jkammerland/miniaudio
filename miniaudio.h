@@ -77007,6 +77007,9 @@ static void ma_engine_node_process_pcm_frames__sound(ma_node* pNode, const float
                     }
 
                     framesJustRead = totalFramesConverted;
+                    if (result == MA_AT_END && framesJustRead > 0) {
+                        result = MA_SUCCESS;
+                    }
                 }
 
                 MA_ASSERT(framesJustRead <= pSound->processingCacheCap);

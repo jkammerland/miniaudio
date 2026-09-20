@@ -763,6 +763,9 @@ if(MINIAUDIO_BUILD_TESTS)
     add_miniaudio_test(miniaudio_hardening_gainer_scalar hardening/hardening_gainer.c)
     target_compile_definitions(miniaudio_hardening_gainer_scalar PRIVATE MA_NO_SSE2)
     add_test(NAME miniaudio_hardening_gainer_scalar COMMAND miniaudio_hardening_gainer_scalar)
+
+    add_miniaudio_test(miniaudio_hardening_engine_eof hardening/hardening_engine_eof.c)
+    add_test(NAME miniaudio_hardening_engine_eof COMMAND miniaudio_hardening_engine_eof)
 endif()
 
 # Examples
