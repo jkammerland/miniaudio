@@ -6,6 +6,11 @@ upstream issue has its own review file with checkout applicability, evidence,
 suspect code, a potential fix, regression tests, compatibility considerations,
 and validation limits.
 
+The independent follow-up review at [follow-up-review.md](follow-up-review.md)
+refreshes the upstream issue status and reviews the current development-branch
+patches against this checkout. It is still an audit note: production source is
+unchanged.
+
 These documents are proposals. No production source has been changed, and none
 of the proposed fixes should be treated as implemented or validated yet.
 
