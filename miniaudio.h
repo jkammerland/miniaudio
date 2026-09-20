@@ -70196,26 +70196,56 @@ static ma_result ma_resource_manager_data_buffer_node_decrement_ref(ma_resource_
     return MA_SUCCESS;
 }
 
+static void ma_resource_manager_data_buffer_node_uninit_supply(ma_resource_manager* pResourceManager, ma_resource_manager_data_buffer_node* pDataBufferNode)
+{
+    ma_resource_manager_data_supply_type supplyType;
+
+    MA_ASSERT(pResourceManager != NULL);
+    MA_ASSERT(pDataBufferNode  != NULL);
+
+    supplyType = ma_resource_manager_data_buffer_node_get_data_supply_type(pDataBufferNode);
+    switch (supplyType)
+    {
+        case ma_resource_manager_data_supply_type_encoded:
+        {
+            ma_free((void*)pDataBufferNode->data.backend.encoded.pData, &pResourceManager->config.allocationCallbacks);
+            pDataBufferNode->data.backend.encoded.pData       = NULL;
+            pDataBufferNode->data.backend.encoded.sizeInBytes = 0;
+        } break;
+
+        case ma_resource_manager_data_supply_type_decoded:
+        {
+            ma_free((void*)pDataBufferNode->data.backend.decoded.pData, &pResourceManager->config.allocationCallbacks);
+            pDataBufferNode->data.backend.decoded.pData           = NULL;
+            pDataBufferNode->data.backend.decoded.totalFrameCount = 0;
+            pDataBufferNode->data.backend.decoded.decodedFrameCount = 0;
+        } break;
+
+        case ma_resource_manager_data_supply_type_decoded_paged:
+        {
+            ma_paged_audio_buffer_data_uninit(&pDataBufferNode->data.backend.decodedPaged.data, &pResourceManager->config.allocationCallbacks);
+            pDataBufferNode->data.backend.decodedPaged.decodedFrameCount = 0;
+        } break;
+
+        case ma_resource_manager_data_supply_type_unknown:
+        default:
+        {
+            /* There is no initialized supply to release. */
+        } break;
+    }
+
+    ma_resource_manager_data_buffer_node_set_data_supply_type(pDataBufferNode, ma_resource_manager_data_supply_type_unknown);
+}
+
 static void ma_resource_manager_data_buffer_node_free(ma_resource_manager* pResourceManager, ma_resource_manager_data_buffer_node* pDataBufferNode)
 {
     MA_ASSERT(pResourceManager != NULL);
     MA_ASSERT(pDataBufferNode  != NULL);
 
     if (pDataBufferNode->isDataOwnedByResourceManager) {
-        if (ma_resource_manager_data_buffer_node_get_data_supply_type(pDataBufferNode) == ma_resource_manager_data_supply_type_encoded) {
-            ma_free((void*)pDataBufferNode->data.backend.encoded.pData, &pResourceManager->config.allocationCallbacks);
-            pDataBufferNode->data.backend.encoded.pData       = NULL;
-            pDataBufferNode->data.backend.encoded.sizeInBytes = 0;
-        } else if (ma_resource_manager_data_buffer_node_get_data_supply_type(pDataBufferNode) == ma_resource_manager_data_supply_type_decoded) {
-            ma_free((void*)pDataBufferNode->data.backend.decoded.pData, &pResourceManager->config.allocationCallbacks);
-            pDataBufferNode->data.backend.decoded.pData           = NULL;
-            pDataBufferNode->data.backend.decoded.totalFrameCount = 0;
-        } else if (ma_resource_manager_data_buffer_node_get_data_supply_type(pDataBufferNode) == ma_resource_manager_data_supply_type_decoded_paged) {
-            ma_paged_audio_buffer_data_uninit(&pDataBufferNode->data.backend.decodedPaged.data, &pResourceManager->config.allocationCallbacks);
-        } else {
-            /* Should never hit this if the node was successfully initialized. */
-            MA_ASSERT(pDataBufferNode->result != MA_SUCCESS);
-        }
+        /* A successful owned node must have published a supply before it can be freed. */
+        MA_ASSERT(ma_resource_manager_data_buffer_node_get_data_supply_type(pDataBufferNode) != ma_resource_manager_data_supply_type_unknown || pDataBufferNode->result != MA_SUCCESS);
+        ma_resource_manager_data_buffer_node_uninit_supply(pResourceManager, pDataBufferNode);
     }
 
     /* The data buffer itself needs to be freed. */
@@ -70855,6 +70885,7 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
 {
     ma_result result = MA_SUCCESS;
     ma_decoder* pDecoder;
+    ma_bool32 isDecoderInitialized = MA_FALSE;
     ma_uint64 totalFrameCount;
 
     MA_ASSERT(pResourceManager != NULL);
@@ -70871,9 +70902,9 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
 
     result = ma_resource_manager__init_decoder(pResourceManager, pFilePath, pFilePathW, pDecoder);
     if (result != MA_SUCCESS) {
-        ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
-        return result;
+        goto done;
     }
+    isDecoderInitialized = MA_TRUE;
 
     /*
     At this point we have the decoder and we now need to initialize the data supply. This will
@@ -70884,7 +70915,7 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
     if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_UNKNOWN_LENGTH) == 0) {
         result = ma_decoder_get_length_in_pcm_frames(pDecoder, &totalFrameCount);
         if (result != MA_SUCCESS) {
-            return result;
+            goto done;
         }
     } else {
         totalFrameCount = 0;
@@ -70893,20 +70924,25 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
     if (totalFrameCount > 0) {
         /* It's a known length. The data supply is a regular decoded buffer. */
         ma_uint64 dataSizeInBytes;
+        ma_uint32 bytesPerFrame;
         void* pData;
 
-        dataSizeInBytes = totalFrameCount * ma_get_bytes_per_frame(pDecoder->outputFormat, pDecoder->outputChannels);
+        bytesPerFrame = ma_get_bytes_per_frame(pDecoder->outputFormat, pDecoder->outputChannels);
+        if (bytesPerFrame == 0 || totalFrameCount > MA_UINT64_MAX / bytesPerFrame) {
+            result = MA_TOO_BIG;
+            goto done;
+        }
+
+        dataSizeInBytes = totalFrameCount * bytesPerFrame;
         if (dataSizeInBytes > MA_SIZE_MAX) {
-            ma_decoder_uninit(pDecoder);
-            ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
-            return MA_TOO_BIG;
+            result = MA_TOO_BIG;
+            goto done;
         }
 
         pData = ma_malloc((size_t)dataSizeInBytes, &pResourceManager->config.allocationCallbacks);
         if (pData == NULL) {
-            ma_decoder_uninit(pDecoder);
-            ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
-            return MA_OUT_OF_MEMORY;
+            result = MA_OUT_OF_MEMORY;
+            goto done;
         }
 
         /* The buffer needs to be initialized to silence in case the caller reads from it. */
@@ -70928,9 +70964,7 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
         */
         result = ma_paged_audio_buffer_data_init(pDecoder->outputFormat, pDecoder->outputChannels, &pDataBufferNode->data.backend.decodedPaged.data);
         if (result != MA_SUCCESS) {
-            ma_decoder_uninit(pDecoder);
-            ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
-            return result;
+            goto done;
         }
 
         pDataBufferNode->data.backend.decodedPaged.sampleRate        = pDecoder->outputSampleRate;
@@ -70941,6 +70975,13 @@ static ma_result ma_resource_manager_data_buffer_node_init_supply_decoded(ma_res
     *ppDecoder = pDecoder;
 
     return MA_SUCCESS;
+
+done:
+    if (isDecoderInitialized) {
+        ma_decoder_uninit(pDecoder);
+    }
+    ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
+    return result;
 }
 
 static ma_result ma_resource_manager_data_buffer_node_decode_next_page(ma_resource_manager* pResourceManager, ma_resource_manager_data_buffer_node* pDataBufferNode, ma_decoder* pDecoder)
@@ -71014,9 +71055,11 @@ static ma_result ma_resource_manager_data_buffer_node_decode_next_page(ma_resour
                     result = MA_AT_END;
                 }
             } else {
-                /* No frames were read. Free the page and just set the status to MA_AT_END. */
+                /* No usable frames were read. Free the unattached page and preserve decoder errors. */
                 ma_paged_audio_buffer_data_free_page(&pDataBufferNode->data.backend.decodedPaged.data, pPage, &pResourceManager->config.allocationCallbacks);
-                result = MA_AT_END;
+                if (result == MA_SUCCESS) {
+                    result = MA_AT_END;
+                }
             }
         } break;
 
@@ -71166,7 +71209,7 @@ static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(m
                 }
 
                 ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
-                ma_free(pDataBufferNode, &pResourceManager->config.allocationCallbacks);
+                ma_resource_manager_data_buffer_node_free(pResourceManager, pDataBufferNode);
 
                 return result;
             }
