@@ -1,8 +1,113 @@
 #define MA_NO_DEVICE_IO
-#include "../../miniaudio.c"
-
+#include "../../miniaudio.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+typedef struct
+{
+    ma_uint32 notificationInitCallCount;
+    ma_uint32 notificationInitSuccessCount;
+    ma_uint32 notificationWaitCallCount;
+    ma_uint32 notificationUninitCallCount;
+    ma_uint32 invalidNotificationSignalCount;
+    ma_uint32 invalidNotificationWaitCount;
+    ma_uint32 invalidNotificationUninitCount;
+    ma_uint32 failNotificationInitCall;
+    ma_result notificationInitFailureResult;
+    ma_async_notification_event* pFailedNotificationEvent;
+    ma_uint32 fenceAcquireCallCount;
+    ma_uint32 fenceAcquireSuccessCount;
+    ma_uint32 fenceReleaseCallCount;
+    ma_uint32 failFenceAcquireCall;
+    ma_result fenceAcquireFailureResult;
+} hardening_resource_manager_fault_state;
+
+static hardening_resource_manager_fault_state g_hardeningResourceManagerFaultState;
+
+static void hardening_invalid_notification_on_signal(ma_async_notification* pNotification)
+{
+    (void)pNotification;
+    g_hardeningResourceManagerFaultState.invalidNotificationSignalCount += 1;
+}
+
+static ma_result hardening_inline_notification_event_init(ma_async_notification_event* pNotificationEvent)
+{
+    ma_result result;
+
+    g_hardeningResourceManagerFaultState.notificationInitCallCount += 1;
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount == g_hardeningResourceManagerFaultState.failNotificationInitCall) {
+        pNotificationEvent->cb.onSignal = hardening_invalid_notification_on_signal;
+        g_hardeningResourceManagerFaultState.pFailedNotificationEvent = pNotificationEvent;
+        return g_hardeningResourceManagerFaultState.notificationInitFailureResult;
+    }
+
+    result = ma_async_notification_event_init(pNotificationEvent);
+    if (result == MA_SUCCESS) {
+        g_hardeningResourceManagerFaultState.notificationInitSuccessCount += 1;
+    }
+    return result;
+}
+
+static ma_result hardening_inline_notification_event_uninit(ma_async_notification_event* pNotificationEvent)
+{
+    g_hardeningResourceManagerFaultState.notificationUninitCallCount += 1;
+    if (pNotificationEvent == g_hardeningResourceManagerFaultState.pFailedNotificationEvent) {
+        g_hardeningResourceManagerFaultState.invalidNotificationUninitCount += 1;
+        g_hardeningResourceManagerFaultState.pFailedNotificationEvent = NULL;
+        return MA_INVALID_OPERATION;
+    }
+
+    return ma_async_notification_event_uninit(pNotificationEvent);
+}
+
+static ma_result hardening_inline_notification_event_wait(ma_async_notification_event* pNotificationEvent)
+{
+    g_hardeningResourceManagerFaultState.notificationWaitCallCount += 1;
+    if (pNotificationEvent == g_hardeningResourceManagerFaultState.pFailedNotificationEvent) {
+        g_hardeningResourceManagerFaultState.invalidNotificationWaitCount += 1;
+        return MA_INVALID_OPERATION;
+    }
+
+    return ma_async_notification_event_wait(pNotificationEvent);
+}
+
+static ma_result hardening_resource_manager_fence_acquire(ma_fence* pFence)
+{
+    ma_result result;
+
+    g_hardeningResourceManagerFaultState.fenceAcquireCallCount += 1;
+    if (g_hardeningResourceManagerFaultState.fenceAcquireCallCount == g_hardeningResourceManagerFaultState.failFenceAcquireCall) {
+        return g_hardeningResourceManagerFaultState.fenceAcquireFailureResult;
+    }
+
+    result = ma_fence_acquire(pFence);
+    if (result == MA_SUCCESS) {
+        g_hardeningResourceManagerFaultState.fenceAcquireSuccessCount += 1;
+    }
+    return result;
+}
+
+static ma_result hardening_resource_manager_fence_release(ma_fence* pFence)
+{
+    g_hardeningResourceManagerFaultState.fenceReleaseCallCount += 1;
+    return ma_fence_release(pFence);
+}
+
+static void hardening_resource_manager_fault_reset(void)
+{
+    memset(&g_hardeningResourceManagerFaultState, 0, sizeof(g_hardeningResourceManagerFaultState));
+    g_hardeningResourceManagerFaultState.notificationInitFailureResult = MA_OUT_OF_MEMORY;
+    g_hardeningResourceManagerFaultState.fenceAcquireFailureResult = MA_OUT_OF_RANGE;
+}
+
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_INIT(pNotificationEvent) hardening_inline_notification_event_init((pNotificationEvent))
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_UNINIT(pNotificationEvent) hardening_inline_notification_event_uninit((pNotificationEvent))
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_WAIT(pNotificationEvent) hardening_inline_notification_event_wait((pNotificationEvent))
+#define MA_RESOURCE_MANAGER_FENCE_ACQUIRE(pFence) hardening_resource_manager_fence_acquire((pFence))
+#define MA_RESOURCE_MANAGER_FENCE_RELEASE(pFence) hardening_resource_manager_fence_release((pFence))
+#define MINIAUDIO_IMPLEMENTATION
+#include "../../miniaudio.h"
 
 typedef struct
 {
@@ -46,6 +151,24 @@ typedef struct
     ma_resource_manager resourceManager;
     size_t baselineLiveAllocationCount;
 } hardening_resource_manager_fixture;
+
+typedef struct
+{
+    ma_async_notification_callbacks callbacks;
+    ma_uint32 signalCount;
+} hardening_counting_notification;
+
+static void hardening_counting_notification_on_signal(ma_async_notification* pNotification)
+{
+    hardening_counting_notification* pCountingNotification = (hardening_counting_notification*)pNotification;
+    pCountingNotification->signalCount += 1;
+}
+
+static void hardening_counting_notification_init(hardening_counting_notification* pNotification)
+{
+    MA_ZERO_OBJECT(pNotification);
+    pNotification->callbacks.onSignal = hardening_counting_notification_on_signal;
+}
 
 static void* hardening_tracked_malloc(size_t size, void* pUserData)
 {
@@ -460,6 +583,593 @@ static int hardening_check_failed_decoded_acquire(hardening_resource_manager_fix
     return failed;
 }
 
+static int hardening_check_no_invalid_notification_use(const char* pName)
+{
+    if (g_hardeningResourceManagerFaultState.invalidNotificationSignalCount != 0 ||
+        g_hardeningResourceManagerFaultState.invalidNotificationWaitCount != 0 ||
+        g_hardeningResourceManagerFaultState.invalidNotificationUninitCount != 0) {
+        printf("%s used a failed notification: signal=%u wait=%u uninit=%u\n",
+            pName,
+            g_hardeningResourceManagerFaultState.invalidNotificationSignalCount,
+            g_hardeningResourceManagerFaultState.invalidNotificationWaitCount,
+            g_hardeningResourceManagerFaultState.invalidNotificationUninitCount);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int resource_manager_test_node_notification_init_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("node notification failure fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failNotificationInitCall = 1;
+    failed = hardening_check_failed_decoded_acquire(
+        &fixture,
+        "node-notification-failure.custom",
+        MA_OUT_OF_MEMORY,
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE |
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC |
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT);
+
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationInitSuccessCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 0) {
+        printf("node notification failure had init=%u success=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationInitSuccessCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    if (fixture.backendState.initCount != 0 || fixture.vfs.openCount != 0) {
+        printf("node notification failure started decoder work\n");
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("node notification failure");
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "node notification failure");
+    return failed;
+}
+
+static int resource_manager_test_node_fence_acquire_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_buffer_node* pNode;
+    ma_fence initFence;
+    ma_fence doneFence;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("node fence failure fixture init failed: %d\n", result);
+        return 1;
+    }
+    if (ma_fence_init(&initFence) != MA_SUCCESS || ma_fence_init(&doneFence) != MA_SUCCESS) {
+        printf("node fence failure fence init failed\n");
+        hardening_resource_manager_fixture_uninit(&fixture, "node fence failure");
+        return 1;
+    }
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failFenceAcquireCall = 2;
+    pNode = (ma_resource_manager_data_buffer_node*)(ma_uintptr)1;
+    result = ma_resource_manager_data_buffer_node_acquire(
+        &fixture.resourceManager,
+        "node-fence-failure.custom",
+        NULL,
+        0,
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE |
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC |
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT,
+        NULL,
+        &initFence,
+        &doneFence,
+        &pNode);
+
+    failed = 0;
+    if (result != MA_OUT_OF_RANGE || pNode != NULL || fixture.resourceManager.pRootDataBufferNode != NULL) {
+        printf("node fence failure returned %d with node=%p root=%p\n", result, (void*)pNode, (void*)fixture.resourceManager.pRootDataBufferNode);
+        failed = 1;
+    }
+    if (initFence.counter != 0 || doneFence.counter != 0 ||
+        g_hardeningResourceManagerFaultState.fenceAcquireCallCount != 2 ||
+        g_hardeningResourceManagerFaultState.fenceAcquireSuccessCount != 1 ||
+        g_hardeningResourceManagerFaultState.fenceReleaseCallCount != 1) {
+        printf("node fence failure was initFence=%u doneFence=%u acquire=%u success=%u release=%u\n",
+            initFence.counter,
+            doneFence.counter,
+            g_hardeningResourceManagerFaultState.fenceAcquireCallCount,
+            g_hardeningResourceManagerFaultState.fenceAcquireSuccessCount,
+            g_hardeningResourceManagerFaultState.fenceReleaseCallCount);
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationInitSuccessCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 1) {
+        printf("node fence failure notification counts were init=%u success=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationInitSuccessCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("node fence failure leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("node fence failure");
+
+    ma_fence_uninit(&doneFence);
+    ma_fence_uninit(&initFence);
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "node fence failure");
+    return failed;
+}
+
+static int resource_manager_test_pipeline_fence_acquire_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_counting_notification initNotification;
+    hardening_counting_notification doneNotification;
+    ma_resource_manager_pipeline_notifications notifications;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_fence initFence;
+    ma_fence doneFence;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("pipeline fence failure fixture init failed: %d\n", result);
+        return 1;
+    }
+    if (ma_fence_init(&initFence) != MA_SUCCESS || ma_fence_init(&doneFence) != MA_SUCCESS) {
+        printf("pipeline fence failure fence init failed\n");
+        hardening_resource_manager_fixture_uninit(&fixture, "pipeline fence failure");
+        return 1;
+    }
+
+    hardening_counting_notification_init(&initNotification);
+    hardening_counting_notification_init(&doneNotification);
+    notifications = ma_resource_manager_pipeline_notifications_init();
+    notifications.init.pNotification = (ma_async_notification*)&initNotification;
+    notifications.init.pFence = &initFence;
+    notifications.done.pNotification = (ma_async_notification*)&doneNotification;
+    notifications.done.pFence = &doneFence;
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failFenceAcquireCall = 2;
+    result = ma_resource_manager_data_buffer_init(
+        &fixture.resourceManager,
+        "pipeline-fence-failure.custom",
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE,
+        &notifications,
+        &dataBuffer);
+
+    failed = 0;
+    if (result != MA_OUT_OF_RANGE || dataBuffer.pResourceManager != NULL || fixture.resourceManager.pRootDataBufferNode != NULL) {
+        printf("pipeline fence failure returned %d with initialized state\n", result);
+        failed = 1;
+    }
+    if (initNotification.signalCount != 1 || doneNotification.signalCount != 1) {
+        printf("pipeline fence failure signalled init=%u done=%u\n", initNotification.signalCount, doneNotification.signalCount);
+        failed = 1;
+    }
+    if (initFence.counter != 0 || doneFence.counter != 0 ||
+        g_hardeningResourceManagerFaultState.fenceAcquireCallCount != 2 ||
+        g_hardeningResourceManagerFaultState.fenceReleaseCallCount != 1) {
+        printf("pipeline fence failure left unbalanced fences\n");
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("pipeline fence failure leaked tracked allocations\n");
+        failed = 1;
+    }
+
+    ma_fence_uninit(&doneFence);
+    ma_fence_uninit(&initFence);
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "pipeline fence failure");
+    return failed;
+}
+
+static int resource_manager_test_data_buffer_notification_init_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_buffer_node* pBusyNode;
+    ma_resource_manager_data_source_config config;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_uint32 hashedName32;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("data buffer notification failure fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    hashedName32 = ma_hash_string_32("busy-buffer-node");
+    pBusyNode = (ma_resource_manager_data_buffer_node*)ma_malloc(sizeof(*pBusyNode), &fixture.resourceManager.config.allocationCallbacks);
+    if (pBusyNode == NULL) {
+        printf("data buffer notification failure node allocation failed\n");
+        hardening_resource_manager_fixture_uninit(&fixture, "data buffer notification failure");
+        return 1;
+    }
+    MA_ZERO_OBJECT(pBusyNode);
+    pBusyNode->hashedName32 = hashedName32;
+    pBusyNode->refCount = 1;
+    pBusyNode->result = MA_BUSY;
+    pBusyNode->isDataOwnedByResourceManager = MA_TRUE;
+    pBusyNode->data.type = ma_resource_manager_data_supply_type_unknown;
+    fixture.resourceManager.pRootDataBufferNode = pBusyNode;
+
+    config = ma_resource_manager_data_source_config_init();
+    config.flags = MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC | MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT;
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failNotificationInitCall = 1;
+    result = ma_resource_manager_data_buffer_init_ex_internal(&fixture.resourceManager, &config, hashedName32, &dataBuffer);
+
+    failed = 0;
+    if (result != MA_OUT_OF_MEMORY || dataBuffer.pResourceManager != NULL || dataBuffer.pNode != NULL) {
+        printf("data buffer notification failure returned %d with initialized state\n", result);
+        failed = 1;
+    }
+    if (fixture.resourceManager.pRootDataBufferNode != pBusyNode || pBusyNode->refCount != 1) {
+        printf("data buffer notification failure damaged the existing node\n");
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 0) {
+        printf("data buffer notification failure had init=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("data buffer notification failure");
+
+    ma_atomic_exchange_i32(&pBusyNode->result, MA_ERROR);
+    ma_resource_manager_data_buffer_node_unacquire(&fixture.resourceManager, pBusyNode, NULL, NULL);
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("data buffer notification failure leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data buffer notification failure");
+    return failed;
+}
+
+static int resource_manager_test_data_stream_notification_init_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_counting_notification initNotification;
+    hardening_counting_notification doneNotification;
+    ma_resource_manager_pipeline_notifications notifications;
+    ma_resource_manager_data_stream dataStream;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("data stream notification failure fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    hardening_counting_notification_init(&initNotification);
+    hardening_counting_notification_init(&doneNotification);
+    notifications = ma_resource_manager_pipeline_notifications_init();
+    notifications.init.pNotification = (ma_async_notification*)&initNotification;
+    notifications.done.pNotification = (ma_async_notification*)&doneNotification;
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failNotificationInitCall = 1;
+    result = ma_resource_manager_data_stream_init(&fixture.resourceManager, "stream-notification-failure.custom", 0, &notifications, &dataStream);
+
+    failed = 0;
+    if (result != MA_OUT_OF_MEMORY || dataStream.pResourceManager != NULL || dataStream.ds.vtable != NULL) {
+        printf("data stream notification failure returned %d with initialized state\n", result);
+        failed = 1;
+    }
+    if (initNotification.signalCount != 1 || doneNotification.signalCount != 1) {
+        printf("data stream notification failure signalled init=%u done=%u\n", initNotification.signalCount, doneNotification.signalCount);
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 0) {
+        printf("data stream notification failure had init=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("data stream notification failure leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("data stream notification failure");
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data stream notification failure");
+    return failed;
+}
+
+static int resource_manager_test_data_buffer_uninit_notification_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_buffer dataBuffer;
+    float externalFrames[2];
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("data buffer uninit notification fixture init failed: %d\n", result);
+        return 1;
+    }
+    externalFrames[0] = 0;
+    externalFrames[1] = 0;
+    result = ma_resource_manager_register_decoded_data(&fixture.resourceManager, "buffer-uninit-notification", externalFrames, 2, ma_format_f32, 1, 48000);
+    if (result != MA_SUCCESS) {
+        printf("data buffer uninit notification registration failed: %d\n", result);
+        hardening_resource_manager_fixture_uninit(&fixture, "data buffer uninit notification");
+        return 1;
+    }
+    result = ma_resource_manager_data_buffer_init(&fixture.resourceManager, "buffer-uninit-notification", 0, NULL, &dataBuffer);
+    if (result != MA_SUCCESS) {
+        printf("data buffer uninit notification buffer init failed: %d\n", result);
+        ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-uninit-notification");
+        hardening_resource_manager_fixture_uninit(&fixture, "data buffer uninit notification");
+        return 1;
+    }
+
+    ma_atomic_exchange_i32(&dataBuffer.result, MA_BUSY);
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failNotificationInitCall = 1;
+    result = ma_resource_manager_data_buffer_uninit(&dataBuffer);
+
+    failed = 0;
+    if (result != MA_OUT_OF_MEMORY || ma_resource_manager_data_buffer_result(&dataBuffer) != MA_BUSY || dataBuffer.executionCounter != 0) {
+        printf("data buffer uninit notification failure changed live state: result=%d state=%d order=%u\n", result, ma_resource_manager_data_buffer_result(&dataBuffer), dataBuffer.executionCounter);
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 0) {
+        printf("data buffer uninit notification failure had init=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("data buffer uninit notification failure");
+
+    ma_atomic_exchange_i32(&dataBuffer.result, MA_SUCCESS);
+    if (ma_resource_manager_data_buffer_uninit(&dataBuffer) != MA_SUCCESS) {
+        printf("data buffer uninit notification cleanup failed\n");
+        failed = 1;
+    }
+    if (ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-uninit-notification") != MA_SUCCESS) {
+        printf("data buffer uninit notification unregister failed\n");
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("data buffer uninit notification failure leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data buffer uninit notification");
+    return failed;
+}
+
+static int resource_manager_test_data_stream_uninit_notification_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_stream dataStream;
+    ma_data_source_config dataSourceConfig;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("data stream uninit notification fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(&dataStream);
+    dataSourceConfig = ma_data_source_config_init();
+    dataSourceConfig.vtable = &g_ma_resource_manager_data_stream_vtable;
+    result = ma_data_source_init(&dataSourceConfig, &dataStream.ds);
+    if (result != MA_SUCCESS) {
+        printf("data stream uninit notification data source init failed: %d\n", result);
+        hardening_resource_manager_fixture_uninit(&fixture, "data stream uninit notification");
+        return 1;
+    }
+    dataStream.pResourceManager = &fixture.resourceManager;
+    dataStream.result = MA_SUCCESS;
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.failNotificationInitCall = 1;
+    result = ma_resource_manager_data_stream_uninit(&dataStream);
+
+    failed = 0;
+    if (result != MA_OUT_OF_MEMORY || ma_resource_manager_data_stream_result(&dataStream) != MA_SUCCESS || dataStream.executionCounter != 0 || dataStream.ds.vtable == NULL) {
+        printf("data stream uninit notification failure changed live state\n");
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 0) {
+        printf("data stream uninit notification failure had init=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("data stream uninit notification failure");
+
+    ma_data_source_uninit(&dataStream.ds);
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data stream uninit notification");
+    return failed;
+}
+
+static int resource_manager_test_data_stream_uninit_post_failure(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_stream dataStream;
+    ma_data_source_config dataSourceConfig;
+    ma_job fillerJob;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2);
+    if (result != MA_SUCCESS) {
+        printf("data stream uninit post failure fixture init failed: %d\n", result);
+        return 1;
+    }
+    fillerJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    result = ma_resource_manager_post_job(&fixture.resourceManager, &fillerJob);
+    if (result != MA_SUCCESS) {
+        printf("data stream uninit post failure could not fill queue: %d\n", result);
+        hardening_resource_manager_fixture_uninit(&fixture, "data stream uninit post failure");
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(&dataStream);
+    dataSourceConfig = ma_data_source_config_init();
+    dataSourceConfig.vtable = &g_ma_resource_manager_data_stream_vtable;
+    result = ma_data_source_init(&dataSourceConfig, &dataStream.ds);
+    if (result != MA_SUCCESS) {
+        printf("data stream uninit post failure data source init failed: %d\n", result);
+        hardening_resource_manager_fixture_uninit(&fixture, "data stream uninit post failure");
+        return 1;
+    }
+    dataStream.pResourceManager = &fixture.resourceManager;
+    dataStream.result = MA_SUCCESS;
+
+    hardening_resource_manager_fault_reset();
+    result = ma_resource_manager_data_stream_uninit(&dataStream);
+
+    failed = 0;
+    if (result != MA_OUT_OF_MEMORY || ma_resource_manager_data_stream_result(&dataStream) != MA_SUCCESS || dataStream.executionCounter != 0 || dataStream.executionPointer != 0) {
+        printf("data stream uninit post failure was result=%d state=%d counter=%u pointer=%u\n",
+            result,
+            ma_resource_manager_data_stream_result(&dataStream),
+            dataStream.executionCounter,
+            dataStream.executionPointer);
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.notificationInitCallCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationInitSuccessCount != 1 ||
+        g_hardeningResourceManagerFaultState.notificationWaitCallCount != 0 ||
+        g_hardeningResourceManagerFaultState.notificationUninitCallCount != 1) {
+        printf("data stream uninit post failure had init=%u success=%u wait=%u uninit=%u\n",
+            g_hardeningResourceManagerFaultState.notificationInitCallCount,
+            g_hardeningResourceManagerFaultState.notificationInitSuccessCount,
+            g_hardeningResourceManagerFaultState.notificationWaitCallCount,
+            g_hardeningResourceManagerFaultState.notificationUninitCallCount);
+        failed = 1;
+    }
+    failed += hardening_check_no_invalid_notification_use("data stream uninit post failure");
+
+    ma_data_source_uninit(&dataStream.ds);
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data stream uninit post failure");
+    return failed;
+}
+
+static int resource_manager_test_data_stream_load_failure(ma_result lengthResult, ma_bool32 rejectPageAllocation, ma_result expectedResult, const char* pName)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_stream dataStream;
+    ma_data_source_config dataSourceConfig;
+    ma_job job;
+    char* pFilePathCopy;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, lengthResult, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("%s fixture init failed: %d\n", pName, result);
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(&dataStream);
+    dataSourceConfig = ma_data_source_config_init();
+    dataSourceConfig.vtable = &g_ma_resource_manager_data_stream_vtable;
+    result = ma_data_source_init(&dataSourceConfig, &dataStream.ds);
+    if (result != MA_SUCCESS) {
+        printf("%s data source init failed: %d\n", pName, result);
+        hardening_resource_manager_fixture_uninit(&fixture, pName);
+        return 1;
+    }
+    dataStream.pResourceManager = &fixture.resourceManager;
+    dataStream.result = MA_BUSY;
+
+    pFilePathCopy = ma_copy_string("stream-load-failure.custom", &fixture.resourceManager.config.allocationCallbacks);
+    if (pFilePathCopy == NULL) {
+        printf("%s path allocation failed\n", pName);
+        ma_data_source_uninit(&dataStream.ds);
+        hardening_resource_manager_fixture_uninit(&fixture, pName);
+        return 1;
+    }
+
+    if (rejectPageAllocation) {
+        fixture.allocations.rejectedSize = 48000 * 2 * sizeof(float);
+        fixture.allocations.rejectMatchingSize = MA_TRUE;
+    }
+
+    job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_STREAM);
+    job.order = 0;
+    job.data.resourceManager.loadDataStream.pDataStream = &dataStream;
+    job.data.resourceManager.loadDataStream.pFilePath = pFilePathCopy;
+    job.data.resourceManager.loadDataStream.pFilePathW = NULL;
+    job.data.resourceManager.loadDataStream.initialSeekPoint = 0;
+    job.data.resourceManager.loadDataStream.pInitNotification = NULL;
+    job.data.resourceManager.loadDataStream.pInitFence = NULL;
+    result = ma_job_process(&job);
+    fixture.allocations.rejectMatchingSize = MA_FALSE;
+
+    failed = 0;
+    if (result != expectedResult || ma_resource_manager_data_stream_result(&dataStream) != expectedResult) {
+        printf("%s returned result=%d state=%d, expected %d\n", pName, result, ma_resource_manager_data_stream_result(&dataStream), expectedResult);
+        failed = 1;
+    }
+    if (dataStream.isDecoderInitialized || dataStream.pPageData != NULL) {
+        printf("%s retained decoder or page ownership\n", pName);
+        failed = 1;
+    }
+    if (fixture.backendState.initCount != 1 || fixture.backendState.uninitCount != 1 ||
+        fixture.vfs.openCount != 1 || fixture.vfs.closeCount != 1) {
+        printf("%s lifetime was decoder=%u/%u VFS=%u/%u\n",
+            pName,
+            fixture.backendState.initCount,
+            fixture.backendState.uninitCount,
+            fixture.vfs.openCount,
+            fixture.vfs.closeCount);
+        failed = 1;
+    }
+    if (rejectPageAllocation && fixture.allocations.rejectionCount != 1) {
+        printf("%s rejected %lu allocations, expected 1\n", pName, (unsigned long)fixture.allocations.rejectionCount);
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("%s leaked tracked allocations\n", pName);
+        failed = 1;
+    }
+
+    ma_data_source_uninit(&dataStream.ds);
+    failed += hardening_resource_manager_fixture_uninit(&fixture, pName);
+    return failed;
+}
+
 static int resource_manager_test_decoder_length_failure_cleanup(void)
 {
     hardening_resource_manager_fixture fixture;
@@ -786,6 +1496,16 @@ int main(void)
         MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC |
         MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT,
         "wait-init acquire");
+    failed += resource_manager_test_node_notification_init_failure();
+    failed += resource_manager_test_node_fence_acquire_failure();
+    failed += resource_manager_test_pipeline_fence_acquire_failure();
+    failed += resource_manager_test_data_buffer_notification_init_failure();
+    failed += resource_manager_test_data_stream_notification_init_failure();
+    failed += resource_manager_test_data_buffer_uninit_notification_failure();
+    failed += resource_manager_test_data_stream_uninit_notification_failure();
+    failed += resource_manager_test_data_stream_uninit_post_failure();
+    failed += resource_manager_test_data_stream_load_failure(MA_NOT_IMPLEMENTED, MA_FALSE, MA_NOT_IMPLEMENTED, "data stream length failure");
+    failed += resource_manager_test_data_stream_load_failure(MA_SUCCESS, MA_TRUE, MA_OUT_OF_MEMORY, "data stream page allocation failure");
     failed += resource_manager_test_decoder_length_failure_cleanup();
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_FALSE, "flat-mid-decode-failure.custom");
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_TRUE, "paged-mid-decode-failure.custom");

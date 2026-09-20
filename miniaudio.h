@@ -69713,6 +69713,23 @@ MA_API ma_result ma_noise_read_pcm_frames(ma_noise* pNoise, void* pFramesOut, ma
 #define MA_JOB_TYPE_RESOURCE_MANAGER_QUEUE_CAPACITY          1024
 #endif
 
+/* Internal indirection points used by deterministic resource-manager failure-path tests. */
+#ifndef MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_INIT
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_INIT(pNotificationEvent) ma_async_notification_event_init((pNotificationEvent))
+#endif
+#ifndef MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_UNINIT
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_UNINIT(pNotificationEvent) ma_async_notification_event_uninit((pNotificationEvent))
+#endif
+#ifndef MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_WAIT
+#define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_WAIT(pNotificationEvent) ma_async_notification_event_wait((pNotificationEvent))
+#endif
+#ifndef MA_RESOURCE_MANAGER_FENCE_ACQUIRE
+#define MA_RESOURCE_MANAGER_FENCE_ACQUIRE(pFence) ma_fence_acquire((pFence))
+#endif
+#ifndef MA_RESOURCE_MANAGER_FENCE_RELEASE
+#define MA_RESOURCE_MANAGER_FENCE_RELEASE(pFence) ma_fence_release((pFence))
+#endif
+
 MA_API ma_resource_manager_pipeline_notifications ma_resource_manager_pipeline_notifications_init(void)
 {
     ma_resource_manager_pipeline_notifications notifications;
@@ -69732,14 +69749,43 @@ static void ma_resource_manager_pipeline_notifications_signal_all_notifications(
     if (pPipelineNotifications->done.pNotification) { ma_async_notification_signal(pPipelineNotifications->done.pNotification); }
 }
 
-static void ma_resource_manager_pipeline_notifications_acquire_all_fences(const ma_resource_manager_pipeline_notifications* pPipelineNotifications)
+static ma_result ma_resource_manager_fence_pair_acquire(ma_fence* pInitFence, ma_fence* pDoneFence)
 {
-    if (pPipelineNotifications == NULL) {
-        return;
+    ma_result result;
+
+    if (pInitFence != NULL) {
+        result = MA_RESOURCE_MANAGER_FENCE_ACQUIRE(pInitFence);
+        if (result != MA_SUCCESS) {
+            return result;
+        }
     }
 
-    if (pPipelineNotifications->init.pFence != NULL) { ma_fence_acquire(pPipelineNotifications->init.pFence); }
-    if (pPipelineNotifications->done.pFence != NULL) { ma_fence_acquire(pPipelineNotifications->done.pFence); }
+    if (pDoneFence != NULL) {
+        result = MA_RESOURCE_MANAGER_FENCE_ACQUIRE(pDoneFence);
+        if (result != MA_SUCCESS) {
+            if (pInitFence != NULL) {
+                MA_RESOURCE_MANAGER_FENCE_RELEASE(pInitFence);
+            }
+            return result;
+        }
+    }
+
+    return MA_SUCCESS;
+}
+
+static void ma_resource_manager_fence_pair_release(ma_fence* pInitFence, ma_fence* pDoneFence)
+{
+    if (pInitFence != NULL) { MA_RESOURCE_MANAGER_FENCE_RELEASE(pInitFence); }
+    if (pDoneFence != NULL) { MA_RESOURCE_MANAGER_FENCE_RELEASE(pDoneFence); }
+}
+
+static ma_result ma_resource_manager_pipeline_notifications_acquire_all_fences(const ma_resource_manager_pipeline_notifications* pPipelineNotifications)
+{
+    if (pPipelineNotifications == NULL) {
+        return MA_SUCCESS;
+    }
+
+    return ma_resource_manager_fence_pair_acquire(pPipelineNotifications->init.pFence, pPipelineNotifications->done.pFence);
 }
 
 static void ma_resource_manager_pipeline_notifications_release_all_fences(const ma_resource_manager_pipeline_notifications* pPipelineNotifications)
@@ -69748,8 +69794,7 @@ static void ma_resource_manager_pipeline_notifications_release_all_fences(const 
         return;
     }
 
-    if (pPipelineNotifications->init.pFence != NULL) { ma_fence_release(pPipelineNotifications->init.pFence); }
-    if (pPipelineNotifications->done.pFence != NULL) { ma_fence_release(pPipelineNotifications->done.pFence); }
+    ma_resource_manager_fence_pair_release(pPipelineNotifications->init.pFence, pPipelineNotifications->done.pFence);
 }
 
 
@@ -70286,7 +70331,7 @@ static ma_result ma_resource_manager_inline_notification_init(ma_resource_manage
     pNotification->pResourceManager = pResourceManager;
 
     if (ma_resource_manager_is_threading_enabled(pResourceManager)) {
-        return ma_async_notification_event_init(&pNotification->backend.e);
+        return MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_INIT(&pNotification->backend.e);
     } else {
         return ma_async_notification_poll_init(&pNotification->backend.p);
     }
@@ -70297,7 +70342,7 @@ static void ma_resource_manager_inline_notification_uninit(ma_resource_manager_i
     MA_ASSERT(pNotification != NULL);
 
     if (ma_resource_manager_is_threading_enabled(pNotification->pResourceManager)) {
-        ma_async_notification_event_uninit(&pNotification->backend.e);
+        MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_UNINIT(&pNotification->backend.e);
     } else {
         /* No need to uninitialize a polling notification. */
     }
@@ -70308,7 +70353,7 @@ static void ma_resource_manager_inline_notification_wait(ma_resource_manager_inl
     MA_ASSERT(pNotification != NULL);
 
     if (ma_resource_manager_is_threading_enabled(pNotification->pResourceManager)) {
-        ma_async_notification_event_wait(&pNotification->backend.e);
+        MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_WAIT(&pNotification->backend.e);
     } else {
         while (ma_async_notification_poll_is_signalled(&pNotification->backend.p) == MA_FALSE) {
             ma_result result = ma_resource_manager_process_next_job(pNotification->pResourceManager);
@@ -71160,12 +71205,29 @@ static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(m
             }
 
             if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
-                ma_resource_manager_inline_notification_init(pResourceManager, pInitNotification);
+                result = ma_resource_manager_inline_notification_init(pResourceManager, pInitNotification);
+                if (result != MA_SUCCESS) {
+                    ma_free(pFilePathCopy,  &pResourceManager->config.allocationCallbacks);
+                    ma_free(pFilePathWCopy, &pResourceManager->config.allocationCallbacks);
+                    ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
+                    ma_resource_manager_data_buffer_node_free(pResourceManager, pDataBufferNode);
+                    return result;
+                }
             }
 
             /* Acquire init and done fences before posting the job. These will be unacquired by the job thread. */
-            if (pInitFence != NULL) { ma_fence_acquire(pInitFence); }
-            if (pDoneFence != NULL) { ma_fence_acquire(pDoneFence); }
+            result = ma_resource_manager_fence_pair_acquire(pInitFence, pDoneFence);
+            if (result != MA_SUCCESS) {
+                if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
+                    ma_resource_manager_inline_notification_uninit(pInitNotification);
+                }
+
+                ma_free(pFilePathCopy,  &pResourceManager->config.allocationCallbacks);
+                ma_free(pFilePathWCopy, &pResourceManager->config.allocationCallbacks);
+                ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
+                ma_resource_manager_data_buffer_node_free(pResourceManager, pDataBufferNode);
+                return result;
+            }
 
             /* We now have everything we need to post the job to the job thread. */
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER_NODE);
@@ -71200,8 +71262,7 @@ static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(m
                     In the WAIT_INIT case, these will have already been released in ma_job_process()
                     so we should only release fences in this branch.
                     */
-                    if (pInitFence != NULL) { ma_fence_release(pInitFence); }
-                    if (pDoneFence != NULL) { ma_fence_release(pDoneFence); }
+                    ma_resource_manager_fence_pair_release(pInitFence, pDoneFence);
 
                     /* These will have been freed by the job thread, but with WAIT_INIT they will already have happened since the job has already been handled. */
                     ma_free(pFilePathCopy,  &pResourceManager->config.allocationCallbacks);
@@ -71550,9 +71611,12 @@ static ma_data_source_vtable g_ma_resource_manager_data_buffer_vtable =
 static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_manager* pResourceManager, const ma_resource_manager_data_source_config* pConfig, ma_uint32 hashedName32, ma_resource_manager_data_buffer* pDataBuffer)
 {
     ma_result result = MA_SUCCESS;
-    ma_resource_manager_data_buffer_node* pDataBufferNode;
+    ma_resource_manager_data_buffer_node* pDataBufferNode = NULL;
     ma_data_source_config dataSourceConfig;
     ma_bool32 async;
+    ma_bool32 nodeAcquired = MA_FALSE;
+    ma_bool32 dataSourceInitialized = MA_FALSE;
+    ma_bool32 outerFencesAcquired = MA_FALSE;
     ma_uint32 flags;
     ma_resource_manager_pipeline_notifications notifications;
 
@@ -71574,6 +71638,11 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
         notifications = *pConfig->pNotifications;   /* From here on out we should be referencing `notifications` instead of `pNotifications`. Set this to NULL to catch errors at testing time. */
     } else {
         MA_ZERO_OBJECT(&notifications);
+    }
+
+    if (pResourceManager == NULL) {
+        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+        return MA_INVALID_ARGS;
     }
 
     /* For safety, always remove the ASYNC flag if threading is disabled on the resource manager. */
@@ -71600,7 +71669,13 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
     acquired a second if loading asynchronously. This double acquisition system is just done to
     simplify code maintenance.
     */
-    ma_resource_manager_pipeline_notifications_acquire_all_fences(&notifications);
+    result = ma_resource_manager_pipeline_notifications_acquire_all_fences(&notifications);
+    if (result != MA_SUCCESS) {
+        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+        return result;
+    }
+    outerFencesAcquired = MA_TRUE;
+
     {
         /* We first need to acquire a node. If ASYNC is not set, this will not return until the entire sound has been loaded. */
         result = ma_resource_manager_data_buffer_node_acquire(pResourceManager, pConfig->pFilePath, pConfig->pFilePathW, hashedName32, flags, NULL, notifications.init.pFence, notifications.done.pFence, &pDataBufferNode);
@@ -71608,16 +71683,17 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
             goto done;
         }
+        nodeAcquired = MA_TRUE;
 
         dataSourceConfig = ma_data_source_config_init();
         dataSourceConfig.vtable = &g_ma_resource_manager_data_buffer_vtable;
 
         result = ma_data_source_init(&dataSourceConfig, &pDataBuffer->ds);
         if (result != MA_SUCCESS) {
-            ma_resource_manager_data_buffer_node_unacquire(pResourceManager, pDataBufferNode, NULL, NULL);
             ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
             goto done;
         }
+        dataSourceInitialized = MA_TRUE;
 
         pDataBuffer->pResourceManager = pResourceManager;
         pDataBuffer->pNode  = pDataBufferNode;
@@ -71636,9 +71712,18 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             /* The node's data supply isn't initialized yet. The caller has requested that we load asynchronously so we need to post a job to do this. */
             ma_job job;
             ma_resource_manager_inline_notification initNotification;   /* Used when the WAIT_INIT flag is set. */
+            ma_bool32 waitForInit = (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0;
+            ma_bool32 initNotificationInitialized = MA_FALSE;
+            ma_bool32 jobFencesAcquired = MA_FALSE;
 
-            if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
-                ma_resource_manager_inline_notification_init(pResourceManager, &initNotification);
+            if (waitForInit) {
+                result = ma_resource_manager_inline_notification_init(pResourceManager, &initNotification);
+                if (result != MA_SUCCESS) {
+                    ma_atomic_exchange_i32(&pDataBuffer->result, result);
+                    ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+                    goto async_done;
+                }
+                initNotificationInitialized = MA_TRUE;
             }
 
             /*
@@ -71649,12 +71734,18 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             ma_atomic_exchange_i32(&pDataBuffer->result, MA_BUSY);
 
             /* Acquire fences a second time. These will be released by the async thread. */
-            ma_resource_manager_pipeline_notifications_acquire_all_fences(&notifications);
+            result = ma_resource_manager_pipeline_notifications_acquire_all_fences(&notifications);
+            if (result != MA_SUCCESS) {
+                ma_atomic_exchange_i32(&pDataBuffer->result, result);
+                ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+                goto async_done;
+            }
+            jobFencesAcquired = MA_TRUE;
 
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER);
             job.order = ma_resource_manager_data_buffer_next_execution_order(pDataBuffer);
             job.data.resourceManager.loadDataBuffer.pDataBuffer             = pDataBuffer;
-            job.data.resourceManager.loadDataBuffer.pInitNotification       = ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) ? &initNotification : notifications.init.pNotification;
+            job.data.resourceManager.loadDataBuffer.pInitNotification       = waitForInit ? &initNotification : notifications.init.pNotification;
             job.data.resourceManager.loadDataBuffer.pDoneNotification       = notifications.done.pNotification;
             job.data.resourceManager.loadDataBuffer.pInitFence              = notifications.init.pFence;
             job.data.resourceManager.loadDataBuffer.pDoneFence              = notifications.done.pFence;
@@ -71665,10 +71756,26 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             job.data.resourceManager.loadDataBuffer.isLooping               = (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_LOOPING) != 0;
 
             /* If we need to wait for initialization to complete we can just process the job in place. */
-            if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
+            if (waitForInit) {
                 result = ma_job_process(&job);
+                jobFencesAcquired = MA_FALSE;   /* Processed here or re-posted; the job owns both fence acquisitions. */
+
+                if (result == MA_SUCCESS) {
+                    ma_resource_manager_inline_notification_wait(&initNotification);
+                    result = ma_resource_manager_data_buffer_result(pDataBuffer);
+                    if (result == MA_BUSY) {
+                        result = MA_SUCCESS;
+                    }
+                }
+
+                if (notifications.init.pNotification != NULL) {
+                    ma_async_notification_signal(notifications.init.pNotification);
+                }
             } else {
                 result = ma_resource_manager_post_job(pResourceManager, &job);
+                if (result == MA_SUCCESS) {
+                    jobFencesAcquired = MA_FALSE;   /* The posted job owns both fence acquisitions. */
+                }
             }
 
             if (result != MA_SUCCESS) {
@@ -71676,34 +71783,22 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
                 ma_log_postf(ma_resource_manager_get_log(pResourceManager), MA_LOG_LEVEL_ERROR, "Failed to post MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER job. %s.\n", ma_result_description(result));
                 ma_atomic_exchange_i32(&pDataBuffer->result, result);
 
-                /* Release the fences after the result has been set on the data buffer. */
-                ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
-            } else {
-                if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
-                    ma_resource_manager_inline_notification_wait(&initNotification);
-
-                    if (notifications.init.pNotification != NULL) {
-                        ma_async_notification_signal(notifications.init.pNotification);
-                    }
-
-                    /* NOTE: Do not release the init fence here. It will have been done by the job. */
-
-                    /* Make sure we return an error if initialization failed on the async thread. */
-                    result = ma_resource_manager_data_buffer_result(pDataBuffer);
-                    if (result == MA_BUSY) {
-                        result  = MA_SUCCESS;
-                    }
+                if (jobFencesAcquired) {
+                    ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
+                    jobFencesAcquired = MA_FALSE;
+                }
+                if (waitForInit == MA_FALSE) {
+                    ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
                 }
             }
 
-            if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
+async_done:
+            if (jobFencesAcquired) {
+                ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
+            }
+            if (initNotificationInitialized) {
                 ma_resource_manager_inline_notification_uninit(&initNotification);
             }
-        }
-
-        if (result != MA_SUCCESS) {
-            ma_resource_manager_data_buffer_node_unacquire(pResourceManager, pDataBufferNode, NULL, NULL);
-            goto done;
         }
     }
 done:
@@ -71711,9 +71806,22 @@ done:
         if (pConfig->initialSeekPointInPCMFrames > 0) {
             ma_resource_manager_data_buffer_seek_to_pcm_frame(pDataBuffer, pConfig->initialSeekPointInPCMFrames);
         }
+    } else {
+        if (dataSourceInitialized && ma_resource_manager_data_buffer_has_connector(pDataBuffer)) {
+            ma_resource_manager_data_buffer_uninit_connector(pResourceManager, pDataBuffer);
+        }
+        if (nodeAcquired) {
+            ma_resource_manager_data_buffer_node_unacquire(pResourceManager, pDataBufferNode, NULL, NULL);
+        }
+        if (dataSourceInitialized) {
+            ma_data_source_uninit(&pDataBuffer->ds);
+        }
+        MA_ZERO_OBJECT(pDataBuffer);
     }
 
-    ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
+    if (outerFencesAcquired) {
+        ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
+    }
 
     return result;
 }
@@ -71782,12 +71890,14 @@ static ma_result ma_resource_manager_data_buffer_uninit_internal(ma_resource_man
 MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data_buffer* pDataBuffer)
 {
     ma_result result;
+    ma_result previousResult;
 
     if (pDataBuffer == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    if (ma_resource_manager_data_buffer_result(pDataBuffer) == MA_SUCCESS) {
+    previousResult = ma_resource_manager_data_buffer_result(pDataBuffer);
+    if (previousResult == MA_SUCCESS) {
         /* The data buffer can be deleted synchronously. */
         return ma_resource_manager_data_buffer_uninit_internal(pDataBuffer);
     } else {
@@ -71799,16 +71909,16 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
         ma_resource_manager_inline_notification notification;
         ma_job job;
 
+        result = ma_resource_manager_inline_notification_init(pDataBuffer->pResourceManager, &notification);
+        if (result != MA_SUCCESS) {
+            return result;  /* Failed to create the notification. This should rarely, if ever, happen. */
+        }
+
         /*
         We need to mark the node as unavailable so we don't try reading from it anymore, but also to
         let the loading thread know that it needs to abort it's loading procedure.
         */
         ma_atomic_exchange_i32(&pDataBuffer->result, MA_UNAVAILABLE);
-
-        result = ma_resource_manager_inline_notification_init(pDataBuffer->pResourceManager, &notification);
-        if (result != MA_SUCCESS) {
-            return result;  /* Failed to create the notification. This should rarely, if ever, happen. */
-        }
 
         job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER);
         job.order = ma_resource_manager_data_buffer_next_execution_order(pDataBuffer);
@@ -71818,6 +71928,8 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
 
         result = ma_resource_manager_post_job(pDataBuffer->pResourceManager, &job);
         if (result != MA_SUCCESS) {
+            ma_atomic_fetch_sub_32(&pDataBuffer->executionCounter, 1);
+            ma_atomic_exchange_i32(&pDataBuffer->result, previousResult);
             ma_resource_manager_inline_notification_uninit(&notification);
             return result;
         }
@@ -72303,6 +72415,10 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
     wchar_t* pFilePathWCopy = NULL;
     ma_job job;
     ma_bool32 waitBeforeReturning = MA_FALSE;
+    ma_bool32 waitNotificationInitialized = MA_FALSE;
+    ma_bool32 dataSourceInitialized = MA_FALSE;
+    ma_bool32 fencesAcquired = MA_FALSE;
+    ma_bool32 jobPosted = MA_FALSE;
     ma_resource_manager_inline_notification waitNotification;
     ma_resource_manager_pipeline_notifications notifications;
     ma_uint32 flags;
@@ -72327,6 +72443,11 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
         MA_ZERO_OBJECT(&notifications);
     }
 
+    if (pResourceManager == NULL || (pConfig->pFilePath == NULL && pConfig->pFilePathW == NULL)) {
+        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+        return MA_INVALID_ARGS;
+    }
+
     dataSourceConfig = ma_data_source_config_init();
     dataSourceConfig.vtable = &g_ma_resource_manager_data_stream_vtable;
 
@@ -72335,6 +72456,7 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
         ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
         return result;
     }
+    dataSourceInitialized = MA_TRUE;
 
     flags = pConfig->flags;
     if (pConfig->isLooping) {
@@ -72342,17 +72464,12 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
     }
 
     pDataStream->pResourceManager = pResourceManager;
-    pDataStream->flags            = pConfig->flags;
+    pDataStream->flags            = flags;
     pDataStream->result           = MA_BUSY;
 
     ma_data_source_set_range_in_pcm_frames(pDataStream, pConfig->rangeBegInPCMFrames, pConfig->rangeEndInPCMFrames);
     ma_data_source_set_loop_point_in_pcm_frames(pDataStream, pConfig->loopPointBegInPCMFrames, pConfig->loopPointEndInPCMFrames);
     ma_data_source_set_looping(pDataStream, (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_LOOPING) != 0);
-
-    if (pResourceManager == NULL || (pConfig->pFilePath == NULL && pConfig->pFilePathW == NULL)) {
-        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
-        return MA_INVALID_ARGS;
-    }
 
     /* We want all access to the VFS and the internal decoder to happen on the job thread just to keep things easier to manage for the VFS.  */
 
@@ -72364,8 +72481,8 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
     }
 
     if (pFilePathCopy == NULL && pFilePathWCopy == NULL) {
-        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
-        return MA_OUT_OF_MEMORY;
+        result = MA_OUT_OF_MEMORY;
+        goto done;
     }
 
     /*
@@ -72374,10 +72491,20 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
     */
     if ((pConfig->flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC) == 0 || (pConfig->flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
         waitBeforeReturning = MA_TRUE;
-        ma_resource_manager_inline_notification_init(pResourceManager, &waitNotification);
+        result = ma_resource_manager_inline_notification_init(pResourceManager, &waitNotification);
+        if (result != MA_SUCCESS) {
+            goto done;
+        }
+        waitNotificationInitialized = MA_TRUE;
     }
 
-    ma_resource_manager_pipeline_notifications_acquire_all_fences(&notifications);
+    if (notifications.init.pFence != NULL) {
+        result = MA_RESOURCE_MANAGER_FENCE_ACQUIRE(notifications.init.pFence);
+        if (result != MA_SUCCESS) {
+            goto done;
+        }
+        fencesAcquired = MA_TRUE;
+    }
 
     /* Set the absolute cursor to our initial seek position so retrieval of the cursor returns a good value. */
     ma_resource_manager_data_stream_set_absolute_cursor(pDataStream, pConfig->initialSeekPointInPCMFrames);
@@ -72393,21 +72520,18 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
     job.data.resourceManager.loadDataStream.pInitFence        = notifications.init.pFence;
     result = ma_resource_manager_post_job(pResourceManager, &job);
     if (result != MA_SUCCESS) {
-        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
-        ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
-
-        if (waitBeforeReturning) {
-            ma_resource_manager_inline_notification_uninit(&waitNotification);
-        }
-
-        ma_free(pFilePathCopy,  &pResourceManager->config.allocationCallbacks);
-        ma_free(pFilePathWCopy, &pResourceManager->config.allocationCallbacks);
-        return result;
+        ma_atomic_fetch_sub_32(&pDataStream->executionCounter, 1);
+        goto done;
     }
+    jobPosted = MA_TRUE;
+    fencesAcquired = MA_FALSE;  /* The posted job owns the fence acquisition. */
+    pFilePathCopy = NULL;       /* The posted job owns the path copies. */
+    pFilePathWCopy = NULL;
 
     /* Wait if needed. */
     if (waitBeforeReturning) {
         ma_resource_manager_inline_notification_wait_and_uninit(&waitNotification);
+        waitNotificationInitialized = MA_FALSE;
 
         if (notifications.init.pNotification != NULL) {
             ma_async_notification_signal(notifications.init.pNotification);
@@ -72418,13 +72542,41 @@ MA_API ma_result ma_resource_manager_data_stream_init_ex(ma_resource_manager* pR
         if we're not waiting because it will most likely be in a busy state.
         */
         if (pDataStream->result != MA_SUCCESS) {
-            return pDataStream->result;
+            result = pDataStream->result;
+            goto done;
         }
 
         /* NOTE: Do not release pInitFence here. That will be done by the job. */
     }
 
     return MA_SUCCESS;
+
+done:
+    if (waitNotificationInitialized) {
+        ma_resource_manager_inline_notification_uninit(&waitNotification);
+    }
+    if (fencesAcquired) {
+        MA_RESOURCE_MANAGER_FENCE_RELEASE(notifications.init.pFence);
+    }
+    if (jobPosted == MA_FALSE) {
+        ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
+    }
+
+    ma_free(pFilePathCopy,  &pResourceManager->config.allocationCallbacks);
+    ma_free(pFilePathWCopy, &pResourceManager->config.allocationCallbacks);
+
+    if (dataSourceInitialized) {
+        if (pDataStream->isDecoderInitialized) {
+            ma_decoder_uninit(&pDataStream->decoder);
+        }
+        if (pDataStream->pPageData != NULL) {
+            ma_free(pDataStream->pPageData, &pResourceManager->config.allocationCallbacks);
+        }
+        ma_data_source_uninit(&pDataStream->ds);
+    }
+    MA_ZERO_OBJECT(pDataStream);
+
+    return result;
 }
 
 MA_API ma_result ma_resource_manager_data_stream_init(ma_resource_manager* pResourceManager, const char* pFilePath, ma_uint32 flags, const ma_resource_manager_pipeline_notifications* pNotifications, ma_resource_manager_data_stream* pDataStream)
@@ -72455,31 +72607,42 @@ MA_API ma_result ma_resource_manager_data_stream_uninit(ma_resource_manager_data
 {
     ma_resource_manager_inline_notification freeEvent;
     ma_job job;
+    ma_result result;
+    ma_result previousResult;
 
     if (pDataStream == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    /* The first thing to do is set the result to unavailable. This will prevent future page decoding. */
-    ma_atomic_exchange_i32(&pDataStream->result, MA_UNAVAILABLE);
-
     /*
     We need to post a job to ensure we're not in the middle or decoding or anything. Because the object is owned by the caller, we'll need
     to wait for it to complete before returning which means we need an event.
     */
-    ma_resource_manager_inline_notification_init(pDataStream->pResourceManager, &freeEvent);
+    result = ma_resource_manager_inline_notification_init(pDataStream->pResourceManager, &freeEvent);
+    if (result != MA_SUCCESS) {
+        return result;
+    }
+
+    /* The first thing to do is set the result to unavailable. This will prevent future page decoding. */
+    previousResult = (ma_result)ma_atomic_exchange_i32(&pDataStream->result, MA_UNAVAILABLE);
 
     job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_STREAM);
     job.order = ma_resource_manager_data_stream_next_execution_order(pDataStream);
     job.data.resourceManager.freeDataStream.pDataStream       = pDataStream;
     job.data.resourceManager.freeDataStream.pDoneNotification = &freeEvent;
     job.data.resourceManager.freeDataStream.pDoneFence        = NULL;
-    ma_resource_manager_post_job(pDataStream->pResourceManager, &job);
+    result = ma_resource_manager_post_job(pDataStream->pResourceManager, &job);
+    if (result != MA_SUCCESS) {
+        ma_atomic_fetch_sub_32(&pDataStream->executionCounter, 1);
+        ma_atomic_exchange_i32(&pDataStream->result, previousResult);
+        ma_resource_manager_inline_notification_uninit(&freeEvent);
+        return result;
+    }
 
     /* We need to wait for the job to finish processing before we return. */
     ma_resource_manager_inline_notification_wait_and_uninit(&freeEvent);
 
-    return MA_SUCCESS;
+    return result;
 }
 
 
@@ -73643,6 +73806,7 @@ static ma_result ma_job_process__resource_manager__load_data_stream(ma_job* pJob
     ma_result result = MA_SUCCESS;
     ma_decoder_config decoderConfig;
     ma_uint32 pageBufferSizeInBytes;
+    ma_bool32 decoderInitializedThisJob = MA_FALSE;
     ma_resource_manager* pResourceManager;
     ma_resource_manager_data_stream* pDataStream;
 
@@ -73673,6 +73837,7 @@ static ma_result ma_job_process__resource_manager__load_data_stream(ma_job* pJob
     if (result != MA_SUCCESS) {
         goto done;
     }
+    decoderInitializedThisJob = MA_TRUE;
 
     /* Retrieve the total length of the file before marking the decoder as loaded. */
     if ((pDataStream->flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_UNKNOWN_LENGTH) == 0) {
@@ -73695,7 +73860,6 @@ static ma_result ma_job_process__resource_manager__load_data_stream(ma_job* pJob
 
     pDataStream->pPageData = ma_malloc(pageBufferSizeInBytes, &pResourceManager->config.allocationCallbacks);
     if (pDataStream->pPageData == NULL) {
-        ma_decoder_uninit(&pDataStream->decoder);
         result = MA_OUT_OF_MEMORY;
         goto done;
     }
@@ -73710,6 +73874,11 @@ static ma_result ma_job_process__resource_manager__load_data_stream(ma_job* pJob
     result = MA_SUCCESS;
 
 done:
+    if (result != MA_SUCCESS && decoderInitializedThisJob) {
+        ma_decoder_uninit(&pDataStream->decoder);
+        pDataStream->isDecoderInitialized = MA_FALSE;
+    }
+
     ma_free(pJob->data.resourceManager.loadDataStream.pFilePath,  &pResourceManager->config.allocationCallbacks);
     ma_free(pJob->data.resourceManager.loadDataStream.pFilePathW, &pResourceManager->config.allocationCallbacks);
 
