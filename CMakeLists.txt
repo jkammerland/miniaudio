@@ -743,6 +743,10 @@ if(MINIAUDIO_BUILD_TESTS)
     
     add_miniaudio_test(miniaudio_generation generation/generation.c)
     add_test(NAME miniaudio_generation COMMAND miniaudio_generation)
+
+    add_miniaudio_test(miniaudio_hardening_wav hardening/hardening_wav.c)
+    add_test(NAME miniaudio_hardening_wav COMMAND miniaudio_hardening_wav)
+    set_tests_properties(miniaudio_hardening_wav PROPERTIES TIMEOUT 5)
 endif()
 
 # Examples

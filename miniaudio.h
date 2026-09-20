@@ -80355,13 +80355,18 @@ MA_PRIVATE ma_result ma_dr_wav__read_chunk_header(ma_dr_wav_read_proc onRead, vo
         *pRunningBytesReadOut += 8;
     } else if (container == ma_dr_wav_container_w64) {
         ma_uint8 sizeInBytes[8];
+        ma_uint64 chunkSizeIncludingHeader;
         if (onRead(pUserData, pHeaderOut->id.guid, 16) != 16) {
             return MA_AT_END;
         }
         if (onRead(pUserData, sizeInBytes, 8) != 8) {
             return MA_INVALID_FILE;
         }
-        pHeaderOut->sizeInBytes = ma_dr_wav_bytes_to_u64(sizeInBytes) - 24;
+        chunkSizeIncludingHeader = ma_dr_wav_bytes_to_u64(sizeInBytes);
+        if (chunkSizeIncludingHeader < 24) {
+            return MA_INVALID_FILE;
+        }
+        pHeaderOut->sizeInBytes = chunkSizeIncludingHeader - 24;
         pHeaderOut->paddingSize = ma_dr_wav__chunk_padding_size_w64(pHeaderOut->sizeInBytes);
         *pRunningBytesReadOut += 24;
     } else {
@@ -81310,6 +81315,9 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
         if (!ma_dr_wav_fourcc_equal(header.id.fourcc, "ds64")) {
             return MA_FALSE;
         }
+        if (header.sizeInBytes < 24) {
+            return MA_FALSE;
+        }
         bytesRemainingInChunk = header.sizeInBytes + header.paddingSize;
         if (!ma_dr_wav__seek_forward(pWav->onSeek, 8, pWav->pUserData)) {
             return MA_FALSE;
@@ -81362,6 +81370,9 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
         if (((pWav->container == ma_dr_wav_container_riff || pWav->container == ma_dr_wav_container_rifx || pWav->container == ma_dr_wav_container_rf64) && ma_dr_wav_fourcc_equal(header.id.fourcc, "fmt ")) ||
             ((pWav->container == ma_dr_wav_container_w64) && ma_dr_wav_guid_equal(header.id.guid, ma_dr_wavGUID_W64_FMT))) {
             ma_uint8 fmtData[16];
+            if (header.sizeInBytes < sizeof(fmtData)) {
+                return MA_FALSE;
+            }
             foundChunk_fmt = MA_TRUE;
             if (pWav->onRead(pWav->pUserData, fmtData, sizeof(fmtData)) != sizeof(fmtData)) {
                 return MA_FALSE;
@@ -81379,13 +81390,20 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             MA_DR_WAV_ZERO_MEMORY(fmt.subFormat, sizeof(fmt.subFormat));
             if (header.sizeInBytes > 16) {
                 ma_uint8 fmt_cbSize[2];
-                int bytesReadSoFar = 0;
+                ma_uint64 bytesReadSoFar;
+                ma_uint64 leftoverBytes;
+                if (header.sizeInBytes < 18) {
+                    return MA_FALSE;
+                }
                 if (pWav->onRead(pWav->pUserData, fmt_cbSize, sizeof(fmt_cbSize)) != sizeof(fmt_cbSize)) {
                     return MA_FALSE;
                 }
                 cursor += sizeof(fmt_cbSize);
                 bytesReadSoFar = 18;
                 fmt.extendedSize = ma_dr_wav_bytes_to_u16_ex(fmt_cbSize, pWav->container);
+                if (fmt.extendedSize > header.sizeInBytes - bytesReadSoFar) {
+                    return MA_FALSE;
+                }
                 if (fmt.extendedSize > 0) {
                     if (fmt.formatTag == MA_DR_WAVE_FORMAT_EXTENSIBLE) {
                         if (fmt.extendedSize != 22) {
@@ -81408,10 +81426,14 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                     cursor += fmt.extendedSize;
                     bytesReadSoFar += fmt.extendedSize;
                 }
-                if (pWav->onSeek(pWav->pUserData, (int)(header.sizeInBytes - bytesReadSoFar), MA_DR_WAV_SEEK_CUR) == MA_FALSE) {
+                leftoverBytes = header.sizeInBytes - bytesReadSoFar;
+                if (leftoverBytes > 0x7FFFFFFF) {
                     return MA_FALSE;
                 }
-                cursor += (header.sizeInBytes - bytesReadSoFar);
+                if (leftoverBytes > 0 && pWav->onSeek(pWav->pUserData, (int)leftoverBytes, MA_DR_WAV_SEEK_CUR) == MA_FALSE) {
+                    return MA_FALSE;
+                }
+                cursor += leftoverBytes;
             }
             if (header.paddingSize > 0) {
                 if (ma_dr_wav__seek_forward(pWav->onSeek, header.paddingSize, pWav->pUserData) == MA_FALSE) {
@@ -81443,6 +81465,9 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             ((pWav->container == ma_dr_wav_container_w64) && ma_dr_wav_guid_equal(header.id.guid, ma_dr_wavGUID_W64_FACT))) {
             if (pWav->container == ma_dr_wav_container_riff || pWav->container == ma_dr_wav_container_rifx) {
                 ma_uint8 sampleCount[4];
+                if (chunkSize < 4) {
+                    return MA_FALSE;
+                }
                 if (ma_dr_wav__on_read(pWav->onRead, pWav->pUserData, &sampleCount, 4, &cursor) != 4) {
                     return MA_FALSE;
                 }
@@ -81453,6 +81478,9 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
                     sampleCountFromFactChunk = 0;
                 }
             } else if (pWav->container == ma_dr_wav_container_w64) {
+                if (chunkSize < 8) {
+                    return MA_FALSE;
+                }
                 if (ma_dr_wav__on_read(pWav->onRead, pWav->pUserData, &sampleCountFromFactChunk, 8, &cursor) != 8) {
                     return MA_FALSE;
                 }
@@ -81555,6 +81583,9 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             ma_uint8 offsetAndBlockSizeData[8];
             ma_uint32 offset;
             foundChunk_data = MA_TRUE;
+            if (chunkSize < sizeof(offsetAndBlockSizeData)) {
+                return MA_FALSE;
+            }
             if (ma_dr_wav__on_read(pWav->onRead, pWav->pUserData, offsetAndBlockSizeData, sizeof(offsetAndBlockSizeData), &cursor) != sizeof(offsetAndBlockSizeData)) {
                 return MA_FALSE;
             }
