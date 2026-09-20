@@ -750,6 +750,9 @@ if(MINIAUDIO_BUILD_TESTS)
 
     add_miniaudio_test(miniaudio_hardening_wav_metadata hardening/hardening_wav_metadata.c)
     add_test(NAME miniaudio_hardening_wav_metadata COMMAND miniaudio_hardening_wav_metadata)
+
+    add_miniaudio_test(miniaudio_hardening_resource_manager hardening/hardening_resource_manager.c)
+    add_test(NAME miniaudio_hardening_resource_manager COMMAND miniaudio_hardening_resource_manager)
 endif()
 
 # Examples
