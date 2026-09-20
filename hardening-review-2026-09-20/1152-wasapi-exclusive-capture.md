@@ -4,7 +4,8 @@
 
 - **Priority:** P1 Windows correctness
 - **Exact checkout:** suspect code present
-- **Local reproduction:** not possible on the Linux investigation host
+- **Native reproduction:** pending; a Windows capture endpoint was connected on
+  2026-09-20 but enumeration and exclusive-format support remain to be verified
 - **Reported setup:** Windows 11, exclusive capture, Realtek and M-Audio,
   s16/48 kHz/stereo
 

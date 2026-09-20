@@ -38,10 +38,10 @@ offload endpoints.
 | P0 | [#1123: fact-chunk underflow](1123-fact-chunk-seek-underflow.md) | Reproduced | All |
 | P0 | [#1128: MP3 metadata over-read](1128-mp3-metadata-overread.md) | Reproduced with ASan | All |
 | P0 | [#1149: WASAPI callback deadlock](1149-wasapi-notification-deadlock.md) | Confirmed in source; native validation pending | Windows |
-| P1 | [#1152: exclusive capture duplication](1152-wasapi-exclusive-capture.md) | Not reproduced | Windows |
+| P1 | [#1152: exclusive capture duplication](1152-wasapi-exclusive-capture.md) | Capture endpoint connected; reproduction pending | Windows |
 | P1 | [#1153: spatialization glitches](1153-spatialization-gain-smoothing.md) | Related DSP defects reproduced | All; original report Windows |
 | P1 | [#1155: optional Opus UAF report](1155-libopus-uaf-report.md) | Insufficient report; dependency unavailable | Optional Opus |
-| P1 | [#1157: GCC LTO diagnostics](1157-gcc-lto-atomics.md) | Not reproduced with local GCC 16 | Primarily Windows/MinGW report |
+| P1 | [#1157: GCC LTO diagnostics](1157-gcc-lto-atomics.md) | Unresolved; Windows MinGW validation owner-declined | Primarily Windows/MinGW report |
 | P1 | [#484: process-specific loopback](0484-process-loopback.md) | Feature remains unverified | Windows |
 | P1 | [#1125: short sound truncation](1125-short-sound-truncation.md) | Reproduced offline | All |
 | P1 | [#1117: MP3 length overflow](1117-mp3-length-overflow.md) | Suspect code present; fixture reproduction pending | All |

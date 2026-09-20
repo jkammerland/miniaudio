@@ -7,6 +7,8 @@
 - **Local reproduction:** not reproduced
 - **Local toolchain:** GCC 16.2.1, C++23, `-O3 -flto`
 - **Reported platform:** Windows GCC/MinGW; compiler version omitted
+- **Scope decision:** on 2026-09-20 the owner rejected deploying or running
+  GCC/MinGW on Windows for this effort
 
 The report describes `-Wstringop-overflow` diagnostics involving node-bus
 `isAttached` and resource-manager atomic fields under LTO. A local build of
@@ -23,6 +25,16 @@ succeeds. The only message says LTO uses serial LTRANS. Evidence:
 This means the warning is toolchain/configuration-dependent or needs a more
 specific instantiation. It does not prove the code safe, and it does not
 justify suppressing the warning.
+
+## Owner scope decision
+
+Do not provision, install, or execute GCC/MinGW on Windows for this effort.
+Consequently, the reporter's platform-specific warning cannot be certified as
+reproduced or absent here. Keep #1157 unresolved; the exclusion is not a pass
+and must not motivate changes to atomics, object layout, or warning policy.
+
+The investigation below is retained as the evidence required if the owner later
+reopens this scope or supplies an external exact-toolchain reproducer.
 
 ## Relevant code
 

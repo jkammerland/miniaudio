@@ -257,12 +257,15 @@ worker design with incomplete lifecycle proof, not as a completed lifecycle fix.
 
 ### #1152: WASAPI exclusive-capture duplication/discontinuity
 
-Status: **unresolved; not reproduced**.
+Status: **unresolved; capture endpoint connected, reproduction pending**.
 
-The Windows worker exposed no capture endpoint. No packet/cache/flag/device-QPC
-trace or watermark evidence exists. Do not infer that draining multiple packets
-is itself wrong. Reproduction requires an exclusive-capable capture endpoint
-and the bounded preallocated trace specified by the implementation prompt.
+The earlier Windows worker run exposed no capture endpoint. On 2026-09-20 the
+owner reported that a capture device had been connected; enumeration, exclusive
+mode, and format support have not yet been verified. No packet/cache/flag/
+device-QPC trace or watermark evidence exists. Do not infer that draining
+multiple packets itself is wrong. Reproduction requires the connected endpoint
+to support exclusive capture and the bounded preallocated trace specified by
+the implementation prompt.
 
 ### #1155: optional-libopus use-after-free report
 
@@ -276,15 +279,17 @@ read/uninit is not assumed valid.
 
 ### #1157: GCC/MinGW LTO atomic or node-bus diagnostics
 
-Status: **unresolved; not reproduced**.
+Status: **unresolved; Windows GCC/MinGW validation explicitly owner-declined**.
 
 Historical local runs reported GCC 16.2.1 C and C++23 success with and without
 LTO, but the retained `gcc-lto-*` binaries do not preserve complete commands,
 exact-source identifiers, and exit records, so that matrix is not independently
-certified. Windows had no MinGW. Required evidence is the exact
-compiler/triple/flags/diagnostic, C/C++ and LTO/non-LTO comparison,
-generated-code inspection if applicable, and attach/detach/reattach plus
-multi-bus/atomic-lifetime tests.
+certified. Windows had no MinGW. On 2026-09-20 the owner explicitly rejected
+deploying or running GCC/MinGW on Windows. Do not provision, install, or execute
+MinGW on Windows for this effort. The report therefore remains unresolved and
+outside the accepted validation scope; this decision is not evidence of a pass
+or a fix. Reopening it requires a new owner decision or an externally supplied
+exact compiler/triple/flags/diagnostic and reproducer.
 
 ### #484: process-scoped WASAPI loopback
 
