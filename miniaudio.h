@@ -7869,7 +7869,7 @@ struct ma_device
             /*IAudioClient**/ ma_ptr pAudioClientCapture;
             /*IAudioRenderClient**/ ma_ptr pRenderClient;
             /*IAudioCaptureClient**/ ma_ptr pCaptureClient;
-            /*IMMDeviceEnumerator**/ ma_ptr pDeviceEnumerator;      /* Used for IMMNotificationClient notifications. Required for detecting default device changes. */
+            ma_ptr pDeviceEnumerator;                              /* Private notification/control sidecar. */
             ma_IMMNotificationClient notificationClient;
             /*HANDLE*/ ma_handle hEventPlayback;                    /* Auto reset. Initialized to signaled. */
             /*HANDLE*/ ma_handle hEventCapture;                     /* Auto reset. Initialized to unsignaled. */
@@ -22341,6 +22341,7 @@ typedef struct
     ma_device* pDevice;
     ma_IMMDeviceEnumerator* pDeviceEnumerator;
     ma_thread thread;
+    ma_event initEvent;
     ma_event wakeEvent;
     ma_event commandEvent;
     ma_event quiesceEvent;
@@ -22348,6 +22349,7 @@ typedef struct
     volatile ma_uint32 pendingOperations;
     volatile ma_uint32 acceptingNotifications;
     volatile ma_uint32 requestedStarted;
+    ma_result initResult;
 } ma_device_notification_state__wasapi;
 
 #define MA_WASAPI_NOTIFICATION_OP_RENDER   0x00000001
@@ -23573,6 +23575,7 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
             ma_event_uninit(&pNotificationState->quiesceEvent);
             ma_event_uninit(&pNotificationState->commandEvent);
             ma_event_uninit(&pNotificationState->wakeEvent);
+            ma_event_uninit(&pNotificationState->initEvent);
             ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         }
 
@@ -24103,7 +24106,9 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
 {
     ma_device_init_internal_data__wasapi data;
     ma_event* pReleaseEvent = NULL;
+    ma_uint32 actualBufferSizeInFrames = 0;
     ma_result result;
+    HRESULT hr;
 
     MA_ASSERT(pDevice != NULL);
 
@@ -24135,15 +24140,7 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     data.noHardwareOffloading       = pDevice->wasapi.noHardwareOffloading;
     data.loopbackProcessID          = pDevice->wasapi.loopbackProcessID;
     data.loopbackProcessExclude     = pDevice->wasapi.loopbackProcessExclude;
-    result = ma_device_init_internal__wasapi(pDevice->pContext, deviceType, NULL, &data);
-    if (result != MA_SUCCESS) {
-        return result;
-    }
 
-    /*
-    The replacement is complete. Release the old interfaces on the same command thread that
-    created their services, then publish the new set as one commit.
-    */
     #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
     {
         ma_device_notification_state__wasapi* pNotificationState = ma_device_notification_state_from_device__wasapi(pDevice);
@@ -24151,6 +24148,33 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         pReleaseEvent = &pNotificationState->commandEvent;
     }
     #endif
+
+    result = ma_device_init_internal__wasapi(pDevice->pContext, deviceType, NULL, &data);
+    if (result != MA_SUCCESS) {
+        return result;
+    }
+
+    /*
+    Finish configuring the candidate before retiring the old interface set. A failed event or
+    buffer query must leave the published clients untouched.
+    */
+    if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
+        hr = ma_IAudioClient_SetEventHandle(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventCapture);
+    } else {
+        hr = ma_IAudioClient_SetEventHandle(data.pAudioClient, (HANDLE)pDevice->wasapi.hEventPlayback);
+    }
+    if (FAILED(hr)) {
+        ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        return ma_result_from_HRESULT(hr);
+    }
+
+    hr = ma_IAudioClient_GetBufferSize(data.pAudioClient, &actualBufferSizeInFrames);
+    if (FAILED(hr)) {
+        ma_device_release_audio_client__wasapi(pDevice->pContext, data.pAudioClient, data.pRenderClient, data.pCaptureClient, pReleaseEvent);
+        return ma_result_from_HRESULT(hr);
+    }
+
+    /* Release the old interfaces on their service thread, then publish the complete candidate. */
 
     if (deviceType == ma_device_type_capture || deviceType == ma_device_type_loopback) {
         result = ma_device_release_audio_client__wasapi(
@@ -24176,10 +24200,8 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         pDevice->capture.internalPeriods            = data.periodsOut;
         ma_strcpy_s(pDevice->capture.name, sizeof(pDevice->capture.name), data.deviceName);
 
-        ma_IAudioClient_SetEventHandle((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture, (HANDLE)pDevice->wasapi.hEventCapture);
-
         pDevice->wasapi.periodSizeInFramesCapture = data.periodSizeInFramesOut;
-        ma_IAudioClient_GetBufferSize((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture, &pDevice->wasapi.actualBufferSizeInFramesCapture);
+        pDevice->wasapi.actualBufferSizeInFramesCapture = actualBufferSizeInFrames;
 
         /* We must always have a valid ID. */
         ma_strcpy_s_WCHAR(pDevice->capture.id.wasapi, sizeof(pDevice->capture.id.wasapi), data.id.wasapi);
@@ -24209,10 +24231,8 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
         pDevice->playback.internalPeriods            = data.periodsOut;
         ma_strcpy_s(pDevice->playback.name, sizeof(pDevice->playback.name), data.deviceName);
 
-        ma_IAudioClient_SetEventHandle((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, (HANDLE)pDevice->wasapi.hEventPlayback);
-
         pDevice->wasapi.periodSizeInFramesPlayback = data.periodSizeInFramesOut;
-        ma_IAudioClient_GetBufferSize((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, &pDevice->wasapi.actualBufferSizeInFramesPlayback);
+        pDevice->wasapi.actualBufferSizeInFramesPlayback = actualBufferSizeInFrames;
 
         /* We must always have a valid ID because rerouting will look at it. */
         ma_strcpy_s_WCHAR(pDevice->playback.id.wasapi, sizeof(pDevice->playback.id.wasapi), data.id.wasapi);
@@ -24446,8 +24466,17 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     pNotificationState->pDevice           = pDevice;
     pNotificationState->pDeviceEnumerator = pDeviceEnumerator;
 
+    result = ma_event_init(&pNotificationState->initEvent);
+    if (result != MA_SUCCESS) {
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
     result = ma_event_init(&pNotificationState->wakeEvent);
     if (result != MA_SUCCESS) {
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
         ma_device_uninit__wasapi(pDevice);
@@ -24457,6 +24486,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     result = ma_event_init(&pNotificationState->commandEvent);
     if (result != MA_SUCCESS) {
         ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
         ma_device_uninit__wasapi(pDevice);
@@ -24467,6 +24497,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     if (result != MA_SUCCESS) {
         ma_event_uninit(&pNotificationState->commandEvent);
         ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
         ma_device_uninit__wasapi(pDevice);
@@ -24478,6 +24509,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         ma_mutex_uninit(&pNotificationState->operationLock);
         ma_event_uninit(&pNotificationState->commandEvent);
         ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
         ma_device_uninit__wasapi(pDevice);
@@ -24485,7 +24517,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     }
 
     ma_atomic_store_32(&pNotificationState->pendingOperations, 0);
-    ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_TRUE);
+    ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
     ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
 
     /* Publish the fully initialized sidecar before registration can invoke a callback. */
@@ -24498,11 +24530,30 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         ma_event_uninit(&pNotificationState->quiesceEvent);
         ma_event_uninit(&pNotificationState->commandEvent);
         ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
         ma_device_uninit__wasapi(pDevice);
         return result;
     }
+
+    ma_event_wait(&pNotificationState->initEvent);
+    if (pNotificationState->initResult != MA_SUCCESS) {
+        ma_thread_wait(&pNotificationState->thread);
+        result = pNotificationState->initResult;
+        pDevice->wasapi.pDeviceEnumerator = NULL;
+        ma_mutex_uninit(&pNotificationState->operationLock);
+        ma_event_uninit(&pNotificationState->quiesceEvent);
+        ma_event_uninit(&pNotificationState->commandEvent);
+        ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
+        ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
+        ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
+        ma_device_uninit__wasapi(pDevice);
+        return result;
+    }
+
+    ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_TRUE);
 
     pDevice->wasapi.notificationClient.lpVtbl  = (void*)&g_maNotificationCientVtbl;
     pDevice->wasapi.notificationClient.counter = 1;
@@ -24521,6 +24572,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         ma_event_uninit(&pNotificationState->quiesceEvent);
         ma_event_uninit(&pNotificationState->commandEvent);
         ma_event_uninit(&pNotificationState->wakeEvent);
+        ma_event_uninit(&pNotificationState->initEvent);
         ma_free(pNotificationState, &pDevice->pContext->allocationCallbacks);
         ma_IMMDeviceEnumerator_Release(pDeviceEnumerator);
     }
@@ -24620,6 +24672,28 @@ static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void
 {
     ma_device_notification_state__wasapi* pState = (ma_device_notification_state__wasapi*)pUserData;
     ma_device* pDevice = pState->pDevice;
+    ma_bool32 uninitializeCOM = MA_FALSE;
+
+    #if !defined(MA_XBOX)
+    {
+        HRESULT coInitializeResult = ma_CoInitializeEx(pDevice->pContext, NULL, MA_COINIT_VALUE);
+        if (coInitializeResult == S_OK || coInitializeResult == S_FALSE) {
+            pState->initResult = MA_SUCCESS;
+            uninitializeCOM = MA_TRUE;
+        } else {
+            pState->initResult = ma_result_from_HRESULT(coInitializeResult);
+        }
+    }
+    #else
+    {
+        pState->initResult = MA_SUCCESS;
+    }
+    #endif
+
+    ma_event_signal(&pState->initEvent);
+    if (pState->initResult != MA_SUCCESS) {
+        return (ma_thread_result)0;
+    }
 
     for (;;) {
         ma_uint32 pendingOperations;
@@ -24738,6 +24812,14 @@ static ma_thread_result MA_THREADCALL ma_device_notification_thread__wasapi(void
             ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_WARNING, "[WASAPI] Device rerouting failed; the device remains stopped and detached.");
         }
     }
+
+    #if !defined(MA_XBOX)
+    if (uninitializeCOM) {
+        ma_CoUninitialize(pDevice->pContext);
+    }
+    #else
+    (void)uninitializeCOM;
+    #endif
 
     return (ma_thread_result)0;
 }
