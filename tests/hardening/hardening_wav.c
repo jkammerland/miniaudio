@@ -70,7 +70,7 @@ static int hardening_wav_test_bounded_callbacks(const ma_uint8* pData, size_t da
         ma_decoder_uninit(&decoder);
     }
 
-    if ((result == MA_SUCCESS) != expectSuccess) {
+    if ((result == MA_SUCCESS) != (expectSuccess != MA_FALSE)) {
         printf("%s returned %d, expected %s\n", pName, result, expectSuccess ? "success" : "failure");
         return 1;
     }
@@ -170,8 +170,7 @@ static int hardening_wav_test_file(const ma_uint8* pData, size_t dataSize, const
     ma_decoder decoder;
     ma_result result;
 
-    pFile = fopen(pPath, "wb");
-    if (pFile == NULL) {
+    if (ma_fopen(&pFile, pPath, "wb") != MA_SUCCESS) {
         printf("%s could not create temporary file\n", pName);
         return 1;
     }

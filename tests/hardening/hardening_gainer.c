@@ -35,14 +35,20 @@ static int gainer_run_ramp(ma_uint32 channels, ma_uint32 smoothFrames, const ma_
         output[sampleIndex] = GAINER_GUARD_VALUE;
     }
 
-    ma_gainer_process_pcm_frames(&gainer, output, input, 1);
+    if (ma_gainer_process_pcm_frames(&gainer, output, input, 1) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     ma_gainer_set_gain(&gainer, 0.0f);
     totalFrames = 0;
     for (blockIndex = 0; blockIndex < blockCount; blockIndex += 1) {
         ma_uint32 frameCount = pBlocks[blockIndex];
         float* pOutput = inPlace ? input + totalFrames * channels : output + totalFrames * channels;
         const float* pInput = input + totalFrames * channels;
-        ma_gainer_process_pcm_frames(&gainer, pOutput, pInput, frameCount);
+        if (ma_gainer_process_pcm_frames(&gainer, pOutput, pInput, frameCount) != MA_SUCCESS) {
+            ma_gainer_uninit(&gainer, NULL);
+            return 1;
+        }
         totalFrames += frameCount;
     }
 
@@ -60,7 +66,7 @@ static int gainer_run_ramp(ma_uint32 channels, ma_uint32 smoothFrames, const ma_
         failed = 1;
     }
     if (failed) {
-        printf("gainer ramp mismatch: channels=%u smooth=%u split=%u inplace=%d sample=%u\n", channels, smoothFrames, blockCount, inPlace, sampleIndex);
+        printf("gainer ramp mismatch: channels=%u smooth=%u split=%u inplace=%u sample=%u\n", channels, smoothFrames, blockCount, (unsigned int)inPlace, sampleIndex);
     }
 
     ma_gainer_uninit(&gainer, NULL);
@@ -72,16 +78,22 @@ static int gainer_test_null_advance(void)
     ma_gainer gainer;
     ma_gainer_config config = ma_gainer_config_init(2, 8);
     float input[4] = {1, 1, 1, 1};
-    float output[4];
+    float output[4] = {0, 0, 0, 0};
     int failed = 0;
 
     if (ma_gainer_init(&config, NULL, &gainer) != MA_SUCCESS) {
         return 1;
     }
-    ma_gainer_process_pcm_frames(&gainer, output, input, 1);
+    if (ma_gainer_process_pcm_frames(&gainer, output, input, 1) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     ma_gainer_set_gain(&gainer, 0);
-    ma_gainer_process_pcm_frames(&gainer, NULL, NULL, 3);
-    ma_gainer_process_pcm_frames(&gainer, output, input, 2);
+    if (ma_gainer_process_pcm_frames(&gainer, NULL, NULL, 3) != MA_SUCCESS ||
+        ma_gainer_process_pcm_frames(&gainer, output, input, 2) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     if (!gainer_near(output[0], 0.625f) || !gainer_near(output[2], 0.5f)) {
         printf("null-buffer advancement mismatch: %f %f\n", output[0], output[2]);
         failed = 1;
@@ -105,11 +117,20 @@ static int gainer_test_mid_ramp_target(void)
     if (ma_gainer_init(&config, NULL, &gainer) != MA_SUCCESS) {
         return 1;
     }
-    ma_gainer_process_pcm_frames(&gainer, output, input, 1);
+    if (ma_gainer_process_pcm_frames(&gainer, output, input, 1) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     ma_gainer_set_gain(&gainer, 0);
-    ma_gainer_process_pcm_frames(&gainer, output, input, 4);
+    if (ma_gainer_process_pcm_frames(&gainer, output, input, 4) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     ma_gainer_set_gain(&gainer, 1);
-    ma_gainer_process_pcm_frames(&gainer, output + 4, input + 4, 8);
+    if (ma_gainer_process_pcm_frames(&gainer, output + 4, input + 4, 8) != MA_SUCCESS) {
+        ma_gainer_uninit(&gainer, NULL);
+        return 1;
+    }
     for (i = 0; i < 8; i += 1) {
         float expected = 0.5f + 0.5f * (float)i / 8.0f;
         if (!gainer_near(output[4 + i], expected)) {
