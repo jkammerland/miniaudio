@@ -12,6 +12,7 @@ static ma_result hardening_wasapi_reinit_release_audio_client(ma_context* pConte
 static void hardening_wasapi_notification_release_hook(void* pClient, void* pState, unsigned int newRefCount);
 static ma_result hardening_wasapi_initial_device_init_internal(ma_context* pContext, ma_device_type deviceType, const void* pDeviceID, void* pData);
 static void* hardening_wasapi_create_device_event(void* pAttributes, int manualReset, int initialState, const void* pName);
+static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent);
 
 #define MA_WASAPI_DEVICE_STOP_INTERNAL(pDevice)                 hardening_wasapi_stop((pDevice))
 #define MA_WASAPI_DEVICE_START_INTERNAL(pDevice)                hardening_wasapi_start((pDevice))
@@ -25,6 +26,7 @@ static void* hardening_wasapi_create_device_event(void* pAttributes, int manualR
 #define MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pClient, pState, newRefCount) hardening_wasapi_notification_release_hook((void*)(pClient), (void*)(pState), (unsigned int)(newRefCount))
 #define MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData) hardening_wasapi_initial_device_init_internal((pContext), (deviceType), (const void*)(pDeviceID), (void*)(pData))
 #define MA_WASAPI_CREATE_DEVICE_EVENT(pAttributes, manualReset, initialState, pName) ((HANDLE)hardening_wasapi_create_device_event((void*)(pAttributes), (int)(manualReset), (int)(initialState), (const void*)(pName)))
+#define MA_WASAPI_COMMAND_LOCAL_EVENT_INIT(pEvent) hardening_wasapi_command_local_event_init((pEvent))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
 
@@ -94,6 +96,17 @@ static ma_uint8 g_candidateRenderClientMarker;
 static ma_event* g_pReleaseRetirementEnteredEvent;
 static ma_event* g_pReleaseRetirementContinueEvent;
 static volatile ma_uint32 g_releaseRetirementHookEnabled;
+static volatile ma_uint32 g_failCommandLocalEventInit;
+static volatile ma_uint32 g_commandLocalEventInitCount;
+
+static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent)
+{
+    ma_atomic_fetch_add_32(&g_commandLocalEventInitCount, 1);
+    if (ma_atomic_load_32(&g_failCommandLocalEventInit) != MA_FALSE) {
+        return MA_OUT_OF_MEMORY;
+    }
+    return ma_event_init(pEvent);
+}
 
 static void hardening_wasapi_notification_release_hook(void* pClient, void* pState, unsigned int newRefCount)
 {
@@ -1177,6 +1190,18 @@ static int hardening_test_command_worker_release(void)
     }
     threadCreated = MA_TRUE;
 
+    /* Prove the fault seam is active before exercising the allocation-free paths. */
+    ma_atomic_store_32(&g_commandLocalEventInitCount, 0);
+    ma_atomic_store_32(&g_failCommandLocalEventInit, MA_TRUE);
+    quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+    result = ma_context_post_command__wasapi(&context, &quitCommand);
+    if (result != MA_OUT_OF_MEMORY || ma_atomic_load_32(&g_commandLocalEventInitCount) != 1) {
+        printf("command worker local-event fault seam: result=%d attempts=%u\n", result,
+            ma_atomic_load_32(&g_commandLocalEventInitCount));
+        failed = 1;
+        goto done;
+    }
+
     result = ma_device_release_audio_client__wasapi(&context, &audioClient.iface, &renderClient.iface, &captureClient.iface, NULL);
     if (result != MA_SUCCESS || ma_atomic_load_32(&audioClient.releaseCount) != 1 ||
         ma_atomic_load_32(&renderClient.releaseCount) != 1 || ma_atomic_load_32(&captureClient.releaseCount) != 1 ||
@@ -1191,17 +1216,20 @@ static int hardening_test_command_worker_release(void)
     }
 
     quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
-    result = ma_context_post_command__wasapi(&context, &quitCommand);
-    if (result != MA_SUCCESS) {
+    result = ma_context_enqueue_command__wasapi(&context, &quitCommand);
+    if (result != MA_SUCCESS || ma_atomic_load_32(&g_commandLocalEventInitCount) != 1) {
+        printf("allocation-free release/quit: result=%d local-event-attempts=%u\n", result,
+            ma_atomic_load_32(&g_commandLocalEventInitCount));
         failed = 1;
     }
     ma_thread_wait(&context.wasapi.commandThread);
     threadCreated = MA_FALSE;
 
 done:
+    ma_atomic_store_32(&g_failCommandLocalEventInit, MA_FALSE);
     if (threadCreated) {
         quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
-        ma_context_post_command__wasapi(&context, &quitCommand);
+        ma_context_enqueue_command__wasapi(&context, &quitCommand);
         ma_thread_wait(&context.wasapi.commandThread);
     }
     hardening_command_queue_uninit(&context);

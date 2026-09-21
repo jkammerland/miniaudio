@@ -2,9 +2,17 @@
 
 static ma_result hardening_activation_wait(void* pHandler, unsigned long timeoutInMilliseconds);
 static ma_bool32 hardening_process_loopback_supported(ma_context* pContext);
+static void* hardening_completion_handler_alloc(size_t sizeInBytes);
+static int hardening_completion_handler_free(void* pMemory);
+static HANDLE hardening_completion_handler_create_event(void);
+static int hardening_completion_handler_close_event(HANDLE hEvent);
 
 #define MA_WASAPI_COMPLETION_HANDLER_WAIT(pHandler, timeoutInMilliseconds) hardening_activation_wait((void*)(pHandler), (timeoutInMilliseconds))
 #define MA_WASAPI_PROCESS_LOOPBACK_SUPPORTED(pContext) hardening_process_loopback_supported((pContext))
+#define MA_WASAPI_COMPLETION_HANDLER_ALLOC(sizeInBytes) hardening_completion_handler_alloc((sizeInBytes))
+#define MA_WASAPI_COMPLETION_HANDLER_FREE(pMemory) hardening_completion_handler_free((pMemory))
+#define MA_WASAPI_COMPLETION_HANDLER_CREATE_EVENT() hardening_completion_handler_create_event()
+#define MA_WASAPI_COMPLETION_HANDLER_CLOSE_EVENT(hEvent) hardening_completion_handler_close_event((hEvent))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
 
@@ -55,6 +63,56 @@ static MA_PROCESS_LOOPBACK_MODE g_processLoopbackMode;
 static ma_completion_handler* g_pendingHandler;
 static hardening_audio_client g_audioClient;
 static hardening_async_operation g_asyncOperation;
+static ma_uint32 g_handlerAllocations;
+static ma_uint32 g_handlerFrees;
+static ma_uint32 g_handlerEventCreates;
+static ma_uint32 g_handlerEventCloses;
+
+static void* hardening_completion_handler_alloc(size_t sizeInBytes)
+{
+    void* pMemory = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeInBytes);
+    if (pMemory != NULL) {
+        g_handlerAllocations += 1;
+    }
+    return pMemory;
+}
+
+static int hardening_completion_handler_free(void* pMemory)
+{
+    if (pMemory != NULL) {
+        g_handlerFrees += 1;
+    }
+    return HeapFree(GetProcessHeap(), 0, pMemory);
+}
+
+static HANDLE hardening_completion_handler_create_event(void)
+{
+    HANDLE hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (hEvent != NULL) {
+        g_handlerEventCreates += 1;
+    }
+    return hEvent;
+}
+
+static int hardening_completion_handler_close_event(HANDLE hEvent)
+{
+    if (hEvent != NULL) {
+        g_handlerEventCloses += 1;
+    }
+    return CloseHandle(hEvent);
+}
+
+static int hardening_check_handler_cleanup(ma_uint32 expectedLive, const char* pCase)
+{
+    if (g_handlerAllocations != g_handlerFrees + expectedLive ||
+        g_handlerEventCreates != g_handlerEventCloses + expectedLive ||
+        g_handlerAllocations != 1 || g_handlerEventCreates != 1) {
+        printf("%s handler ownership mismatch: alloc=%u free=%u event=%u close=%u expected-live=%u\n",
+            pCase, g_handlerAllocations, g_handlerFrees, g_handlerEventCreates, g_handlerEventCloses, expectedLive);
+        return 1;
+    }
+    return 0;
+}
 
 static void* hardening_malloc(size_t sz, void* pUserData)
 {
@@ -265,6 +323,10 @@ static void hardening_reset(hardening_allocator_state* pAllocatorState, ma_conte
     g_targetProcessID = 0;
     g_processLoopbackMode = MA_PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
     g_pendingHandler = NULL;
+    g_handlerAllocations = 0;
+    g_handlerFrees = 0;
+    g_handlerEventCreates = 0;
+    g_handlerEventCloses = 0;
 
     g_audioClient.lpVtbl = &g_audioClientVtbl;
     g_asyncOperation.lpVtbl = &g_asyncOperationVtbl;
@@ -304,8 +366,9 @@ static int hardening_test_include_exclude(void)
         failed = 1;
     }
     failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
-    if (allocatorState.allocations != allocatorState.frees) {
-        printf("include handler leak: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
+    failed += hardening_check_handler_cleanup(0, "include activation");
+    if (allocatorState.allocations != 0 || allocatorState.frees != 0) {
+        printf("include activation used context allocator: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
         failed = 1;
     }
 
@@ -318,8 +381,9 @@ static int hardening_test_include_exclude(void)
         failed = 1;
     }
     failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
-    if (allocatorState.allocations != allocatorState.frees) {
-        printf("exclude handler leak: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
+    failed += hardening_check_handler_cleanup(0, "exclude activation");
+    if (allocatorState.allocations != 0 || allocatorState.frees != 0) {
+        printf("exclude activation used context allocator: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
         failed = 1;
     }
 
@@ -344,6 +408,7 @@ static int hardening_test_default_interface_strings(void)
         failed = 1;
     }
     failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
+    failed += hardening_check_handler_cleanup(0, "default capture activation");
 
     hardening_reset(&allocatorState, &context);
     pAudioClient = NULL;
@@ -354,6 +419,7 @@ static int hardening_test_default_interface_strings(void)
         failed = 1;
     }
     failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
+    failed += hardening_check_handler_cleanup(0, "default render activation");
 
     return failed;
 }
@@ -416,12 +482,13 @@ static int hardening_test_failure_cleanup(void)
         g_asyncMode = modes[i];
         result = ma_context_get_IAudioClient__wasapi(&context, ma_device_type_loopback, NULL, 55, MA_FALSE, &pAudioClient, &pDeviceInterface);
         if (result == MA_SUCCESS || pAudioClient != NULL || pDeviceInterface != NULL ||
-            allocatorState.allocations != allocatorState.frees || g_audioClient.refs != 0) {
+            allocatorState.allocations != 0 || allocatorState.frees != 0 || g_audioClient.refs != 0) {
             printf("failure cleanup mode=%d result=%d audio=%p interface=%p refs=%lu alloc=%u free=%u\n",
                 modes[i], result, (void*)pAudioClient, (void*)pDeviceInterface, (unsigned long)g_audioClient.refs,
                 allocatorState.allocations, allocatorState.frees);
             failed = 1;
         }
+        failed += hardening_check_handler_cleanup(0, "failed activation");
     }
 
     return failed;
@@ -444,14 +511,21 @@ static int hardening_test_late_completion(void)
             result, (void*)g_pendingHandler, allocatorState.allocations, allocatorState.frees);
         return 1;
     }
+    if (hardening_check_handler_cleanup(1, "timed-out activation before completion") != 0) {
+        return 1;
+    }
 
     /* The completion handler must not retain this context-scoped allocator after timeout. */
     allocatorState.retired = MA_TRUE;
     ma_completion_handler_ActivateCompleted(g_pendingHandler, (ma_IActivateAudioInterfaceAsyncOperation*)&g_asyncOperation);
-    ma_completion_handler_Release(g_pendingHandler);
+    if (ma_completion_handler_Release(g_pendingHandler) != 0) {
+        printf("late completion retained an unexpected handler reference\n");
+        return 1;
+    }
     g_pendingHandler = NULL;
 
-    if (allocatorState.allocations != allocatorState.frees || allocatorState.callbacksAfterRetire != 0) {
+    if (allocatorState.allocations != allocatorState.frees || allocatorState.callbacksAfterRetire != 0 ||
+        hardening_check_handler_cleanup(0, "timed-out activation after completion") != 0) {
         printf("late completion used retired allocator: alloc=%u free=%u late=%u\n", allocatorState.allocations, allocatorState.frees, allocatorState.callbacksAfterRetire);
         return 1;
     }

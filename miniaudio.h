@@ -22258,6 +22258,19 @@ typedef BOOL   (WINAPI * MA_PFN_AvRevertMmThreadCharacteristics)(HANDLE AvrtHand
 #define MA_WASAPI_AUDIO_RENDER_INTERFACE_STRING  L"{E6327CAD-DCEC-4949-AE8A-991E976A79D2}"
 #define MA_WASAPI_AUDIO_CAPTURE_INTERFACE_STRING L"{2EEF81BE-33FA-4800-9670-1CD474972C3F}"
 
+#ifndef MA_WASAPI_COMPLETION_HANDLER_ALLOC
+#define MA_WASAPI_COMPLETION_HANDLER_ALLOC(sizeInBytes) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (sizeInBytes))
+#endif
+#ifndef MA_WASAPI_COMPLETION_HANDLER_FREE
+#define MA_WASAPI_COMPLETION_HANDLER_FREE(pMemory) HeapFree(GetProcessHeap(), 0, (pMemory))
+#endif
+#ifndef MA_WASAPI_COMPLETION_HANDLER_CREATE_EVENT
+#define MA_WASAPI_COMPLETION_HANDLER_CREATE_EVENT() CreateEventA(NULL, FALSE, FALSE, NULL)
+#endif
+#ifndef MA_WASAPI_COMPLETION_HANDLER_CLOSE_EVENT
+#define MA_WASAPI_COMPLETION_HANDLER_CLOSE_EVENT(hEvent) CloseHandle((hEvent))
+#endif
+
 typedef struct ma_completion_handler ma_completion_handler;
 
 typedef struct
@@ -22304,9 +22317,9 @@ static ULONG STDMETHODCALLTYPE ma_completion_handler_Release(ma_completion_handl
     ma_uint32 newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
     if (newRefCount == 0) {
         if (pThis->hEvent != NULL) {
-            CloseHandle(pThis->hEvent);
+            MA_WASAPI_COMPLETION_HANDLER_CLOSE_EVENT(pThis->hEvent);
         }
-        HeapFree(GetProcessHeap(), 0, pThis);
+        MA_WASAPI_COMPLETION_HANDLER_FREE(pThis);
         return 0;
     }
 
@@ -22337,17 +22350,17 @@ static ma_result ma_completion_handler_create(ma_context* pContext, ma_completio
 
     *ppHandler = NULL;
     /* Windows can retain this object after a bounded wait times out and the context is gone. */
-    pHandler = (ma_completion_handler*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pHandler));
+    pHandler = (ma_completion_handler*)MA_WASAPI_COMPLETION_HANDLER_ALLOC(sizeof(*pHandler));
     if (pHandler == NULL) {
         return MA_OUT_OF_MEMORY;
     }
 
     pHandler->lpVtbl = &g_maCompletionHandlerVtblInstance;
     pHandler->counter = 1;
-    pHandler->hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    pHandler->hEvent = MA_WASAPI_COMPLETION_HANDLER_CREATE_EVENT();
     if (pHandler->hEvent == NULL) {
         ma_result result = ma_result_from_GetLastError(GetLastError());
-        HeapFree(GetProcessHeap(), 0, pHandler);
+        MA_WASAPI_COMPLETION_HANDLER_FREE(pHandler);
         return result;
     }
 
@@ -22466,14 +22479,11 @@ static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_Release(ma_IMMNotificati
     }
 
     newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
-    MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pThis, pState, newRefCount);
 
     if (pState != NULL) {
-        ma_uint32 oldRetirementState = ma_atomic_fetch_sub_32(&pState->releaseRetirementState, 1);
-        if ((oldRetirementState & MA_WASAPI_NOTIFICATION_RELEASE_RETIRING) != 0 &&
-            (oldRetirementState & MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK) == 1 && ma_atomic_load_32(&pThis->counter) <= 1) {
-            ma_event_signal(&pState->quiesceEvent);
-        }
+        /* This decrement is the final sidecar access and therefore publishes retirement. */
+        MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pThis, pState, newRefCount);
+        ma_atomic_fetch_sub_32(&pState->releaseRetirementState, 1);
     }
 
     if (newRefCount == 0) {
@@ -22618,6 +22628,7 @@ typedef struct
     ma_IAudioClient* pAudioClient;
     ma_IAudioRenderClient* pRenderClient;
     ma_IAudioCaptureClient* pCaptureClient;
+    volatile ma_uint32 isComplete;
 } ma_release_audio_client_data__wasapi;
 
 static ma_context_command__wasapi ma_context_init_command__wasapi(int code)
@@ -22629,6 +22640,39 @@ static ma_context_command__wasapi ma_context_init_command__wasapi(int code)
 
     return cmd;
 }
+
+static ma_result ma_context_enqueue_command__wasapi(ma_context* pContext, const ma_context_command__wasapi* pCmd)
+{
+    ma_result result;
+
+    MA_ASSERT(pContext != NULL);
+    MA_ASSERT(pCmd     != NULL);
+
+    /* Do not hold the queue lock while waiting for the consumer to make room. */
+    for (;;) {
+        ma_uint32 index;
+
+        ma_mutex_lock(&pContext->wasapi.commandLock);
+        if (pContext->wasapi.commandCount < ma_countof(pContext->wasapi.commands)) {
+            index = (pContext->wasapi.commandIndex + pContext->wasapi.commandCount) % ma_countof(pContext->wasapi.commands);
+            pContext->wasapi.commands[index] = *pCmd;
+            pContext->wasapi.commandCount += 1;
+            ma_mutex_unlock(&pContext->wasapi.commandLock);
+            break;
+        }
+        ma_mutex_unlock(&pContext->wasapi.commandLock);
+
+        ma_yield();
+    }
+
+    /* The command is visible before the consumer is released. */
+    result = ma_semaphore_release(&pContext->wasapi.commandSem);
+    return result;
+}
+
+#ifndef MA_WASAPI_COMMAND_LOCAL_EVENT_INIT
+#define MA_WASAPI_COMMAND_LOCAL_EVENT_INIT(pEvent) ma_event_init((pEvent))
+#endif
 
 static ma_result ma_context_post_command__wasapi(ma_context* pContext, const ma_context_command__wasapi* pCmd)
 {
@@ -22643,32 +22687,23 @@ static ma_result ma_context_post_command__wasapi(ma_context* pContext, const ma_
     if (pCmd->pEvent == NULL) {
         isUsingLocalEvent = MA_TRUE;
 
-        result = ma_event_init(&localEvent);
+        result = MA_WASAPI_COMMAND_LOCAL_EVENT_INIT(&localEvent);
         if (result != MA_SUCCESS) {
             return result;  /* Failed to create the event for this command. */
         }
     }
 
-    /* Do not hold the queue lock while waiting for the consumer to make room. */
-    for (;;) {
-        ma_uint32 index;
-
-        ma_mutex_lock(&pContext->wasapi.commandLock);
-        if (pContext->wasapi.commandCount < ma_countof(pContext->wasapi.commands)) {
-            index = (pContext->wasapi.commandIndex + pContext->wasapi.commandCount) % ma_countof(pContext->wasapi.commands);
-            pContext->wasapi.commands[index]        = *pCmd;
-            pContext->wasapi.commands[index].pEvent = isUsingLocalEvent ? &localEvent : pCmd->pEvent;
-            pContext->wasapi.commandCount += 1;
-            ma_mutex_unlock(&pContext->wasapi.commandLock);
-            break;
-        }
-        ma_mutex_unlock(&pContext->wasapi.commandLock);
-
-        ma_yield();
+    {
+        ma_context_command__wasapi command = *pCmd;
+        command.pEvent = isUsingLocalEvent ? &localEvent : pCmd->pEvent;
+        result = ma_context_enqueue_command__wasapi(pContext, &command);
     }
-
-    /* The command is visible before the consumer is released. */
-    ma_semaphore_release(&pContext->wasapi.commandSem);
+    if (result != MA_SUCCESS) {
+        if (isUsingLocalEvent) {
+            ma_event_uninit(&localEvent);
+        }
+        return result;
+    }
 
     if (isUsingLocalEvent) {
         ma_event_wait(&localEvent);
@@ -22741,6 +22776,8 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
                 if (pReleaseData->pAudioClient != NULL) {
                     ma_IAudioClient_Release(pReleaseData->pAudioClient);
                 }
+
+                ma_atomic_store_32(&pReleaseData->isComplete, MA_TRUE);
             } break;
 
             default:
@@ -22789,13 +22826,15 @@ static ma_result ma_device_release_audio_client__wasapi(ma_context* pContext, ma
     releaseData.pAudioClient   = pAudioClient;
     releaseData.pRenderClient  = pRenderClient;
     releaseData.pCaptureClient = pCaptureClient;
+    releaseData.isComplete     = MA_FALSE;
 
     /* The command is synchronous, so this stack payload remains valid until completion. */
     cmd.data.releaseAudioClient.pDevice    = (ma_device*)&releaseData;
     cmd.data.releaseAudioClient.deviceType = ma_device_type_playback; /* Unused. Preserve the public command layout. */
     cmd.pEvent = pCompletionEvent;
 
-    result = ma_context_post_command__wasapi(pContext, &cmd);
+    /* Release transfer must not depend on allocating a fresh completion event. */
+    result = ma_context_enqueue_command__wasapi(pContext, &cmd);
     if (result != MA_SUCCESS) {
         return result;
     }
@@ -22804,6 +22843,10 @@ static ma_result ma_device_release_audio_client__wasapi(ma_context* pContext, ma
         result = ma_event_wait(pCompletionEvent);
         if (result != MA_SUCCESS) {
             return result;
+        }
+    } else {
+        while (ma_atomic_load_32(&releaseData.isComplete) == MA_FALSE) {
+            ma_yield();
         }
     }
 
@@ -23672,9 +23715,10 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
             ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
             ma_atomic_fetch_or_32(&pNotificationState->releaseRetirementState, MA_WASAPI_NOTIFICATION_RELEASE_RETIRING);
             ma_IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(pNotificationState->pDeviceEnumerator, &pDevice->wasapi.notificationClient);
-            if (ma_atomic_load_32(&pDevice->wasapi.notificationClient.counter) > 1 ||
-                (ma_atomic_load_32(&pNotificationState->releaseRetirementState) & MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK) != 0) {
-                ma_event_wait(&pNotificationState->quiesceEvent);
+            while (ma_atomic_load_32(&pDevice->wasapi.notificationClient.counter) > 1 ||
+                   (ma_atomic_load_32(&pNotificationState->releaseRetirementState) & MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK) != 0) {
+                /* Release publishes count zero only as its final access to notification storage. */
+                ma_yield();
             }
             ma_atomic_fetch_or_32(&pNotificationState->pendingOperations, MA_WASAPI_NOTIFICATION_OP_QUIT);
             ma_event_signal(&pNotificationState->wakeEvent);
@@ -25634,11 +25678,16 @@ static ma_result ma_device_data_loop_wakeup__wasapi(ma_device* pDevice)
 static ma_result ma_context_uninit__wasapi(ma_context* pContext)
 {
     ma_context_command__wasapi cmd = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+    ma_result result;
 
     MA_ASSERT(pContext != NULL);
     MA_ASSERT(pContext->backend == ma_backend_wasapi);
 
-    ma_context_post_command__wasapi(pContext, &cmd);
+    /* Quit delivery must remain possible when no additional event can be created. */
+    result = ma_context_enqueue_command__wasapi(pContext, &cmd);
+    if (result != MA_SUCCESS) {
+        return result;
+    }
     ma_thread_wait(&pContext->wasapi.commandThread);
 
     if (pContext->wasapi.hAvrt) {
