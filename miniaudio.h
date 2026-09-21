@@ -96654,12 +96654,15 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
                 if (isXing || isInfo) {
                     ma_uint32 bytes = 0;
                     ma_uint32 flags = pFirstFrameData[tagOffset + 7];
+                    ma_uint32 parsedMP3FrameCount = 0xFFFFFFFF;
+                    ma_uint32 parsedDelayInPCMFrames = 0;
+                    ma_uint32 parsedPaddingInPCMFrames = 0;
                     tagOffset += 8;
                     if (flags & 0x01) {
                         if (tagOffset > frameExtent || 4 > frameExtent - tagOffset) {
                             goto done_xing_info;
                         }
-                        detectedMP3FrameCount = (ma_uint32)pFirstFrameData[tagOffset + 0] << 24 | (ma_uint32)pFirstFrameData[tagOffset + 1] << 16 | (ma_uint32)pFirstFrameData[tagOffset + 2] << 8 | (ma_uint32)pFirstFrameData[tagOffset + 3];
+                        parsedMP3FrameCount = (ma_uint32)pFirstFrameData[tagOffset + 0] << 24 | (ma_uint32)pFirstFrameData[tagOffset + 1] << 16 | (ma_uint32)pFirstFrameData[tagOffset + 2] << 8 | (ma_uint32)pFirstFrameData[tagOffset + 3];
                         tagOffset += 4;
                     }
                     if (flags & 0x02) {
@@ -96694,9 +96697,12 @@ static ma_bool32 ma_dr_mp3_init_internal(ma_dr_mp3* pMP3, ma_dr_mp3_read_proc on
                         if (paddingInPCMFrames < 0) {
                             paddingInPCMFrames = 0;
                         }
-                        pMP3->delayInPCMFrames   = (ma_uint32)delayInPCMFrames;
-                        pMP3->paddingInPCMFrames = (ma_uint32)paddingInPCMFrames;
+                        parsedDelayInPCMFrames   = (ma_uint32)delayInPCMFrames;
+                        parsedPaddingInPCMFrames = (ma_uint32)paddingInPCMFrames;
                     }
+                    detectedMP3FrameCount = parsedMP3FrameCount;
+                    pMP3->delayInPCMFrames = parsedDelayInPCMFrames;
+                    pMP3->paddingInPCMFrames = parsedPaddingInPCMFrames;
                     if (isXing) {
                         pMP3->isVBR = MA_TRUE;
                     } else if (isInfo) {

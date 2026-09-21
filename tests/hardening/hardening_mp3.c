@@ -215,6 +215,16 @@ static ma_result mp3_callback_seek(void* pUserData, ma_int64 offset, ma_seek_ori
     return MA_SUCCESS;
 }
 
+static ma_result mp3_decoder_read(ma_decoder* pDecoder, void* pBufferOut, size_t bytesToRead, size_t* pBytesRead)
+{
+    return mp3_callback_read(pDecoder->pUserData, pBufferOut, bytesToRead, pBytesRead);
+}
+
+static ma_result mp3_decoder_seek(ma_decoder* pDecoder, ma_int64 offset, ma_seek_origin origin)
+{
+    return mp3_callback_seek(pDecoder->pUserData, offset, origin);
+}
+
 static int mp3_test_optional_tell(void)
 {
     mp3_callback_stream stream;
@@ -251,11 +261,21 @@ static int mp3_test_optional_tell(void)
     return failed;
 }
 
-static int mp3_test_truncated_metadata(void)
+static ma_decoder_config mp3_decoder_config_init(mp3_allocator_state* pState)
 {
-    mp3_allocator_state state;
     ma_decoder_config config;
-    ma_decoder decoder;
+
+    config = ma_decoder_config_init_default();
+    config.encodingFormat = ma_encoding_format_mp3;
+    config.allocationCallbacks.pUserData = pState;
+    config.allocationCallbacks.onMalloc = mp3_malloc;
+    config.allocationCallbacks.onRealloc = mp3_realloc;
+    config.allocationCallbacks.onFree = mp3_free;
+    return config;
+}
+
+static int mp3_validate_truncated_decoder(ma_decoder* pDecoder, const char* pPathName)
+{
     ma_format format;
     ma_uint32 channels;
     ma_uint32 sampleRate;
@@ -265,29 +285,10 @@ static int mp3_test_truncated_metadata(void)
     int failed;
 
     failed = 0;
-    MA_ZERO_OBJECT(&state);
-    config = ma_decoder_config_init_default();
-    config.encodingFormat = ma_encoding_format_mp3;
-    config.allocationCallbacks.pUserData = &state;
-    config.allocationCallbacks.onMalloc = mp3_malloc;
-    config.allocationCallbacks.onRealloc = mp3_realloc;
-    config.allocationCallbacks.onFree = mp3_free;
-
-    result = ma_decoder_init_memory(g_mp3_1128, sizeof(g_mp3_1128), &config, &decoder);
-    if (result != MA_SUCCESS) {
-        printf("issue 1128 truncated metadata returned %d instead of ignoring the incomplete optional tag\n", result);
-        if (state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
-            printf("issue 1128 failed initialization leaked allocations: allocated=%u freed=%u live=%u\n",
-                state.allocationCount,
-                state.freeCount,
-                state.liveAllocationCount);
-        }
-        return 1;
-    }
-
-    result = ma_decoder_get_data_format(&decoder, &format, &channels, &sampleRate, NULL, 0);
+    result = ma_decoder_get_data_format(pDecoder, &format, &channels, &sampleRate, NULL, 0);
     if (result != MA_SUCCESS || format != ma_format_f32 || channels != 1 || sampleRate != 11025) {
-        printf("issue 1128 selected unexpected decoder format: result=%d format=%d channels=%u rate=%u\n",
+        printf("issue 1128 %s selected unexpected decoder format: result=%d format=%d channels=%u rate=%u\n",
+            pPathName,
             result,
             format,
             channels,
@@ -296,31 +297,403 @@ static int mp3_test_truncated_metadata(void)
     }
 
     framesRead = 0;
-    result = ma_decoder_read_pcm_frames(&decoder, frames, 64, &framesRead);
+    result = ma_decoder_read_pcm_frames(pDecoder, frames, 64, &framesRead);
     if (result != MA_SUCCESS || framesRead != 64) {
-        printf("issue 1128 bounded MP3 decode returned %d with %u:%08u frames\n",
+        printf("issue 1128 %s bounded MP3 decode returned %d with %u:%08u frames\n",
+            pPathName,
             result,
             (ma_uint32)(framesRead >> 32),
             (ma_uint32)framesRead);
         failed = 1;
     }
 
-    result = ma_decoder_uninit(&decoder);
+    return failed;
+}
+
+static int mp3_validate_allocator_cleanup(const mp3_allocator_state* pState, const char* pPathName)
+{
+    if (pState->allocationCount == 0 || pState->liveAllocationCount != 0 || pState->allocationCount != pState->freeCount) {
+        printf("issue 1128 %s allocation lifetime was allocated=%u freed=%u live=%u\n",
+            pPathName,
+            pState->allocationCount,
+            pState->freeCount,
+            pState->liveAllocationCount);
+        return 1;
+    }
+    if (pState->largestRequest > 1024 * 1024) {
+        printf("issue 1128 %s requested an oversized allocation of %lu bytes\n", pPathName, (unsigned long)pState->largestRequest);
+        return 1;
+    }
+    return 0;
+}
+
+static int mp3_test_truncated_metadata(void)
+{
+    const char* pFilePath = "miniaudio-hardening-1128.mp3";
+    mp3_allocator_state state;
+    mp3_callback_stream stream;
+    ma_decoder_config config;
+    ma_decoder decoder;
+    ma_result result;
+    FILE* pFile;
+    int failed;
+
+    failed = 0;
+    MA_ZERO_OBJECT(&state);
+    config = mp3_decoder_config_init(&state);
+    result = ma_decoder_init_memory(g_mp3_1128, sizeof(g_mp3_1128), &config, &decoder);
     if (result != MA_SUCCESS) {
-        printf("issue 1128 decoder uninit returned %d\n", result);
+        printf("issue 1128 memory initialization returned %d instead of ignoring the incomplete optional tag\n", result);
         failed = 1;
+    } else {
+        failed += mp3_validate_truncated_decoder(&decoder, "memory");
+        result = ma_decoder_uninit(&decoder);
+        if (result != MA_SUCCESS) {
+            printf("issue 1128 memory decoder uninit returned %d\n", result);
+            failed = 1;
+        }
     }
-    if (state.allocationCount == 0 || state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
-        printf("issue 1128 allocation lifetime was allocated=%u freed=%u live=%u\n",
-            state.allocationCount,
-            state.freeCount,
-            state.liveAllocationCount);
+    failed += mp3_validate_allocator_cleanup(&state, "memory");
+
+    MA_ZERO_OBJECT(&state);
+    MA_ZERO_OBJECT(&stream);
+    stream.pData = g_mp3_1128;
+    stream.dataSize = sizeof(g_mp3_1128);
+    config = mp3_decoder_config_init(&state);
+    result = ma_decoder_init(mp3_decoder_read, mp3_decoder_seek, &stream, &config, &decoder);
+    if (result != MA_SUCCESS) {
+        printf("issue 1128 callback initialization returned %d instead of ignoring the incomplete optional tag\n", result);
         failed = 1;
+    } else {
+        failed += mp3_validate_truncated_decoder(&decoder, "callback");
+        result = ma_decoder_uninit(&decoder);
+        if (result != MA_SUCCESS) {
+            printf("issue 1128 callback decoder uninit returned %d\n", result);
+            failed = 1;
+        }
     }
-    if (state.largestRequest > 1024 * 1024) {
-        printf("issue 1128 requested an oversized allocation of %lu bytes\n", (unsigned long)state.largestRequest);
+    failed += mp3_validate_allocator_cleanup(&state, "callback");
+
+    remove(pFilePath);
+    if (ma_fopen(&pFile, pFilePath, "wb") != MA_SUCCESS) {
+        printf("issue 1128 could not create the file-backed fixture\n");
+        return 1;
+    }
+    if (fwrite(g_mp3_1128, 1, sizeof(g_mp3_1128), pFile) != sizeof(g_mp3_1128)) {
+        fclose(pFile);
+        remove(pFilePath);
+        printf("issue 1128 could not write the file-backed fixture\n");
+        return 1;
+    }
+    if (fclose(pFile) != 0) {
+        remove(pFilePath);
+        printf("issue 1128 could not close the file-backed fixture\n");
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(&state);
+    config = mp3_decoder_config_init(&state);
+    result = ma_decoder_init_file(pFilePath, &config, &decoder);
+    if (result != MA_SUCCESS) {
+        printf("issue 1128 file initialization returned %d instead of ignoring the incomplete optional tag\n", result);
         failed = 1;
+    } else {
+        failed += mp3_validate_truncated_decoder(&decoder, "file");
+        result = ma_decoder_uninit(&decoder);
+        if (result != MA_SUCCESS) {
+            printf("issue 1128 file decoder uninit returned %d\n", result);
+            failed = 1;
+        }
     }
+    remove(pFilePath);
+    failed += mp3_validate_allocator_cleanup(&state, "file");
+
+    return failed;
+}
+
+static void mp3_synthetic_write(ma_uint8* pData, size_t frameSize, size_t offset, const void* pSource, size_t bytesToWrite)
+{
+    if (offset >= frameSize) {
+        return;
+    }
+    if (bytesToWrite > frameSize - offset) {
+        bytesToWrite = frameSize - offset;
+    }
+    memcpy(pData + offset, pSource, bytesToWrite);
+}
+
+static void mp3_synthetic_write_u32(ma_uint8* pData, size_t frameSize, size_t offset, ma_uint32 value)
+{
+    ma_uint8 bytes[4];
+
+    bytes[0] = (ma_uint8)(value >> 24);
+    bytes[1] = (ma_uint8)(value >> 16);
+    bytes[2] = (ma_uint8)(value >> 8);
+    bytes[3] = (ma_uint8)value;
+    mp3_synthetic_write(pData, frameSize, offset, bytes, sizeof(bytes));
+}
+
+static size_t mp3_make_synthetic_xing(
+    ma_uint8* pData,
+    size_t dataCapacity,
+    ma_uint32 bitrateIndex,
+    ma_uint32 sampleRateIndex,
+    ma_bool32 padding,
+    ma_bool32 mono,
+    const char* pTagName,
+    ma_uint8 flags,
+    ma_bool32 includeLame)
+{
+    static const ma_uint32 bitrates[14] = {8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160};
+    static const ma_uint32 sampleRates[3] = {22050, 24000, 16000};
+    ma_uint8 toc[100];
+    ma_uint8 quality[4] = {0x01, 0x23, 0x45, 0x67};
+    ma_uint8 lame[36];
+    size_t frameSize;
+    size_t dataSize;
+    size_t tagOffset;
+    size_t cursor;
+    ma_uint32 i;
+
+    if (bitrateIndex == 0 || bitrateIndex > 14 || sampleRateIndex > 2) {
+        return 0;
+    }
+    frameSize = (72 * bitrates[bitrateIndex - 1] * 1000) / sampleRates[sampleRateIndex];
+    if (padding) {
+        frameSize += 1;
+    }
+    dataSize = frameSize * 3;
+    if (dataSize > dataCapacity) {
+        return 0;
+    }
+
+    memset(pData, 0, dataSize);
+    for (i = 0; i < 3; i += 1) {
+        size_t frameOffset = i * frameSize;
+        pData[frameOffset + 0] = 0xFF;
+        pData[frameOffset + 1] = 0xF3;  /* MPEG-2, Layer III, no CRC. */
+        pData[frameOffset + 2] = (ma_uint8)((bitrateIndex << 4) | (sampleRateIndex << 2) | (padding ? 2 : 0));
+        pData[frameOffset + 3] = mono ? 0xC4 : 0x04;
+    }
+
+    tagOffset = mono ? 13 : 21;  /* Header plus the MPEG-2 Layer III side information. */
+    mp3_synthetic_write(pData, frameSize, tagOffset, pTagName, 4);
+    if (tagOffset + 7 < frameSize) {
+        pData[tagOffset + 7] = flags;
+    }
+    cursor = tagOffset + 8;
+    if ((flags & 0x01) != 0) {
+        mp3_synthetic_write_u32(pData, frameSize, cursor, 3);
+        cursor += 4;
+    }
+    if ((flags & 0x02) != 0) {
+        mp3_synthetic_write_u32(pData, frameSize, cursor, (ma_uint32)dataSize);
+        cursor += 4;
+    }
+    if ((flags & 0x04) != 0) {
+        for (i = 0; i < sizeof(toc); i += 1) {
+            toc[i] = (ma_uint8)i;
+        }
+        mp3_synthetic_write(pData, frameSize, cursor, toc, sizeof(toc));
+        cursor += sizeof(toc);
+    }
+    if ((flags & 0x08) != 0) {
+        mp3_synthetic_write(pData, frameSize, cursor, quality, sizeof(quality));
+        cursor += sizeof(quality);
+    }
+    if (includeLame) {
+        memset(lame, 0, sizeof(lame));
+        memcpy(lame, "LAME3.100", 9);
+        lame[21] = 0x07;  /* Encoder delay 123. */
+        lame[22] = 0xB2;  /* Delay low nibble plus padding high nibble. */
+        lame[23] = 0x58;  /* Encoder padding 600. */
+        mp3_synthetic_write(pData, frameSize, cursor, lame, sizeof(lame));
+    }
+
+    return dataSize;
+}
+
+static int mp3_test_xing_flag_matrix(void)
+{
+    ma_uint8 data[2048];
+    ma_uint32 flags;
+    int failed;
+
+    failed = 0;
+    for (flags = 0; flags <= 0x0F; flags += 1) {
+        ma_dr_mp3 mp3;
+        ma_uint64 expectedFrameCount;
+        size_t dataSize;
+
+        dataSize = mp3_make_synthetic_xing(data, sizeof(data), 6, 2, MA_FALSE, MA_TRUE, "Xing", (ma_uint8)flags, MA_FALSE);
+        if (dataSize != 648 || !ma_dr_mp3_init_memory(&mp3, data, dataSize, NULL)) {
+            printf("Xing flag combination 0x%02x failed to initialize\n", flags);
+            failed = 1;
+            continue;
+        }
+
+        expectedFrameCount = (flags & 0x01) != 0 ? 3 * 576 : MA_UINT64_MAX;
+        if (!mp3.isVBR || mp3.isCBR || mp3.streamStartOffset != 216 || mp3.totalPCMFrameCount != expectedFrameCount ||
+            mp3.delayInPCMFrames != 0 || mp3.paddingInPCMFrames != 0) {
+            printf("Xing flag combination 0x%02x produced vbr=%u cbr=%u start=%lu count=%u:%08u delay=%u padding=%u\n",
+                flags,
+                mp3.isVBR,
+                mp3.isCBR,
+                (unsigned long)mp3.streamStartOffset,
+                (ma_uint32)(mp3.totalPCMFrameCount >> 32),
+                (ma_uint32)mp3.totalPCMFrameCount,
+                mp3.delayInPCMFrames,
+                mp3.paddingInPCMFrames);
+            failed = 1;
+        }
+        ma_dr_mp3_uninit(&mp3);
+    }
+    return failed;
+}
+
+static int mp3_test_xing_boundaries(void)
+{
+    typedef struct
+    {
+        ma_uint32 bitrateIndex;
+        ma_uint32 sampleRateIndex;
+        ma_bool32 padding;
+        ma_bool32 mono;
+        ma_uint8 flags;
+        ma_bool32 includeLame;
+        ma_bool32 expectComplete;
+        size_t expectedFrameSize;
+        const char* pName;
+    } mp3_boundary_case;
+    static const mp3_boundary_case cases[] = {
+        {1, 1, MA_FALSE, MA_FALSE, 0x00, MA_FALSE, MA_FALSE,  24, "signature truncation"},
+        {1, 0, MA_FALSE, MA_FALSE, 0x00, MA_FALSE, MA_FALSE,  26, "flags truncation"},
+        {1, 1, MA_FALSE, MA_TRUE,  0x08, MA_FALSE, MA_FALSE,  24, "four-byte field before boundary"},
+        {1, 1, MA_TRUE,  MA_TRUE,  0x08, MA_FALSE, MA_TRUE,   25, "four-byte field exact boundary"},
+        {1, 0, MA_FALSE, MA_TRUE,  0x08, MA_FALSE, MA_TRUE,   26, "four-byte field after boundary"},
+        {5, 1, MA_FALSE, MA_TRUE,  0x04, MA_FALSE, MA_FALSE, 120, "TOC before boundary"},
+        {5, 1, MA_TRUE,  MA_TRUE,  0x04, MA_FALSE, MA_TRUE,  121, "TOC exact boundary"},
+        {5, 0, MA_FALSE, MA_TRUE,  0x04, MA_FALSE, MA_TRUE,  130, "TOC after boundary"},
+        {7, 1, MA_FALSE, MA_TRUE,  0x0F, MA_TRUE,  MA_FALSE, 168, "LAME before boundary"},
+        {7, 1, MA_TRUE,  MA_TRUE,  0x0F, MA_TRUE,  MA_TRUE,  169, "LAME exact boundary"},
+        {5, 2, MA_FALSE, MA_TRUE,  0x0F, MA_TRUE,  MA_TRUE,  180, "LAME after boundary"}
+    };
+    ma_uint8 data[2048];
+    size_t i;
+    int failed;
+
+    failed = 0;
+    for (i = 0; i < ma_countof(cases); i += 1) {
+        ma_dr_mp3 mp3;
+        float frames[32 * 2];
+        size_t dataSize;
+        ma_bool32 initialized;
+
+        dataSize = mp3_make_synthetic_xing(
+            data,
+            sizeof(data),
+            cases[i].bitrateIndex,
+            cases[i].sampleRateIndex,
+            cases[i].padding,
+            cases[i].mono,
+            "Xing",
+            cases[i].flags,
+            cases[i].includeLame);
+        if (dataSize != cases[i].expectedFrameSize * 3) {
+            printf("%s built %lu bytes instead of %lu\n", cases[i].pName, (unsigned long)dataSize, (unsigned long)(cases[i].expectedFrameSize * 3));
+            failed = 1;
+            continue;
+        }
+
+        initialized = ma_dr_mp3_init_memory(&mp3, data, dataSize, NULL);
+        if (!initialized) {
+            printf("%s failed to initialize valid audio\n", cases[i].pName);
+            failed = 1;
+            continue;
+        }
+        if ((mp3.isVBR != MA_FALSE) != (cases[i].expectComplete != MA_FALSE) || mp3.isCBR ||
+            mp3.streamStartOffset != (cases[i].expectComplete ? cases[i].expectedFrameSize : 0)) {
+            printf("%s produced vbr=%u cbr=%u start=%lu\n", cases[i].pName, mp3.isVBR, mp3.isCBR, (unsigned long)mp3.streamStartOffset);
+            failed = 1;
+        }
+        if (!cases[i].expectComplete &&
+            (mp3.totalPCMFrameCount != MA_UINT64_MAX || mp3.delayInPCMFrames != 0 || mp3.paddingInPCMFrames != 0)) {
+            printf("%s partially committed count=%u:%08u delay=%u padding=%u\n",
+                cases[i].pName,
+                (ma_uint32)(mp3.totalPCMFrameCount >> 32),
+                (ma_uint32)mp3.totalPCMFrameCount,
+                mp3.delayInPCMFrames,
+                mp3.paddingInPCMFrames);
+            failed = 1;
+        }
+        if (cases[i].includeLame && cases[i].expectComplete &&
+            (mp3.delayInPCMFrames != 652 || mp3.paddingInPCMFrames != 71)) {
+            printf("%s produced delay=%u padding=%u\n", cases[i].pName, mp3.delayInPCMFrames, mp3.paddingInPCMFrames);
+            failed = 1;
+        }
+        if (ma_dr_mp3_read_pcm_frames_f32(&mp3, 32, frames) != 32) {
+            printf("%s did not preserve decodable audio\n", cases[i].pName);
+            failed = 1;
+        }
+        ma_dr_mp3_uninit(&mp3);
+    }
+    return failed;
+}
+
+static int mp3_test_valid_metadata_variants(void)
+{
+    ma_uint8 data[2048];
+    ma_dr_mp3 mp3;
+    size_t dataSize;
+    int failed;
+
+    failed = 0;
+    dataSize = mp3_make_synthetic_xing(data, sizeof(data), 6, 2, MA_FALSE, MA_TRUE, "Info", 0x01, MA_FALSE);
+    if (!ma_dr_mp3_init_memory(&mp3, data, dataSize, NULL)) {
+        printf("valid Info metadata failed to initialize\n");
+        failed = 1;
+    } else {
+        if (!mp3.isCBR || mp3.isVBR || mp3.streamStartOffset != 216 || mp3.totalPCMFrameCount != 3 * 576) {
+            printf("valid Info metadata produced cbr=%u vbr=%u start=%lu count=%u:%08u\n",
+                mp3.isCBR,
+                mp3.isVBR,
+                (unsigned long)mp3.streamStartOffset,
+                (ma_uint32)(mp3.totalPCMFrameCount >> 32),
+                (ma_uint32)mp3.totalPCMFrameCount);
+            failed = 1;
+        }
+        ma_dr_mp3_uninit(&mp3);
+    }
+
+    dataSize = mp3_make_synthetic_xing(data, sizeof(data), 6, 2, MA_FALSE, MA_TRUE, "Junk", 0x00, MA_FALSE);
+    if (!ma_dr_mp3_init_memory(&mp3, data, dataSize, NULL)) {
+        printf("tag-free metadata control failed to initialize\n");
+        failed = 1;
+    } else {
+        if (mp3.isCBR || mp3.isVBR || mp3.streamStartOffset != 0 || mp3.totalPCMFrameCount != MA_UINT64_MAX) {
+            printf("tag-free metadata control produced cbr=%u vbr=%u start=%lu count=%u:%08u\n",
+                mp3.isCBR,
+                mp3.isVBR,
+                (unsigned long)mp3.streamStartOffset,
+                (ma_uint32)(mp3.totalPCMFrameCount >> 32),
+                (ma_uint32)mp3.totalPCMFrameCount);
+            failed = 1;
+        }
+        ma_dr_mp3_uninit(&mp3);
+    }
+
+    dataSize = mp3_make_synthetic_xing(data, sizeof(data), 6, 2, MA_FALSE, MA_TRUE, "Xing", 0x0F, MA_TRUE);
+    if (!ma_dr_mp3_init_memory(&mp3, data, dataSize, NULL)) {
+        printf("valid LAME metadata failed to initialize\n");
+        failed = 1;
+    } else {
+        if (!mp3.isVBR || mp3.delayInPCMFrames != 652 || mp3.paddingInPCMFrames != 71) {
+            printf("valid LAME metadata produced vbr=%u delay=%u padding=%u\n", mp3.isVBR, mp3.delayInPCMFrames, mp3.paddingInPCMFrames);
+            failed = 1;
+        }
+        ma_dr_mp3_uninit(&mp3);
+    }
+
     return failed;
 }
 
@@ -509,6 +882,9 @@ int main(void)
     int failed = 0;
     failed += mp3_test_optional_tell();
     failed += mp3_test_truncated_metadata();
+    failed += mp3_test_xing_flag_matrix();
+    failed += mp3_test_xing_boundaries();
+    failed += mp3_test_valid_metadata_variants();
     failed += mp3_test_frame_count();
     failed += mp3_test_full_decode_allocation();
     failed += mp3_test_resource_manager_allocation();
