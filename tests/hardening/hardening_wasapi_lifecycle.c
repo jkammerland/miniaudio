@@ -13,6 +13,8 @@ static void hardening_wasapi_notification_release_hook(void* pClient, void* pSta
 static ma_result hardening_wasapi_initial_device_init_internal(ma_context* pContext, ma_device_type deviceType, const void* pDeviceID, void* pData);
 static void* hardening_wasapi_create_device_event(void* pAttributes, int manualReset, int initialState, const void* pName);
 static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent);
+static ma_result hardening_wasapi_command_semaphore_release(ma_semaphore* pSemaphore);
+static ma_result hardening_wasapi_command_event_wait(ma_event* pEvent);
 
 #define MA_WASAPI_DEVICE_STOP_INTERNAL(pDevice)                 hardening_wasapi_stop((pDevice))
 #define MA_WASAPI_DEVICE_START_INTERNAL(pDevice)                hardening_wasapi_start((pDevice))
@@ -27,6 +29,8 @@ static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent);
 #define MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData) hardening_wasapi_initial_device_init_internal((pContext), (deviceType), (const void*)(pDeviceID), (void*)(pData))
 #define MA_WASAPI_CREATE_DEVICE_EVENT(pAttributes, manualReset, initialState, pName) ((HANDLE)hardening_wasapi_create_device_event((void*)(pAttributes), (int)(manualReset), (int)(initialState), (const void*)(pName)))
 #define MA_WASAPI_COMMAND_LOCAL_EVENT_INIT(pEvent) hardening_wasapi_command_local_event_init((pEvent))
+#define MA_WASAPI_COMMAND_SEMAPHORE_RELEASE(pSemaphore) hardening_wasapi_command_semaphore_release((pSemaphore))
+#define MA_WASAPI_COMMAND_EVENT_WAIT(pEvent) hardening_wasapi_command_event_wait((pEvent))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
 
@@ -98,6 +102,10 @@ static ma_event* g_pReleaseRetirementContinueEvent;
 static volatile ma_uint32 g_releaseRetirementHookEnabled;
 static volatile ma_uint32 g_failCommandLocalEventInit;
 static volatile ma_uint32 g_commandLocalEventInitCount;
+static volatile ma_uint32 g_commandSemaphoreReleaseCount;
+static volatile ma_uint32 g_failCommandSemaphoreReleaseCall;
+static volatile ma_uint32 g_commandEventWaitCount;
+static volatile ma_uint32 g_failCommandEventWaitCall;
 
 static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent)
 {
@@ -106,6 +114,26 @@ static ma_result hardening_wasapi_command_local_event_init(ma_event* pEvent)
         return MA_OUT_OF_MEMORY;
     }
     return ma_event_init(pEvent);
+}
+
+static ma_result hardening_wasapi_command_semaphore_release(ma_semaphore* pSemaphore)
+{
+    ma_uint32 callIndex = ma_atomic_fetch_add_32(&g_commandSemaphoreReleaseCount, 1) + 1;
+
+    if (callIndex == ma_atomic_load_32(&g_failCommandSemaphoreReleaseCall)) {
+        return MA_ERROR;
+    }
+    return ma_semaphore_release(pSemaphore);
+}
+
+static ma_result hardening_wasapi_command_event_wait(ma_event* pEvent)
+{
+    ma_uint32 callIndex = ma_atomic_fetch_add_32(&g_commandEventWaitCount, 1) + 1;
+
+    if (callIndex == ma_atomic_load_32(&g_failCommandEventWaitCall)) {
+        return MA_ERROR;
+    }
+    return ma_event_wait(pEvent);
 }
 
 static void hardening_wasapi_notification_release_hook(void* pClient, void* pState, unsigned int newRefCount)
@@ -1003,6 +1031,57 @@ static void hardening_command_queue_uninit(ma_context* pContext)
     ma_mutex_uninit(&pContext->wasapi.commandLock);
 }
 
+static int hardening_test_command_publication_failure(void)
+{
+    ma_context context;
+    ma_context_command__wasapi command;
+    ma_context_command__wasapi popped;
+    ma_result result;
+    int failed;
+
+    failed = 0;
+    result = hardening_command_queue_init(&context);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+
+    context.wasapi.commandIndex = 2;
+    command = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+    MA_ZERO_OBJECT(&popped);
+    ma_atomic_store_32(&g_commandSemaphoreReleaseCount, 0);
+    ma_atomic_store_32(&g_failCommandSemaphoreReleaseCall, 1);
+
+    result = ma_context_enqueue_command__wasapi(&context, &command);
+    if (result != MA_ERROR || context.wasapi.commandCount != 0 || context.wasapi.commandIndex != 2 ||
+        ma_atomic_load_32(&g_commandSemaphoreReleaseCount) != 1) {
+        printf("command publication failure committed state: result=%d count=%u index=%u releases=%u\n",
+            result, context.wasapi.commandCount, context.wasapi.commandIndex,
+            ma_atomic_load_32(&g_commandSemaphoreReleaseCount));
+        failed = 1;
+    }
+
+    ma_atomic_store_32(&g_failCommandSemaphoreReleaseCall, 0);
+    result = ma_context_enqueue_command__wasapi(&context, &command);
+    if (result != MA_SUCCESS || context.wasapi.commandCount != 1 ||
+        ma_atomic_load_32(&g_commandSemaphoreReleaseCount) != 2) {
+        printf("command publication retry failed: result=%d count=%u releases=%u\n",
+            result, context.wasapi.commandCount, ma_atomic_load_32(&g_commandSemaphoreReleaseCount));
+        failed = 1;
+    } else {
+        result = ma_context_next_command__wasapi(&context, &popped);
+        if (result != MA_SUCCESS || popped.code != MA_CONTEXT_COMMAND_QUIT__WASAPI ||
+            context.wasapi.commandCount != 0 || context.wasapi.commandIndex != 3) {
+            printf("command publication retry pop mismatch: result=%d code=%d count=%u index=%u\n",
+                result, popped.code, context.wasapi.commandCount, context.wasapi.commandIndex);
+            failed = 1;
+        }
+    }
+
+    ma_atomic_store_32(&g_failCommandSemaphoreReleaseCall, 0);
+    hardening_command_queue_uninit(&context);
+    return failed;
+}
+
 static int hardening_test_full_command_ring(void)
 {
     ma_context context;
@@ -1160,10 +1239,12 @@ static int hardening_test_command_worker_release(void)
     hardening_render_client renderClient;
     hardening_capture_client captureClient;
     ma_context_command__wasapi quitCommand;
+    ma_event completionEvent;
     ma_result result;
     ma_uint32 callerThreadID;
     int failed = 0;
     ma_bool32 threadCreated = MA_FALSE;
+    ma_bool32 completionEventInitialized = MA_FALSE;
 
     result = hardening_command_queue_init(&context);
     if (result != MA_SUCCESS) {
@@ -1215,6 +1296,27 @@ static int hardening_test_command_worker_release(void)
         failed = 1;
     }
 
+    result = ma_event_init(&completionEvent);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    completionEventInitialized = MA_TRUE;
+    ma_atomic_store_32(&g_commandEventWaitCount, 0);
+    ma_atomic_store_32(&g_failCommandEventWaitCall, 1);
+    result = ma_device_release_audio_client__wasapi(&context, &audioClient.iface, &renderClient.iface, &captureClient.iface, &completionEvent);
+    if (result != MA_ERROR || ma_atomic_load_32(&g_commandEventWaitCount) != 1 ||
+        ma_atomic_load_32(&audioClient.releaseCount) != 2 || ma_atomic_load_32(&renderClient.releaseCount) != 2 ||
+        ma_atomic_load_32(&captureClient.releaseCount) != 2) {
+        printf("command worker wait failure retired early: result=%d waits=%u counts=%u/%u/%u\n", result,
+            ma_atomic_load_32(&g_commandEventWaitCount), ma_atomic_load_32(&audioClient.releaseCount),
+            ma_atomic_load_32(&renderClient.releaseCount), ma_atomic_load_32(&captureClient.releaseCount));
+        failed = 1;
+    }
+    ma_atomic_store_32(&g_failCommandEventWaitCall, 0);
+    ma_event_uninit(&completionEvent);
+    completionEventInitialized = MA_FALSE;
+
     quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
     result = ma_context_enqueue_command__wasapi(&context, &quitCommand);
     if (result != MA_SUCCESS || ma_atomic_load_32(&g_commandLocalEventInitCount) != 1) {
@@ -1227,12 +1329,107 @@ static int hardening_test_command_worker_release(void)
 
 done:
     ma_atomic_store_32(&g_failCommandLocalEventInit, MA_FALSE);
+    ma_atomic_store_32(&g_failCommandEventWaitCall, 0);
+    if (completionEventInitialized) {
+        ma_event_uninit(&completionEvent);
+    }
     if (threadCreated) {
         quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
         ma_context_enqueue_command__wasapi(&context, &quitCommand);
         ma_thread_wait(&context.wasapi.commandThread);
     }
     hardening_command_queue_uninit(&context);
+    return failed;
+}
+
+static int hardening_test_command_wait_failure_retirement(void)
+{
+    ma_context context;
+    ma_context_command__wasapi quitCommand;
+    ma_result result;
+    ma_bool32 threadCreated;
+    int failed;
+
+    threadCreated = MA_FALSE;
+    failed = 0;
+    result = hardening_command_queue_init(&context);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+    result = ma_thread_create(&context.wasapi.commandThread, ma_thread_priority_normal, 0, ma_context_command_thread__wasapi, &context, NULL);
+    if (result != MA_SUCCESS) {
+        hardening_command_queue_uninit(&context);
+        return 1;
+    }
+    threadCreated = MA_TRUE;
+
+    ma_atomic_store_32(&g_commandEventWaitCount, 0);
+    ma_atomic_store_32(&g_failCommandEventWaitCall, 1);
+    quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+    result = ma_context_post_command__wasapi(&context, &quitCommand);
+    if (result != MA_ERROR || ma_atomic_load_32(&g_commandEventWaitCount) != 2) {
+        printf("command wait failure retirement mismatch: result=%d waits=%u\n",
+            result, ma_atomic_load_32(&g_commandEventWaitCount));
+        failed = 1;
+    }
+    ma_thread_wait(&context.wasapi.commandThread);
+    threadCreated = MA_FALSE;
+
+    ma_atomic_store_32(&g_failCommandEventWaitCall, 0);
+    if (threadCreated) {
+        ma_context_enqueue_command__wasapi(&context, &quitCommand);
+        ma_thread_wait(&context.wasapi.commandThread);
+    }
+    hardening_command_queue_uninit(&context);
+    return failed;
+}
+
+static int hardening_test_context_uninit_retries_quit(void)
+{
+    ma_context context;
+    ma_context_command__wasapi quitCommand;
+    ma_result result;
+    ma_bool32 threadCreated;
+    ma_bool32 contextUninitialized;
+    int failed;
+
+    threadCreated = MA_FALSE;
+    contextUninitialized = MA_FALSE;
+    failed = 0;
+    result = hardening_command_queue_init(&context);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+    context.backend = ma_backend_wasapi;
+    result = ma_thread_create(&context.wasapi.commandThread, ma_thread_priority_normal, 0, ma_context_command_thread__wasapi, &context, NULL);
+    if (result != MA_SUCCESS) {
+        hardening_command_queue_uninit(&context);
+        return 1;
+    }
+    threadCreated = MA_TRUE;
+
+    ma_atomic_store_32(&g_commandSemaphoreReleaseCount, 0);
+    ma_atomic_store_32(&g_failCommandSemaphoreReleaseCall, 1);
+    result = ma_context_uninit__wasapi(&context);
+    if (result == MA_SUCCESS) {
+        threadCreated = MA_FALSE;
+        contextUninitialized = MA_TRUE;
+    }
+    if (result != MA_SUCCESS || ma_atomic_load_32(&g_commandSemaphoreReleaseCount) != 2) {
+        printf("context quit retry mismatch: result=%d releases=%u\n",
+            result, ma_atomic_load_32(&g_commandSemaphoreReleaseCount));
+        failed = 1;
+    }
+
+    ma_atomic_store_32(&g_failCommandSemaphoreReleaseCall, 0);
+    if (!contextUninitialized) {
+        if (threadCreated) {
+            quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+            ma_context_enqueue_command__wasapi(&context, &quitCommand);
+            ma_thread_wait(&context.wasapi.commandThread);
+        }
+        hardening_command_queue_uninit(&context);
+    }
     return failed;
 }
 
@@ -1597,8 +1794,11 @@ int main(void)
     failed += hardening_test_reinit_success();
     failed += hardening_test_reinit_old_release_failure();
     failed += hardening_test_public_state_serialization();
+    failed += hardening_test_command_publication_failure();
     failed += hardening_test_full_command_ring();
     failed += hardening_test_command_worker_release();
+    failed += hardening_test_command_wait_failure_retirement();
+    failed += hardening_test_context_uninit_retries_quit();
     failed += hardening_test_initial_failure_releases_on_command_worker();
     failed += hardening_test_unregister_quiescence();
 

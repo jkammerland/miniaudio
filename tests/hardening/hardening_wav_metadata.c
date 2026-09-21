@@ -10,6 +10,7 @@ typedef struct
     size_t largestRequest;
     ma_uint32 allocationCount;
     ma_uint32 liveAllocationCount;
+    ma_bool32 rejectAll;
 } metadata_allocator_state;
 
 typedef struct
@@ -91,7 +92,7 @@ static void* metadata_malloc(size_t size, void* pUserData)
     if (size > pState->largestRequest) {
         pState->largestRequest = size;
     }
-    if (size > 1024 * 1024) {
+    if (pState->rejectAll || size > 1024 * 1024) {
         return NULL;
     }
     pMemory = malloc(size);
@@ -109,7 +110,7 @@ static void* metadata_realloc(void* pMemory, size_t size, void* pUserData)
     if (size > pState->largestRequest) {
         pState->largestRequest = size;
     }
-    if (size > 1024 * 1024) {
+    if (pState->rejectAll || size > 1024 * 1024) {
         return NULL;
     }
     return realloc(pMemory, size);
@@ -456,6 +457,108 @@ static int metadata_test_list_count_read_disagreement(void)
     return 0;
 }
 
+static int metadata_expect_invalid_list(const ma_uint8* pListData, ma_uint32 listDataSize, const char* pName)
+{
+    ma_uint8 wavData[1024];
+    metadata_allocator_state state;
+    ma_allocation_callbacks callbacks;
+    ma_dr_wav wav;
+    size_t wavSize;
+
+    wavSize = metadata_make_wav(wavData, "LIST", pListData, listDataSize);
+    MA_ZERO_OBJECT(&state);
+    state.rejectAll = MA_TRUE;
+    callbacks = metadata_callbacks(&state);
+
+    if (ma_dr_wav_init_memory_with_metadata(&wav, wavData, wavSize, 0, &callbacks)) {
+        printf("%s unexpectedly initialized\n", pName);
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+    if (state.allocationCount != 0 || state.largestRequest != 0 || state.liveAllocationCount != 0) {
+        printf("%s reached metadata allocation: count=%u largest=%lu live=%u\n", pName,
+            state.allocationCount, (unsigned long)state.largestRequest, state.liveAllocationCount);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int metadata_test_list_parent_bounds(void)
+{
+    ma_uint8 declaredKnown[12];
+    ma_uint8 declaredUnknown[12];
+    ma_uint8 declaredLabel[12];
+    ma_uint8 truncatedID[6];
+    ma_uint8 truncatedSize[10];
+    ma_uint8 missingPadding[13];
+    ma_uint8 validUnknown[14];
+    ma_uint8 wavData[1024];
+    metadata_allocator_state state;
+    ma_allocation_callbacks callbacks;
+    ma_dr_wav wav;
+    size_t wavSize;
+    int failed;
+
+    failed = 0;
+    MA_ZERO_MEMORY(declaredKnown, sizeof(declaredKnown));
+    MA_COPY_MEMORY(declaredKnown + 0, "INFOINAM", 8);
+    metadata_write_u32le(declaredKnown + 8, 0x40000000);
+    failed += metadata_expect_invalid_list(declaredKnown, (ma_uint32)sizeof(declaredKnown), "LIST known child beyond parent");
+
+    MA_ZERO_MEMORY(declaredUnknown, sizeof(declaredUnknown));
+    MA_COPY_MEMORY(declaredUnknown + 0, "INFOZZZZ", 8);
+    metadata_write_u32le(declaredUnknown + 8, 0x40000000);
+    failed += metadata_expect_invalid_list(declaredUnknown, (ma_uint32)sizeof(declaredUnknown), "LIST unknown child beyond parent");
+
+    MA_ZERO_MEMORY(declaredLabel, sizeof(declaredLabel));
+    MA_COPY_MEMORY(declaredLabel + 0, "adtllabl", 8);
+    metadata_write_u32le(declaredLabel + 8, 0x40000000);
+    failed += metadata_expect_invalid_list(declaredLabel, (ma_uint32)sizeof(declaredLabel), "LIST label beyond parent");
+
+    MA_ZERO_MEMORY(truncatedID, sizeof(truncatedID));
+    MA_COPY_MEMORY(truncatedID + 0, "INFOIN", 6);
+    failed += metadata_expect_invalid_list(truncatedID, (ma_uint32)sizeof(truncatedID), "LIST truncated child id");
+
+    MA_ZERO_MEMORY(truncatedSize, sizeof(truncatedSize));
+    MA_COPY_MEMORY(truncatedSize + 0, "INFOINAM", 8);
+    failed += metadata_expect_invalid_list(truncatedSize, (ma_uint32)sizeof(truncatedSize), "LIST truncated child size");
+
+    MA_ZERO_MEMORY(missingPadding, sizeof(missingPadding));
+    MA_COPY_MEMORY(missingPadding + 0, "INFOINAM", 8);
+    metadata_write_u32le(missingPadding + 8, 1);
+    missingPadding[12] = 'A';
+    failed += metadata_expect_invalid_list(missingPadding, (ma_uint32)sizeof(missingPadding), "LIST missing child padding");
+
+    MA_ZERO_MEMORY(validUnknown, sizeof(validUnknown));
+    MA_COPY_MEMORY(validUnknown + 0, "INFOZZZZ", 8);
+    metadata_write_u32le(validUnknown + 8, 2);
+    validUnknown[12] = 0x11;
+    validUnknown[13] = 0x22;
+    wavSize = metadata_make_wav(wavData, "LIST", validUnknown, (ma_uint32)sizeof(validUnknown));
+    MA_ZERO_OBJECT(&state);
+    callbacks = metadata_callbacks(&state);
+    if (!ma_dr_wav_init_memory_with_metadata(&wav, wavData, wavSize, 0, &callbacks)) {
+        printf("valid LIST unknown child failed to initialize\n");
+        failed = 1;
+    } else {
+        if (wav.metadataCount != 1 || wav.pMetadata[0].type != ma_dr_wav_metadata_type_unknown ||
+            wav.pMetadata[0].data.unknown.chunkLocation != ma_dr_wav_metadata_location_inside_info_list ||
+            wav.pMetadata[0].data.unknown.dataSizeInBytes != 2 ||
+            memcmp(wav.pMetadata[0].data.unknown.pData, "\x11\x22", 2) != 0) {
+            printf("valid LIST unknown child did not round trip\n");
+            failed = 1;
+        }
+        ma_dr_wav_uninit(&wav);
+    }
+    if (state.liveAllocationCount != 0) {
+        printf("valid LIST unknown child leaked metadata allocation\n");
+        failed = 1;
+    }
+
+    return failed;
+}
+
 static int metadata_test_rf64_roundtrip(void)
 {
     ma_dr_wav wav;
@@ -537,6 +640,7 @@ int main(void)
     failed += metadata_test_smpl_short_read();
     failed += metadata_test_trailing_empty_info_list();
     failed += metadata_test_list_count_read_disagreement();
+    failed += metadata_test_list_parent_bounds();
     failed += metadata_test_rf64_roundtrip();
 
     return failed != 0;

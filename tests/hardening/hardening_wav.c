@@ -118,6 +118,12 @@ static void hardening_wav_write_u32le(ma_uint8* pData, ma_uint32 value)
     pData[3] = (ma_uint8)(value >> 24);
 }
 
+static void hardening_wav_write_u64le(ma_uint8* pData, ma_uint64 value)
+{
+    hardening_wav_write_u32le(pData + 0, (ma_uint32)(value >> 0));
+    hardening_wav_write_u32le(pData + 4, (ma_uint32)(value >> 32));
+}
+
 static void hardening_wav_write_u16le(ma_uint8* pData, ma_uint16 value)
 {
     pData[0] = (ma_uint8)(value >> 0);
@@ -136,6 +142,80 @@ static void hardening_wav_write_u32be(ma_uint8* pData, ma_uint32 value)
     pData[1] = (ma_uint8)(value >> 16);
     pData[2] = (ma_uint8)(value >> 8);
     pData[3] = (ma_uint8)(value >> 0);
+}
+
+static size_t hardening_wav_make_rifx_fact(ma_uint8* pData, ma_uint32 factSize)
+{
+    size_t factOffset;
+    size_t dataOffset;
+    size_t totalSize;
+
+    factOffset = 36;
+    dataOffset = factOffset + 8 + factSize + (factSize & 1);
+    totalSize = dataOffset + 10;
+    MA_ZERO_MEMORY(pData, 160);
+    MA_COPY_MEMORY(pData + 0, "RIFX", 4);
+    hardening_wav_write_u32be(pData + 4, (ma_uint32)(totalSize - 8));
+    MA_COPY_MEMORY(pData + 8, "WAVEfmt ", 8);
+    hardening_wav_write_u32be(pData + 16, 16);
+    hardening_wav_write_u16be(pData + 20, MA_DR_WAVE_FORMAT_PCM);
+    hardening_wav_write_u16be(pData + 22, 1);
+    hardening_wav_write_u32be(pData + 24, 8000);
+    hardening_wav_write_u32be(pData + 28, 16000);
+    hardening_wav_write_u16be(pData + 32, 2);
+    hardening_wav_write_u16be(pData + 34, 16);
+    MA_COPY_MEMORY(pData + factOffset, "fact", 4);
+    hardening_wav_write_u32be(pData + factOffset + 4, factSize);
+    if (factSize >= 4) {
+        hardening_wav_write_u32be(pData + factOffset + 8, 1);
+    }
+    MA_COPY_MEMORY(pData + dataOffset, "data", 4);
+    hardening_wav_write_u32be(pData + dataOffset + 4, 2);
+    return totalSize;
+}
+
+static size_t hardening_wav_make_w64_fact(ma_uint8* pData, ma_uint32 factSize)
+{
+    size_t factOffset;
+    size_t factPadding;
+    size_t dataOffset;
+    size_t totalSize;
+
+    factOffset = 80;
+    factPadding = (8 - (factSize & 7)) & 7;
+    dataOffset = factOffset + 24 + factSize + factPadding;
+    totalSize = dataOffset + 32;
+    MA_ZERO_MEMORY(pData, 256);
+    MA_COPY_MEMORY(pData + 0, ma_dr_wavGUID_W64_RIFF, 16);
+    hardening_wav_write_u64le(pData + 16, totalSize);
+    MA_COPY_MEMORY(pData + 24, ma_dr_wavGUID_W64_WAVE, 16);
+    MA_COPY_MEMORY(pData + 40, ma_dr_wavGUID_W64_FMT, 16);
+    hardening_wav_write_u64le(pData + 56, 40);
+    hardening_wav_write_u16le(pData + 64, MA_DR_WAVE_FORMAT_PCM);
+    hardening_wav_write_u16le(pData + 66, 1);
+    hardening_wav_write_u32le(pData + 68, 8000);
+    hardening_wav_write_u32le(pData + 72, 16000);
+    hardening_wav_write_u16le(pData + 76, 2);
+    hardening_wav_write_u16le(pData + 78, 16);
+    MA_COPY_MEMORY(pData + factOffset, ma_dr_wavGUID_W64_FACT, 16);
+    hardening_wav_write_u64le(pData + factOffset + 16, 24 + factSize);
+    if (factSize >= 8) {
+        hardening_wav_write_u64le(pData + factOffset + 24, 1);
+    }
+    MA_COPY_MEMORY(pData + dataOffset, ma_dr_wavGUID_W64_DATA, 16);
+    hardening_wav_write_u64le(pData + dataOffset + 16, 26);
+    return totalSize;
+}
+
+static size_t hardening_wav_make_short_w64_chunk(ma_uint8* pData, ma_uint64 totalChunkSize)
+{
+    MA_ZERO_MEMORY(pData, 64);
+    MA_COPY_MEMORY(pData + 0, ma_dr_wavGUID_W64_RIFF, 16);
+    hardening_wav_write_u64le(pData + 16, 64);
+    MA_COPY_MEMORY(pData + 24, ma_dr_wavGUID_W64_WAVE, 16);
+    MA_COPY_MEMORY(pData + 40, ma_dr_wavGUID_W64_FMT, 16);
+    hardening_wav_write_u64le(pData + 56, totalChunkSize);
+    return 64;
 }
 
 static size_t hardening_wav_make_fmt(ma_uint8* pData, ma_uint32 fmtSize, ma_uint16 extendedSize)
@@ -473,11 +553,191 @@ static ma_bool32 hardening_wav_raw_tell(void* pUserData, ma_int64* pCursor)
     return MA_TRUE;
 }
 
+typedef struct
+{
+    ma_uint64 offset;
+    const ma_uint8* pData;
+    size_t size;
+} hardening_wav_sparse_span;
+
+typedef struct
+{
+    hardening_wav_sparse_span spans[4];
+    ma_uint32 spanCount;
+    ma_uint64 virtualSize;
+    ma_uint64 cursor;
+    ma_uint32 readCount;
+    ma_uint32 seekCount;
+    ma_uint32 intMaxForwardSeekCount;
+    ma_uint8 top[40];
+    ma_uint8 fmt[42];
+    ma_uint8 unknown[24];
+    ma_uint8 data[24];
+} hardening_wav_sparse_stream;
+
+static void hardening_wav_sparse_add_span(hardening_wav_sparse_stream* pStream, ma_uint64 offset, const ma_uint8* pData, size_t size)
+{
+    hardening_wav_sparse_span* pSpan = &pStream->spans[pStream->spanCount];
+    pSpan->offset = offset;
+    pSpan->pData = pData;
+    pSpan->size = size;
+    pStream->spanCount += 1;
+}
+
+static size_t hardening_wav_sparse_read(void* pUserData, void* pBufferOut, size_t bytesToRead)
+{
+    hardening_wav_sparse_stream* pStream = (hardening_wav_sparse_stream*)pUserData;
+    ma_uint64 readEnd;
+    ma_uint32 iSpan;
+
+    pStream->readCount += 1;
+    if (pStream->cursor >= pStream->virtualSize) {
+        return 0;
+    }
+    if ((ma_uint64)bytesToRead > pStream->virtualSize - pStream->cursor) {
+        bytesToRead = (size_t)(pStream->virtualSize - pStream->cursor);
+    }
+    MA_ZERO_MEMORY(pBufferOut, bytesToRead);
+    readEnd = pStream->cursor + bytesToRead;
+    for (iSpan = 0; iSpan < pStream->spanCount; iSpan += 1) {
+        const hardening_wav_sparse_span* pSpan = &pStream->spans[iSpan];
+        ma_uint64 spanEnd = pSpan->offset + pSpan->size;
+        ma_uint64 copyBeg = pStream->cursor > pSpan->offset ? pStream->cursor : pSpan->offset;
+        ma_uint64 copyEnd = readEnd < spanEnd ? readEnd : spanEnd;
+        if (copyBeg < copyEnd) {
+            MA_COPY_MEMORY((ma_uint8*)pBufferOut + (size_t)(copyBeg - pStream->cursor),
+                pSpan->pData + (size_t)(copyBeg - pSpan->offset), (size_t)(copyEnd - copyBeg));
+        }
+    }
+    pStream->cursor = readEnd;
+    return bytesToRead;
+}
+
+static ma_bool32 hardening_wav_sparse_seek(void* pUserData, int offset, ma_dr_wav_seek_origin origin)
+{
+    hardening_wav_sparse_stream* pStream = (hardening_wav_sparse_stream*)pUserData;
+    ma_int64 base;
+    ma_int64 target;
+
+    pStream->seekCount += 1;
+    if (origin == MA_DR_WAV_SEEK_CUR && offset == 0x7FFFFFFF) {
+        pStream->intMaxForwardSeekCount += 1;
+    }
+    base = origin == MA_DR_WAV_SEEK_SET ? 0 : (origin == MA_DR_WAV_SEEK_CUR ? (ma_int64)pStream->cursor : (ma_int64)pStream->virtualSize);
+    target = base + offset;
+    if (target < 0 || (ma_uint64)target > pStream->virtualSize) {
+        return MA_FALSE;
+    }
+    pStream->cursor = (ma_uint64)target;
+    return MA_TRUE;
+}
+
+static ma_bool32 hardening_wav_sparse_tell(void* pUserData, ma_int64* pCursor)
+{
+    hardening_wav_sparse_stream* pStream = (hardening_wav_sparse_stream*)pUserData;
+    *pCursor = (ma_int64)pStream->cursor;
+    return MA_TRUE;
+}
+
+static void hardening_wav_sparse_init_top(hardening_wav_sparse_stream* pStream, ma_uint64 virtualSize)
+{
+    MA_ZERO_OBJECT(pStream);
+    pStream->virtualSize = virtualSize;
+    MA_COPY_MEMORY(pStream->top + 0, ma_dr_wavGUID_W64_RIFF, 16);
+    hardening_wav_write_u64le(pStream->top + 16, virtualSize);
+    MA_COPY_MEMORY(pStream->top + 24, ma_dr_wavGUID_W64_WAVE, 16);
+    hardening_wav_sparse_add_span(pStream, 0, pStream->top, sizeof(pStream->top));
+}
+
+static int hardening_wav_test_sparse_fmt_remainder(ma_uint64 remainder, ma_bool32 expectSuccess, const char* pName)
+{
+    hardening_wav_sparse_stream stream;
+    ma_dr_wav wav;
+    ma_uint64 fmtDataSize;
+    ma_uint64 fmtPadding;
+    ma_uint64 dataOffset;
+    ma_bool32 initialized;
+
+    fmtDataSize = 18 + remainder;
+    fmtPadding = (8 - (fmtDataSize & 7)) & 7;
+    dataOffset = 40 + 24 + fmtDataSize + fmtPadding;
+    hardening_wav_sparse_init_top(&stream, dataOffset + 24);
+    MA_COPY_MEMORY(stream.fmt + 0, ma_dr_wavGUID_W64_FMT, 16);
+    hardening_wav_write_u64le(stream.fmt + 16, 24 + fmtDataSize);
+    hardening_wav_write_u16le(stream.fmt + 24, MA_DR_WAVE_FORMAT_PCM);
+    hardening_wav_write_u16le(stream.fmt + 26, 1);
+    hardening_wav_write_u32le(stream.fmt + 28, 8000);
+    hardening_wav_write_u32le(stream.fmt + 32, 16000);
+    hardening_wav_write_u16le(stream.fmt + 36, 2);
+    hardening_wav_write_u16le(stream.fmt + 38, 16);
+    hardening_wav_write_u16le(stream.fmt + 40, 0);
+    hardening_wav_sparse_add_span(&stream, 40, stream.fmt, sizeof(stream.fmt));
+    MA_COPY_MEMORY(stream.data + 0, ma_dr_wavGUID_W64_DATA, 16);
+    hardening_wav_write_u64le(stream.data + 16, 24);
+    hardening_wav_sparse_add_span(&stream, dataOffset, stream.data, sizeof(stream.data));
+
+    initialized = ma_dr_wav_init(&wav, hardening_wav_sparse_read, hardening_wav_sparse_seek, hardening_wav_sparse_tell, &stream, NULL);
+    if (initialized) {
+        ma_dr_wav_uninit(&wav);
+    }
+    if (initialized != expectSuccess || stream.readCount > 16 || stream.seekCount > 8 ||
+        (expectSuccess && stream.intMaxForwardSeekCount != 1) ||
+        (!expectSuccess && stream.intMaxForwardSeekCount != 0)) {
+        printf("%s: initialized=%u reads=%u seeks=%u int-max-seeks=%u\n", pName,
+            initialized, stream.readCount, stream.seekCount, stream.intMaxForwardSeekCount);
+        return 1;
+    }
+    return 0;
+}
+
+static int hardening_wav_test_sparse_large_unknown(void)
+{
+    hardening_wav_sparse_stream stream;
+    ma_dr_wav wav;
+    ma_uint64 unknownSize;
+    ma_uint64 unknownPadding;
+    ma_uint64 dataOffset;
+
+    unknownSize = (ma_uint64)0x7FFFFFFF + 1;
+    unknownPadding = (8 - (unknownSize & 7)) & 7;
+    dataOffset = 80 + 24 + unknownSize + unknownPadding;
+    hardening_wav_sparse_init_top(&stream, dataOffset + 24);
+    MA_COPY_MEMORY(stream.fmt + 0, ma_dr_wavGUID_W64_FMT, 16);
+    hardening_wav_write_u64le(stream.fmt + 16, 40);
+    hardening_wav_write_u16le(stream.fmt + 24, MA_DR_WAVE_FORMAT_PCM);
+    hardening_wav_write_u16le(stream.fmt + 26, 1);
+    hardening_wav_write_u32le(stream.fmt + 28, 8000);
+    hardening_wav_write_u32le(stream.fmt + 32, 16000);
+    hardening_wav_write_u16le(stream.fmt + 36, 2);
+    hardening_wav_write_u16le(stream.fmt + 38, 16);
+    hardening_wav_sparse_add_span(&stream, 40, stream.fmt, 40);
+    MA_COPY_MEMORY(stream.unknown, ma_dr_wavGUID_W64_FACT, 16);
+    MA_COPY_MEMORY(stream.unknown, "JUNK", 4);
+    hardening_wav_write_u64le(stream.unknown + 16, 24 + unknownSize);
+    hardening_wav_sparse_add_span(&stream, 80, stream.unknown, sizeof(stream.unknown));
+    MA_COPY_MEMORY(stream.data, ma_dr_wavGUID_W64_DATA, 16);
+    hardening_wav_write_u64le(stream.data + 16, 24);
+    hardening_wav_sparse_add_span(&stream, dataOffset, stream.data, sizeof(stream.data));
+
+    if (!ma_dr_wav_init(&wav, hardening_wav_sparse_read, hardening_wav_sparse_seek, hardening_wav_sparse_tell, &stream, NULL)) {
+        printf("valid sparse large unknown chunk failed to initialize\n");
+        return 1;
+    }
+    ma_dr_wav_uninit(&wav);
+    if (stream.intMaxForwardSeekCount != 1 || stream.readCount > 16 || stream.seekCount > 8) {
+        printf("valid sparse large unknown traversal was reads=%u seeks=%u int-max-seeks=%u\n",
+            stream.readCount, stream.seekCount, stream.intMaxForwardSeekCount);
+        return 1;
+    }
+    return 0;
+}
+
 static int hardening_wav_test_compatibility_matrix(void)
 {
     const ma_int16 expectedFrames[2] = {0x1234, -0x2345};
-    ma_uint8 data[128];
+    ma_uint8 data[256];
     ma_uint32 factSize;
+    ma_uint64 w64ChunkSize;
     int failed = 0;
 
     failed += hardening_wav_test_writer_container(ma_dr_wav_container_riff, "RIFF PCM");
@@ -497,6 +757,39 @@ static int hardening_wav_test_compatibility_matrix(void)
             ma_dr_wav_uninit(&wav);
             failed = 1;
         }
+    }
+    for (factSize = 0; factSize <= 4; factSize += 1) {
+        failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_rifx_fact(data, factSize), factSize == 4, "RIFX fact boundary");
+    }
+    failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_rifx_fact(data, 8), MA_TRUE, "RIFX extended fact");
+    for (factSize = 0; factSize <= 8; factSize += 1) {
+        failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_w64_fact(data, factSize), factSize == 8, "W64 fact boundary");
+    }
+    failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_w64_fact(data, 9), MA_TRUE, "W64 padded fact extension");
+    failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_w64_fact(data, 16), MA_TRUE, "W64 extended fact");
+    for (w64ChunkSize = 0; w64ChunkSize < 24; w64ChunkSize += 1) {
+        failed += hardening_wav_test_bounded_callbacks(data, hardening_wav_make_short_w64_chunk(data, w64ChunkSize), MA_FALSE, "W64 short total chunk header");
+    }
+
+    return failed;
+}
+
+static int hardening_wav_test_aiff_short_headers(void)
+{
+    ma_uint8 data[128];
+    ma_uint32 chunkSize;
+    int failed;
+
+    failed = 0;
+    for (chunkSize = 0; chunkSize < 18; chunkSize += 1) {
+        size_t dataSize = hardening_wav_make_aiff_pcm(data);
+        hardening_wav_write_u32be(data + 16, chunkSize);
+        failed += hardening_wav_test_bounded_callbacks(data, dataSize, MA_FALSE, "AIFF short COMM header");
+    }
+    for (chunkSize = 0; chunkSize < 8; chunkSize += 1) {
+        size_t dataSize = hardening_wav_make_aiff_pcm(data);
+        hardening_wav_write_u32be(data + 42, chunkSize);
+        failed += hardening_wav_test_bounded_callbacks(data, dataSize, MA_FALSE, "AIFF short SSND header");
     }
 
     return failed;
@@ -533,6 +826,11 @@ int main(void)
     failed += hardening_wav_test_bounded_callbacks(g_wav_1123, sizeof(g_wav_1123), MA_FALSE, "issue 1123");
     failed += hardening_wav_test_fmt_boundaries();
     failed += hardening_wav_test_compatibility_matrix();
+    failed += hardening_wav_test_aiff_short_headers();
+    failed += hardening_wav_test_sparse_fmt_remainder((ma_uint64)0x7FFFFFFF, MA_TRUE, "fmt remainder INT_MAX");
+    failed += hardening_wav_test_sparse_fmt_remainder((ma_uint64)0x7FFFFFFF + 1, MA_FALSE, "fmt remainder INT_MAX plus one");
+    failed += hardening_wav_test_sparse_fmt_remainder((ma_uint64)0xFFFFFFFF, MA_FALSE, "fmt remainder UINT32_MAX");
+    failed += hardening_wav_test_sparse_large_unknown();
     failed += hardening_wav_test_failed_seek();
 
     /* These calls are reached only when the callback-budget assertions prove

@@ -19192,7 +19192,7 @@ static ma_bool32 ma_job_queue_cas(volatile ma_uint64* dst, ma_uint64 expected, m
     return ma_atomic_compare_and_swap_64(dst, expected, ma_job_set_refcount(desired, ma_job_extract_refcount(expected) + 1)) == expected;
 }
 
-MA_API ma_result ma_job_queue_post(ma_job_queue* pQueue, const ma_job* pJob)
+static ma_result ma_job_queue_post_internal(ma_job_queue* pQueue, const ma_job* pJob, volatile ma_uint32* pExecutionCounter)
 {
     /*
     Lock free queue implementation based on the paper by Michael and Scott: Nonblocking Algorithms and Preemption-Safe Locking on Multiprogrammed Shared Memory Multiprocessors
@@ -19217,6 +19217,13 @@ MA_API ma_result ma_job_queue_post(ma_job_queue* pQueue, const ma_job* pJob)
 
     /* We need to put the job into memory before we do anything. */
     pQueue->pJobs[ma_job_extract_slot(slot)]                  = *pJob;
+    if (pExecutionCounter != NULL) {
+        /*
+        Allocate the execution order only after a queue slot has been reserved. From this point on
+        publication cannot fail, so a full queue can never leave an order with no corresponding job.
+        */
+        pQueue->pJobs[ma_job_extract_slot(slot)].order = ma_atomic_fetch_add_32(pExecutionCounter, 1);
+    }
     pQueue->pJobs[ma_job_extract_slot(slot)].toc.allocation   = slot;                    /* This will overwrite the job code. */
     pQueue->pJobs[ma_job_extract_slot(slot)].toc.breakup.code = pJob->toc.breakup.code;  /* The job code needs to be applied again because the line above overwrote it. */
     pQueue->pJobs[ma_job_extract_slot(slot)].next             = MA_JOB_ID_NONE;          /* Reset for safety. */
@@ -19261,6 +19268,11 @@ MA_API ma_result ma_job_queue_post(ma_job_queue* pQueue, const ma_job* pJob)
     }
 
     return MA_SUCCESS;
+}
+
+MA_API ma_result ma_job_queue_post(ma_job_queue* pQueue, const ma_job* pJob)
+{
+    return ma_job_queue_post_internal(pQueue, pJob, NULL);
 }
 
 MA_API ma_result ma_job_queue_next(ma_job_queue* pQueue, ma_job* pJob)
@@ -22644,6 +22656,14 @@ static ma_context_command__wasapi ma_context_init_command__wasapi(int code)
     return cmd;
 }
 
+#ifndef MA_WASAPI_COMMAND_SEMAPHORE_RELEASE
+#define MA_WASAPI_COMMAND_SEMAPHORE_RELEASE(pSemaphore) ma_semaphore_release((pSemaphore))
+#endif
+
+#ifndef MA_WASAPI_COMMAND_EVENT_WAIT
+#define MA_WASAPI_COMMAND_EVENT_WAIT(pEvent) ma_event_wait((pEvent))
+#endif
+
 static ma_result ma_context_enqueue_command__wasapi(ma_context* pContext, const ma_context_command__wasapi* pCmd)
 {
     ma_result result;
@@ -22658,19 +22678,19 @@ static ma_result ma_context_enqueue_command__wasapi(ma_context* pContext, const 
         ma_mutex_lock(&pContext->wasapi.commandLock);
         if (pContext->wasapi.commandCount < ma_countof(pContext->wasapi.commands)) {
             index = (pContext->wasapi.commandIndex + pContext->wasapi.commandCount) % ma_countof(pContext->wasapi.commands);
-            pContext->wasapi.commands[index] = *pCmd;
-            pContext->wasapi.commandCount += 1;
+            result = MA_WASAPI_COMMAND_SEMAPHORE_RELEASE(&pContext->wasapi.commandSem);
+            if (result == MA_SUCCESS) {
+                /* The consumer cannot inspect the ring until this lock is released. */
+                pContext->wasapi.commands[index] = *pCmd;
+                pContext->wasapi.commandCount += 1;
+            }
             ma_mutex_unlock(&pContext->wasapi.commandLock);
-            break;
+            return result;
         }
         ma_mutex_unlock(&pContext->wasapi.commandLock);
 
         ma_yield();
     }
-
-    /* The command is visible before the consumer is released. */
-    result = ma_semaphore_release(&pContext->wasapi.commandSem);
-    return result;
 }
 
 #ifndef MA_WASAPI_COMMAND_LOCAL_EVENT_INIT
@@ -22709,11 +22729,19 @@ static ma_result ma_context_post_command__wasapi(ma_context* pContext, const ma_
     }
 
     if (isUsingLocalEvent) {
-        ma_event_wait(&localEvent);
+        ma_result waitResult;
+
+        /* A failed wait does not revoke an accepted command or its stack-backed event. */
+        do {
+            waitResult = MA_WASAPI_COMMAND_EVENT_WAIT(&localEvent);
+            if (result == MA_SUCCESS && waitResult != MA_SUCCESS) {
+                result = waitResult;
+            }
+        } while (waitResult != MA_SUCCESS);
         ma_event_uninit(&localEvent);
     }
 
-    return MA_SUCCESS;
+    return result;
 }
 
 static ma_result ma_context_next_command__wasapi(ma_context* pContext, ma_context_command__wasapi* pCmd)
@@ -22745,6 +22773,7 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
 
     for (;;) {
         ma_context_command__wasapi cmd;
+        ma_release_audio_client_data__wasapi* pReleaseData = NULL;
         result = ma_context_next_command__wasapi(pContext, &cmd);
         if (result != MA_SUCCESS) {
             break;
@@ -22768,7 +22797,7 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
 
             case MA_CONTEXT_COMMAND_RELEASE_IAUDIOCLIENT__WASAPI:
             {
-                ma_release_audio_client_data__wasapi* pReleaseData = (ma_release_audio_client_data__wasapi*)cmd.data.releaseAudioClient.pDevice;
+                pReleaseData = (ma_release_audio_client_data__wasapi*)cmd.data.releaseAudioClient.pDevice;
 
                 if (pReleaseData->pRenderClient != NULL) {
                     ma_IAudioRenderClient_Release(pReleaseData->pRenderClient);
@@ -22779,8 +22808,6 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
                 if (pReleaseData->pAudioClient != NULL) {
                     ma_IAudioClient_Release(pReleaseData->pAudioClient);
                 }
-
-                ma_atomic_store_32(&pReleaseData->isComplete, MA_TRUE);
             } break;
 
             default:
@@ -22792,6 +22819,11 @@ static ma_thread_result MA_THREADCALL ma_context_command_thread__wasapi(void* pU
 
         if (cmd.pEvent != NULL) {
             ma_event_signal(cmd.pEvent);
+        }
+
+        if (pReleaseData != NULL) {
+            /* This is the final access to the caller-owned release payload. */
+            ma_atomic_store_32(&pReleaseData->isComplete, MA_TRUE);
         }
 
         if (cmd.code == MA_CONTEXT_COMMAND_QUIT__WASAPI) {
@@ -22837,23 +22869,26 @@ static ma_result ma_device_release_audio_client__wasapi(ma_context* pContext, ma
     cmd.pEvent = pCompletionEvent;
 
     /* Release transfer must not depend on allocating a fresh completion event. */
-    result = ma_context_enqueue_command__wasapi(pContext, &cmd);
-    if (result != MA_SUCCESS) {
-        return result;
-    }
-
-    if (pCompletionEvent != NULL) {
-        result = ma_event_wait(pCompletionEvent);
+    do {
+        result = ma_context_enqueue_command__wasapi(pContext, &cmd);
         if (result != MA_SUCCESS) {
-            return result;
-        }
-    } else {
-        while (ma_atomic_load_32(&releaseData.isComplete) == MA_FALSE) {
             ma_yield();
         }
+    } while (result != MA_SUCCESS);
+
+    if (pCompletionEvent != NULL) {
+        result = MA_WASAPI_COMMAND_EVENT_WAIT(pCompletionEvent);
     }
 
-    return MA_SUCCESS;
+    while (ma_atomic_load_32(&releaseData.isComplete) == MA_FALSE) {
+        ma_yield();
+    }
+
+    if (pCompletionEvent != NULL && result != MA_SUCCESS) {
+        return result;
+    } else {
+        return MA_SUCCESS;
+    }
 }
 
 #ifndef MA_WASAPI_RELEASE_AUDIO_CLIENT
@@ -25687,10 +25722,12 @@ static ma_result ma_context_uninit__wasapi(ma_context* pContext)
     MA_ASSERT(pContext->backend == ma_backend_wasapi);
 
     /* Quit delivery must remain possible when no additional event can be created. */
-    result = ma_context_enqueue_command__wasapi(pContext, &cmd);
-    if (result != MA_SUCCESS) {
-        return result;
-    }
+    do {
+        result = ma_context_enqueue_command__wasapi(pContext, &cmd);
+        if (result != MA_SUCCESS) {
+            ma_yield();
+        }
+    } while (result != MA_SUCCESS);
     ma_thread_wait(&pContext->wasapi.commandThread);
 
     if (pContext->wasapi.hAvrt) {
@@ -70618,6 +70655,15 @@ MA_API ma_result ma_noise_read_pcm_frames(ma_noise* pNoise, void* pFramesOut, ma
 #ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK
 #define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK(pDataBufferNode) ((void)0)
 #endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_POSTED_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_POSTED_HOOK(pDataBuffer) ((void)0)
+#endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_POSTED_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_POSTED_HOOK(pDataBufferNode) ((void)0)
+#endif
+
+static ma_result ma_resource_manager_post_job_with_execution_order(ma_resource_manager* pResourceManager, const ma_job* pJob, volatile ma_uint32* pExecutionCounter);
+static ma_result ma_resource_manager_post_retirement_job_with_execution_order(ma_resource_manager* pResourceManager, const ma_job* pJob, volatile ma_uint32* pExecutionCounter);
 
 MA_API ma_resource_manager_pipeline_notifications ma_resource_manager_pipeline_notifications_init(void)
 {
@@ -72120,7 +72166,6 @@ static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(m
 
             /* We now have everything we need to post the job to the job thread. */
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER_NODE);
-            job.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);
             job.data.resourceManager.loadDataBufferNode.pResourceManager  = pResourceManager;
             job.data.resourceManager.loadDataBufferNode.pDataBufferNode   = pDataBufferNode;
             job.data.resourceManager.loadDataBufferNode.pFilePath         = pFilePathCopy;
@@ -72132,9 +72177,10 @@ static ma_result ma_resource_manager_data_buffer_node_acquire_critical_section(m
             job.data.resourceManager.loadDataBufferNode.pDoneFence        = pDoneFence;
 
             if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
+                job.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);
                 result = ma_job_process(&job);
             } else {
-                result = ma_resource_manager_post_job(pResourceManager, &job);
+                result = ma_resource_manager_post_job_with_execution_order(pResourceManager, &job, &pDataBufferNode->executionCounter);
             }
 
             if (result != MA_SUCCESS) {
@@ -72417,17 +72463,17 @@ stage2:
             ma_atomic_exchange_i32(&pDataBufferNode->result, MA_UNAVAILABLE);
 
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER_NODE);
-            job.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);
             job.data.resourceManager.freeDataBufferNode.pResourceManager = pResourceManager;
             job.data.resourceManager.freeDataBufferNode.pDataBufferNode  = pDataBufferNode;
 
             MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK(pDataBufferNode);
 
-            result = ma_resource_manager_post_job(pResourceManager, &job);
+            result = ma_resource_manager_post_retirement_job_with_execution_order(pResourceManager, &job, &pDataBufferNode->executionCounter);
             if (result != MA_SUCCESS) {
                 ma_log_postf(ma_resource_manager_get_log(pResourceManager), MA_LOG_LEVEL_ERROR, "Failed to post MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER_NODE job. %s.\n", ma_result_description(result));
                 return result;
             }
+            MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_POSTED_HOOK(pDataBufferNode);
 
             /* If we don't support threading, process the job queue here. */
             if (ma_resource_manager_is_threading_enabled(pResourceManager) == MA_FALSE) {
@@ -72613,7 +72659,8 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             ma_resource_manager_inline_notification initNotification;   /* Used when the WAIT_INIT flag is set. */
             ma_bool32 waitForInit = (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0;
             ma_bool32 initNotificationInitialized = MA_FALSE;
-            ma_bool32 jobFencesAcquired = MA_FALSE;
+            ma_bool32 jobInitStageOwned = MA_FALSE;
+            ma_bool32 jobDoneStageOwned = MA_FALSE;
 
             if (waitForInit) {
                 result = ma_resource_manager_inline_notification_init(pResourceManager, &initNotification);
@@ -72639,10 +72686,10 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
                 ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
                 goto async_done;
             }
-            jobFencesAcquired = MA_TRUE;
+            jobInitStageOwned = MA_TRUE;
+            jobDoneStageOwned = MA_TRUE;
 
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER);
-            job.order = ma_resource_manager_data_buffer_next_execution_order(pDataBuffer);
             job.data.resourceManager.loadDataBuffer.pDataBuffer             = pDataBuffer;
             job.data.resourceManager.loadDataBuffer.pInitNotification       = waitForInit ? &initNotification : notifications.init.pNotification;
             job.data.resourceManager.loadDataBuffer.pDoneNotification       = notifications.done.pNotification;
@@ -72656,16 +72703,23 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
 
             /* If we need to wait for initialization to complete we can just process the job in place. */
             if (waitForInit) {
+                job.order = ma_resource_manager_data_buffer_next_execution_order(pDataBuffer);
                 result = ma_job_process(&job);
 
                 /*
-                Success means the job either retired or was re-posted and therefore owns the
-                second fence acquisition. An error can also be terminal, in which case advancing
-                the execution pointer proves the job already released its fences. If neither is
-                true, an inline re-post failed and ownership remains with this caller.
+                Connector initialization consumes the init stage independently of the done stage.
+                A successful re-post owns every stage it has not consumed. A retired job consumed
+                both stages; otherwise a failed inline re-post leaves the remaining stages here.
                 */
-                if (result == MA_SUCCESS || ma_atomic_load_32(&pDataBuffer->executionPointer) != job.order) {
-                    jobFencesAcquired = MA_FALSE;
+                if (ma_resource_manager_data_buffer_has_connector(pDataBuffer)) {
+                    jobInitStageOwned = MA_FALSE;
+                }
+                if (result == MA_SUCCESS) {
+                    jobInitStageOwned = MA_FALSE;
+                    jobDoneStageOwned = MA_FALSE;
+                } else if (ma_atomic_load_32(&pDataBuffer->executionPointer) != job.order) {
+                    jobInitStageOwned = MA_FALSE;
+                    jobDoneStageOwned = MA_FALSE;
                 }
 
                 if (result == MA_SUCCESS) {
@@ -72680,9 +72734,10 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
                     ma_async_notification_signal(notifications.init.pNotification);
                 }
             } else {
-                result = ma_resource_manager_post_job(pResourceManager, &job);
+                result = ma_resource_manager_post_job_with_execution_order(pResourceManager, &job, &pDataBuffer->executionCounter);
                 if (result == MA_SUCCESS) {
-                    jobFencesAcquired = MA_FALSE;   /* The posted job owns both fence acquisitions. */
+                    jobInitStageOwned = MA_FALSE;
+                    jobDoneStageOwned = MA_FALSE;
                 }
             }
 
@@ -72691,22 +72746,29 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
                 ma_log_postf(ma_resource_manager_get_log(pResourceManager), MA_LOG_LEVEL_ERROR, "Failed to post MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER job. %s.\n", ma_result_description(result));
                 ma_atomic_exchange_i32(&pDataBuffer->result, result);
 
-                if (jobFencesAcquired) {
-                    ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
-                    jobFencesAcquired = MA_FALSE;
-
-                    if (waitForInit && notifications.done.pNotification != NULL) {
-                        ma_async_notification_signal(notifications.done.pNotification);
-                    }
+                if (jobInitStageOwned && notifications.init.pFence != NULL) {
+                    MA_RESOURCE_MANAGER_FENCE_RELEASE(notifications.init.pFence);
                 }
+                jobInitStageOwned = MA_FALSE;
+
+                if (jobDoneStageOwned && notifications.done.pFence != NULL) {
+                    MA_RESOURCE_MANAGER_FENCE_RELEASE(notifications.done.pFence);
+                }
+                if (jobDoneStageOwned && waitForInit && notifications.done.pNotification != NULL) {
+                    ma_async_notification_signal(notifications.done.pNotification);
+                }
+                jobDoneStageOwned = MA_FALSE;
                 if (waitForInit == MA_FALSE) {
                     ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
                 }
             }
 
 async_done:
-            if (jobFencesAcquired) {
-                ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
+            if (jobInitStageOwned && notifications.init.pFence != NULL) {
+                MA_RESOURCE_MANAGER_FENCE_RELEASE(notifications.init.pFence);
+            }
+            if (jobDoneStageOwned && notifications.done.pFence != NULL) {
+                MA_RESOURCE_MANAGER_FENCE_RELEASE(notifications.done.pFence);
             }
             if (initNotificationInitialized) {
                 ma_resource_manager_inline_notification_uninit(&initNotification);
@@ -72836,18 +72898,17 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
         ma_atomic_exchange_i32(&pDataBuffer->result, MA_UNAVAILABLE);
 
         job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER);
-        job.order = ma_resource_manager_data_buffer_next_execution_order(pDataBuffer);
         job.data.resourceManager.freeDataBuffer.pDataBuffer       = pDataBuffer;
         job.data.resourceManager.freeDataBuffer.pDoneNotification = &notification;
         job.data.resourceManager.freeDataBuffer.pDoneFence        = NULL;
 
-        result = ma_resource_manager_post_job(pDataBuffer->pResourceManager, &job);
+        result = ma_resource_manager_post_retirement_job_with_execution_order(pDataBuffer->pResourceManager, &job, &pDataBuffer->executionCounter);
         if (result != MA_SUCCESS) {
-            ma_atomic_fetch_sub_32(&pDataBuffer->executionCounter, 1);
             ma_atomic_exchange_i32(&pDataBuffer->result, previousResult);
             ma_resource_manager_inline_notification_uninit(&notification);
             return result;
         }
+        MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_POSTED_HOOK(pDataBuffer);
 
         ma_resource_manager_inline_notification_wait_and_uninit(&notification);
     }
@@ -74298,6 +74359,38 @@ MA_API ma_result ma_resource_manager_post_job(ma_resource_manager* pResourceMana
     return ma_job_queue_post(&pResourceManager->jobQueue, pJob);
 }
 
+static ma_result ma_resource_manager_post_job_with_execution_order(ma_resource_manager* pResourceManager, const ma_job* pJob, volatile ma_uint32* pExecutionCounter)
+{
+    if (pResourceManager == NULL || pExecutionCounter == NULL) {
+        return MA_INVALID_ARGS;
+    }
+
+    return ma_job_queue_post_internal(&pResourceManager->jobQueue, pJob, pExecutionCounter);
+}
+
+static ma_result ma_resource_manager_post_retirement_job_with_execution_order(ma_resource_manager* pResourceManager, const ma_job* pJob, volatile ma_uint32* pExecutionCounter)
+{
+    ma_result result;
+
+    for (;;) {
+        result = ma_resource_manager_post_job_with_execution_order(pResourceManager, pJob, pExecutionCounter);
+        if (result != MA_OUT_OF_MEMORY) {
+            return result;
+        }
+
+        /*
+        A retirement job owns the last reference and cannot be discarded. In manual-pump mode the
+        caller must make one queue slot available; with worker threads, yield until a worker does so.
+        No execution order has been consumed while the queue is full.
+        */
+        if (pResourceManager->config.jobThreadCount == 0) {
+            (void)ma_resource_manager_process_next_job(pResourceManager);
+        } else {
+            ma_yield();
+        }
+    }
+}
+
 MA_API ma_result ma_resource_manager_post_job_quit(ma_resource_manager* pResourceManager)
 {
     ma_job job = ma_job_init(MA_JOB_TYPE_QUIT);
@@ -74400,7 +74493,6 @@ static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job*
         Note that if an error occurred at an earlier point, this section will have been skipped.
         */
         pageDataBufferNodeJob = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_PAGE_DATA_BUFFER_NODE);
-        pageDataBufferNodeJob.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);
         pageDataBufferNodeJob.data.resourceManager.pageDataBufferNode.pResourceManager  = pResourceManager;
         pageDataBufferNodeJob.data.resourceManager.pageDataBufferNode.pDataBufferNode   = pDataBufferNode;
         pageDataBufferNodeJob.data.resourceManager.pageDataBufferNode.pDecoder          = pDecoder;
@@ -74408,7 +74500,7 @@ static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job*
         pageDataBufferNodeJob.data.resourceManager.pageDataBufferNode.pDoneFence        = pJob->data.resourceManager.loadDataBufferNode.pDoneFence;
 
         /* The job has been set up so it can now be posted. */
-        result = ma_resource_manager_post_job(pResourceManager, &pageDataBufferNodeJob);
+        result = ma_resource_manager_post_job_with_execution_order(pResourceManager, &pageDataBufferNodeJob, &pDataBufferNode->executionCounter);
 
         /*
         When we get here, we want to make sure the result code is set to MA_BUSY. The reason for
@@ -74543,10 +74635,9 @@ static ma_result ma_job_process__resource_manager__page_data_buffer_node(ma_job*
     */
     if (result == MA_SUCCESS) {
         ma_job newJob;
-        newJob = *pJob; /* Everything is the same as the input job, except the execution order. */
-        newJob.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);   /* We need a fresh execution order. */
+        newJob = *pJob; /* Everything is the same as the input job; posting allocates a fresh execution order. */
 
-        result = ma_resource_manager_post_job(pResourceManager, &newJob);
+        result = ma_resource_manager_post_job_with_execution_order(pResourceManager, &newJob, &pDataBufferNode->executionCounter);
 
         /* Since the sound isn't yet fully decoded we want the status to be set to busy. */
         if (result == MA_SUCCESS) {
@@ -81905,7 +81996,7 @@ MA_PRIVATE unsigned int ma_dr_wav__chunk_padding_size_riff(ma_uint64 chunkSize)
 }
 MA_PRIVATE unsigned int ma_dr_wav__chunk_padding_size_w64(ma_uint64 chunkSize)
 {
-    return (unsigned int)(chunkSize % 8);
+    return (unsigned int)((8 - (chunkSize % 8)) % 8);
 }
 MA_PRIVATE ma_uint64 ma_dr_wav_read_pcm_frames_s16__msadpcm(ma_dr_wav* pWav, ma_uint64 samplesToRead, ma_int16* pBufferOut);
 MA_PRIVATE ma_uint64 ma_dr_wav_read_pcm_frames_s16__ima(ma_dr_wav* pWav, ma_uint64 samplesToRead, ma_int16* pBufferOut);
@@ -82039,6 +82130,7 @@ typedef struct
     ma_uint64 metadataCursor;
     ma_uint64 extraCapacity;
     ma_bool32 hasAllocationError;
+    ma_bool32 hasStructuralError;
 } ma_dr_wav__metadata_parser;
 MA_PRIVATE size_t ma_dr_wav__metadata_memory_capacity(ma_dr_wav__metadata_parser* pParser)
 {
@@ -82791,10 +82883,18 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_chunk(ma_dr_wav__metadata_parse
             ma_uint8 subchunkId[4];
             ma_uint8 subchunkSizeBuffer[4];
             ma_uint64 subchunkDataSize;
+            ma_uint64 subchunkPaddingSize;
             ma_uint64 subchunkBytesRead = 0;
-            ma_uint64 bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, subchunkId, sizeof(subchunkId), &bytesRead);
+            ma_uint64 bytesJustRead;
+
+            if (pChunkHeader->sizeInBytes - bytesRead < sizeof(subchunkId)) {
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
+            }
+            bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, subchunkId, sizeof(subchunkId), &bytesRead);
             if (bytesJustRead != sizeof(subchunkId)) {
-                break;
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
             }
             if (ma_dr_wav_fourcc_equal(subchunkId, "adtl")) {
                 listType = ma_dr_wav_metadata_location_inside_adtl_list;
@@ -82803,11 +82903,22 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_chunk(ma_dr_wav__metadata_parse
                 listType = ma_dr_wav_metadata_location_inside_info_list;
                 continue;
             }
+            if (pChunkHeader->sizeInBytes - bytesRead < sizeof(subchunkSizeBuffer)) {
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
+            }
             bytesJustRead = ma_dr_wav__metadata_parser_read(pParser, subchunkSizeBuffer, sizeof(subchunkSizeBuffer), &bytesRead);
             if (bytesJustRead != sizeof(subchunkSizeBuffer)) {
-                break;
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
             }
             subchunkDataSize = ma_dr_wav_bytes_to_u32(subchunkSizeBuffer);
+            subchunkPaddingSize = subchunkDataSize & 1;
+            if (subchunkDataSize > pChunkHeader->sizeInBytes - bytesRead ||
+                subchunkPaddingSize > pChunkHeader->sizeInBytes - bytesRead - subchunkDataSize) {
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
+            }
             if (ma_dr_wav__chunk_matches(allowedMetadataTypes, subchunkId, ma_dr_wav_metadata_type_list_label, "labl") || ma_dr_wav__chunk_matches(allowedMetadataTypes, subchunkId, ma_dr_wav_metadata_type_list_note, "note")) {
                 if (subchunkDataSize >= MA_DR_WAV_LIST_LABEL_OR_NOTE_BYTES) {
                     ma_uint64 stringSizeWithNullTerm = subchunkDataSize - MA_DR_WAV_LIST_LABEL_OR_NOTE_BYTES;
@@ -82878,19 +82989,24 @@ MA_PRIVATE ma_uint64 ma_dr_wav__metadata_process_chunk(ma_dr_wav__metadata_parse
                 subchunkBytesRead = ma_dr_wav__metadata_process_unknown_chunk(pParser, subchunkId, subchunkDataSize, listType);
             }
             bytesRead += subchunkBytesRead;
-            MA_DR_WAV_ASSERT(subchunkBytesRead <= subchunkDataSize);
+            if (subchunkBytesRead > subchunkDataSize) {
+                pParser->hasStructuralError = MA_TRUE;
+                return bytesRead;
+            }
             if (subchunkBytesRead < subchunkDataSize) {
                 ma_uint64 bytesToSeek = subchunkDataSize - subchunkBytesRead;
-                if (!pParser->onSeek(pParser->pReadSeekUserData, (int)bytesToSeek, MA_DR_WAV_SEEK_CUR)) {
-                    break;
+                if (!ma_dr_wav__seek_forward(pParser->onSeek, bytesToSeek, pParser->pReadSeekUserData)) {
+                    pParser->hasStructuralError = MA_TRUE;
+                    return bytesRead;
                 }
                 bytesRead += bytesToSeek;
             }
-            if ((subchunkDataSize % 2) == 1) {
-                if (!pParser->onSeek(pParser->pReadSeekUserData, 1, MA_DR_WAV_SEEK_CUR)) {
-                    break;
+            if (subchunkPaddingSize != 0) {
+                if (!ma_dr_wav__seek_forward(pParser->onSeek, subchunkPaddingSize, pParser->pReadSeekUserData)) {
+                    pParser->hasStructuralError = MA_TRUE;
+                    return bytesRead;
                 }
-                bytesRead += 1;
+                bytesRead += subchunkPaddingSize;
             }
         }
     } else if ((allowedMetadataTypes & ma_dr_wav_metadata_type_unknown) != 0) {
@@ -83387,7 +83503,10 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             }
         }
         if (isProcessingMetadata) {
-            ma_dr_wav__metadata_process_chunk(&metadataParser, &header, ma_dr_wav_metadata_type_all_including_unknown);
+            ma_uint64 metadataBytesRead = ma_dr_wav__metadata_process_chunk(&metadataParser, &header, ma_dr_wav_metadata_type_all_including_unknown);
+            if (metadataParser.hasAllocationError || metadataParser.hasStructuralError || metadataBytesRead > chunkSize) {
+                return MA_FALSE;
+            }
             if (ma_dr_wav__seek_from_start(pWav->onSeek, cursor, pWav->pUserData) == MA_FALSE) {
                 break;
             }
@@ -83449,7 +83568,7 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
             }
             chunkSizeWithPadding = chunkSize + chunkPaddingSize;
             metadataBytesRead = ma_dr_wav__metadata_process_chunk(&metadataParser, &header, ma_dr_wav_metadata_type_all_including_unknown);
-            if (metadataParser.hasAllocationError) {
+            if (metadataParser.hasAllocationError || metadataParser.hasStructuralError) {
                 ma_dr_wav_free(metadataParser.pMetadata, &pWav->allocationCallbacks);
                 return MA_FALSE;
             }

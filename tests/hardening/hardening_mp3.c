@@ -18,9 +18,12 @@ static const ma_uint8 g_mp3_1128[] = {
 typedef struct
 {
     size_t largestRequest;
+    ma_uint32 allocationAttemptCount;
     ma_uint32 allocationCount;
     ma_uint32 freeCount;
     ma_uint32 liveAllocationCount;
+    ma_uint32 failAllocationCall;
+    ma_uint32 rejectionCount;
 } mp3_allocator_state;
 
 typedef struct
@@ -64,10 +67,12 @@ static size_t mp3_invalid_buffer_read(void* pUserData, void* pBufferOut, size_t 
 static void* mp3_malloc(size_t size, void* pUserData)
 {
     mp3_allocator_state* pState = (mp3_allocator_state*)pUserData;
+    pState->allocationAttemptCount += 1;
     if (size > pState->largestRequest) {
         pState->largestRequest = size;
     }
-    if (size > 1024 * 1024) {
+    if (size > 1024 * 1024 || (pState->failAllocationCall != 0 && pState->allocationAttemptCount == pState->failAllocationCall)) {
+        pState->rejectionCount += 1;
         return NULL;
     }
     {
@@ -86,10 +91,12 @@ static void* mp3_realloc(void* pMemory, size_t size, void* pUserData)
     void* pNewMemory;
     ma_bool32 wasNull = pMemory == NULL;
 
+    pState->allocationAttemptCount += 1;
     if (size > pState->largestRequest) {
         pState->largestRequest = size;
     }
-    if (size > 1024 * 1024) {
+    if (size > 1024 * 1024 || (pState->failAllocationCall != 0 && pState->allocationAttemptCount == pState->failAllocationCall)) {
+        pState->rejectionCount += 1;
         return NULL;
     }
     if (size == 0) {
@@ -942,6 +949,84 @@ static int mp3_test_callback_buffer_invariant(void)
     return 0;
 }
 
+static int mp3_test_callback_buffer_allocation_failure(void)
+{
+    ma_dr_mp3 mp3;
+    mp3_allocator_state allocator;
+    mp3_invalid_callback_state stream;
+    ma_uint8* pOriginalData;
+    ma_uint32 framesRead;
+    int failed;
+
+    failed = 0;
+    MA_ZERO_OBJECT(&mp3);
+    MA_ZERO_OBJECT(&allocator);
+    MA_ZERO_OBJECT(&stream);
+    allocator.failAllocationCall = 1;
+    mp3.onRead = mp3_invalid_buffer_read;
+    mp3.pUserData = &stream;
+    mp3.allocationCallbacks.pUserData = &allocator;
+    mp3.allocationCallbacks.onMalloc = mp3_malloc;
+    mp3.allocationCallbacks.onRealloc = mp3_realloc;
+    mp3.allocationCallbacks.onFree = mp3_free;
+
+    framesRead = ma_dr_mp3_decode_next_frame_ex__callbacks(&mp3, NULL, NULL, NULL);
+    if (framesRead != 0 || allocator.allocationAttemptCount != 1 || allocator.rejectionCount != 1 ||
+        allocator.allocationCount != 0 || allocator.liveAllocationCount != 0 || stream.readCount != 0 || mp3.pData != NULL) {
+        printf("MP3 initial callback allocation failure mismatch: frames=%u attempts=%u rejected=%u allocated=%u live=%u reads=%u\n",
+            framesRead,
+            allocator.allocationAttemptCount,
+            allocator.rejectionCount,
+            allocator.allocationCount,
+            allocator.liveAllocationCount,
+            stream.readCount);
+        failed = 1;
+    }
+    ma_dr_mp3_uninit(&mp3);
+
+    MA_ZERO_OBJECT(&mp3);
+    MA_ZERO_OBJECT(&allocator);
+    MA_ZERO_OBJECT(&stream);
+    pOriginalData = (ma_uint8*)mp3_malloc(MA_DR_MP3_MIN_DATA_CHUNK_SIZE, &allocator);
+    if (pOriginalData == NULL) {
+        printf("MP3 callback allocation failure setup could not allocate the retained buffer\n");
+        return 1;
+    }
+    allocator.failAllocationCall = allocator.allocationAttemptCount + 1;
+    mp3.onRead = mp3_invalid_buffer_read;
+    mp3.pUserData = &stream;
+    mp3.allocationCallbacks.pUserData = &allocator;
+    mp3.allocationCallbacks.onMalloc = mp3_malloc;
+    mp3.allocationCallbacks.onRealloc = mp3_realloc;
+    mp3.allocationCallbacks.onFree = mp3_free;
+    mp3.pData = pOriginalData;
+    mp3.dataCapacity = MA_DR_MP3_MIN_DATA_CHUNK_SIZE;
+
+    framesRead = ma_dr_mp3_decode_next_frame_ex__callbacks(&mp3, NULL, NULL, NULL);
+    if (framesRead != 0 || allocator.allocationAttemptCount != 2 || allocator.rejectionCount != 1 ||
+        allocator.allocationCount != 1 || allocator.liveAllocationCount != 1 || stream.readCount != 0 ||
+        mp3.pData != pOriginalData || mp3.dataCapacity != MA_DR_MP3_MIN_DATA_CHUNK_SIZE) {
+        printf("MP3 callback growth failure mismatch: frames=%u attempts=%u rejected=%u allocated=%u live=%u reads=%u retained=%u capacity=%lu\n",
+            framesRead,
+            allocator.allocationAttemptCount,
+            allocator.rejectionCount,
+            allocator.allocationCount,
+            allocator.liveAllocationCount,
+            stream.readCount,
+            mp3.pData == pOriginalData,
+            (unsigned long)mp3.dataCapacity);
+        failed = 1;
+    }
+    ma_dr_mp3_uninit(&mp3);
+    if (allocator.liveAllocationCount != 0 || allocator.allocationCount != allocator.freeCount) {
+        printf("MP3 callback growth failure leaked allocations: allocated=%u freed=%u live=%u\n",
+            allocator.allocationCount, allocator.freeCount, allocator.liveAllocationCount);
+        failed = 1;
+    }
+
+    return failed;
+}
+
 static int mp3_test_callback_faults(void)
 {
     typedef struct
@@ -1013,6 +1098,7 @@ int main(void)
     failed += mp3_test_full_decode_allocation();
     failed += mp3_test_resource_manager_allocation();
     failed += mp3_test_callback_buffer_invariant();
+    failed += mp3_test_callback_buffer_allocation_failure();
     failed += mp3_test_callback_faults();
     return failed != 0;
 }
