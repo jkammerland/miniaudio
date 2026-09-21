@@ -36,6 +36,11 @@ typedef struct
     const ma_uint8* pData;
     size_t dataSize;
     size_t cursor;
+    size_t maxReadSize;
+    ma_uint32 readCount;
+    ma_uint32 seekCount;
+    ma_uint32 failReadCall;
+    ma_uint32 failSeekCall;
 } mp3_callback_stream;
 
 typedef struct
@@ -196,6 +201,16 @@ static ma_result mp3_callback_read(void* pUserData, void* pBufferOut, size_t byt
     mp3_callback_stream* pStream = (mp3_callback_stream*)pUserData;
     size_t bytesRemaining = pStream->dataSize - pStream->cursor;
 
+    pStream->readCount += 1;
+    if (pStream->readCount == pStream->failReadCall) {
+        if (pBytesRead != NULL) {
+            *pBytesRead = 0;
+        }
+        return MA_IO_ERROR;
+    }
+    if (pStream->maxReadSize > 0 && bytesToRead > pStream->maxReadSize) {
+        bytesToRead = pStream->maxReadSize;
+    }
     if (bytesToRead > bytesRemaining) {
         bytesToRead = bytesRemaining;
     }
@@ -215,6 +230,10 @@ static ma_result mp3_callback_seek(void* pUserData, ma_int64 offset, ma_seek_ori
     mp3_callback_stream* pStream = (mp3_callback_stream*)pUserData;
     ma_int64 base;
 
+    pStream->seekCount += 1;
+    if (pStream->seekCount == pStream->failSeekCall) {
+        return MA_BAD_SEEK;
+    }
     if (origin == ma_seek_origin_start) {
         base = 0;
     } else if (origin == ma_seek_origin_current) {
@@ -589,6 +608,12 @@ static int mp3_test_xing_boundaries(void)
         {1, 1, MA_FALSE, MA_TRUE,  0x08, MA_FALSE, MA_FALSE,  24, "four-byte field before boundary"},
         {1, 1, MA_TRUE,  MA_TRUE,  0x08, MA_FALSE, MA_TRUE,   25, "four-byte field exact boundary"},
         {1, 0, MA_FALSE, MA_TRUE,  0x08, MA_FALSE, MA_TRUE,   26, "four-byte field after boundary"},
+        {1, 1, MA_FALSE, MA_TRUE,  0x01, MA_FALSE, MA_FALSE,  24, "frame-count before boundary"},
+        {1, 1, MA_TRUE,  MA_TRUE,  0x01, MA_FALSE, MA_TRUE,   25, "frame-count exact boundary"},
+        {1, 0, MA_FALSE, MA_TRUE,  0x01, MA_FALSE, MA_TRUE,   26, "frame-count after boundary"},
+        {1, 1, MA_FALSE, MA_TRUE,  0x02, MA_FALSE, MA_FALSE,  24, "byte-count before boundary"},
+        {1, 1, MA_TRUE,  MA_TRUE,  0x02, MA_FALSE, MA_TRUE,   25, "byte-count exact boundary"},
+        {1, 0, MA_FALSE, MA_TRUE,  0x02, MA_FALSE, MA_TRUE,   26, "byte-count after boundary"},
         {5, 1, MA_FALSE, MA_TRUE,  0x04, MA_FALSE, MA_FALSE, 120, "TOC before boundary"},
         {5, 1, MA_TRUE,  MA_TRUE,  0x04, MA_FALSE, MA_TRUE,  121, "TOC exact boundary"},
         {5, 0, MA_FALSE, MA_TRUE,  0x04, MA_FALSE, MA_TRUE,  130, "TOC after boundary"},
@@ -917,6 +942,65 @@ static int mp3_test_callback_buffer_invariant(void)
     return 0;
 }
 
+static int mp3_test_callback_faults(void)
+{
+    typedef struct
+    {
+        size_t maxReadSize;
+        ma_uint32 failReadCall;
+        ma_uint32 failSeekCall;
+        ma_uint32 expectedReadCount;
+        ma_uint32 expectedSeekCount;
+        const char* pName;
+    } mp3_callback_fault_case;
+    static const mp3_callback_fault_case cases[] = {
+        {7, 0, 0, 1, 2, "short read"},
+        {0, 1, 0, 1, 2, "failed read"},
+        {0, 0, 1, 1, 3, "failed seek"}
+    };
+    size_t i;
+    int failed = 0;
+
+    for (i = 0; i < ma_countof(cases); i += 1) {
+        mp3_allocator_state state;
+        mp3_callback_stream stream;
+        ma_decoder_config config;
+        ma_decoder decoder;
+        ma_result result;
+
+        MA_ZERO_OBJECT(&state);
+        MA_ZERO_OBJECT(&stream);
+        stream.pData = g_mp3_1128;
+        stream.dataSize = sizeof(g_mp3_1128);
+        stream.maxReadSize = cases[i].maxReadSize;
+        stream.failReadCall = cases[i].failReadCall;
+        stream.failSeekCall = cases[i].failSeekCall;
+        config = mp3_decoder_config_init(&state);
+
+        result = ma_decoder_init(mp3_decoder_read, mp3_decoder_seek, &stream, &config, &decoder);
+        if (result != MA_NO_BACKEND) {
+            printf("MP3 callback %s returned %d instead of MA_NO_BACKEND (reads=%u seeks=%u)\n",
+                cases[i].pName, result, stream.readCount, stream.seekCount);
+            if (result == MA_SUCCESS) {
+                ma_decoder_uninit(&decoder);
+            }
+            failed = 1;
+        }
+        if (state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
+            printf("MP3 callback %s leaked allocations: allocated=%u freed=%u live=%u\n",
+                cases[i].pName, state.allocationCount, state.freeCount, state.liveAllocationCount);
+            failed = 1;
+        }
+        if (stream.readCount != cases[i].expectedReadCount || stream.seekCount != cases[i].expectedSeekCount) {
+            printf("MP3 callback %s took unexpected path: reads=%u seeks=%u\n",
+                cases[i].pName, stream.readCount, stream.seekCount);
+            failed = 1;
+        }
+    }
+
+    return failed;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -929,5 +1013,6 @@ int main(void)
     failed += mp3_test_full_decode_allocation();
     failed += mp3_test_resource_manager_allocation();
     failed += mp3_test_callback_buffer_invariant();
+    failed += mp3_test_callback_faults();
     return failed != 0;
 }
