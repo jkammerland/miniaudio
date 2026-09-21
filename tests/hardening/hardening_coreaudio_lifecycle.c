@@ -42,6 +42,8 @@ typedef struct
     ma_uint32 candidatePlaybackDisposeCount;
     ma_uint32 unexpectedStopCount;
     ma_uint32 unexpectedDisposeCount;
+    ma_uint32 startCount;
+    ma_int32 startResult;
     ma_uint32 publicStoppedCount;
     ma_uint32 publicReroutedCount;
     ma_uint32 addListenerCount;
@@ -188,6 +190,13 @@ static OSStatus hardening_stop(AudioUnit audioUnit)
     }
 
     return noErr;
+}
+
+static OSStatus hardening_start(AudioUnit audioUnit)
+{
+    (void)audioUnit;
+    g_hooks.startCount += 1;
+    return (OSStatus)g_hooks.startResult;
 }
 
 static OSStatus hardening_get_property(AudioUnit audioUnit, AudioUnitPropertyID propertyID, AudioUnitScope scope, AudioUnitElement element, void* pData, UInt32* pDataSize)
@@ -384,6 +393,17 @@ static ma_result hardening_prepare_capture_converter(hardening_fixture* pFixture
     pFixture->device.capture.internalPeriods = 3;
     ma_channel_map_init_standard(ma_standard_channel_map_default, pFixture->device.capture.internalChannelMap, MA_MAX_CHANNELS, 2);
     return ma_device__post_init_setup(&pFixture->device, ma_device_type_capture);
+}
+
+static ma_result hardening_prepare_playback_converter(hardening_fixture* pFixture)
+{
+    pFixture->device.playback.internalFormat = ma_format_f32;
+    pFixture->device.playback.internalChannels = 2;
+    pFixture->device.playback.internalSampleRate = 44100;
+    pFixture->device.playback.internalPeriodSizeInFrames = 64;
+    pFixture->device.playback.internalPeriods = 3;
+    ma_channel_map_init_standard(ma_standard_channel_map_default, pFixture->device.playback.internalChannelMap, MA_MAX_CHANNELS, 2);
+    return ma_device__post_init_setup(&pFixture->device, ma_device_type_playback);
 }
 
 static int hardening_test_tracking_worker_lifecycle(void)
@@ -755,6 +775,7 @@ static int hardening_test_public_uninit_waits_for_reroute(void)
     ma_bool32 startEventInitialized = MA_FALSE;
     ma_bool32 stopEventInitialized = MA_FALSE;
     ma_bool32 startStopLockInitialized = MA_FALSE;
+    ma_bool32 playbackConverterInitialized = MA_FALSE;
     ma_bool32 uninitThreadCreated = MA_FALSE;
     int failed = 0;
 
@@ -762,6 +783,7 @@ static int hardening_test_public_uninit_waits_for_reroute(void)
     MA_ZERO_OBJECT(&uninitData);
     fixture.context.coreaudio.AudioObjectAddPropertyListener = (ma_proc)hardening_add_listener;
     fixture.context.coreaudio.AudioObjectRemovePropertyListener = (ma_proc)hardening_remove_listener;
+    fixture.context.coreaudio.AudioOutputUnitStart = (ma_proc)hardening_start;
     fixture.context.callbacks.onDeviceUninit = ma_device_uninit__coreaudio;
 
     result = ma_event_init(&reinitEnteredEvent);
@@ -789,7 +811,12 @@ static int hardening_test_public_uninit_waits_for_reroute(void)
     if (result != MA_SUCCESS) { failed = 1; goto done; }
     startStopLockInitialized = MA_TRUE;
 
-    ma_device__set_state(&fixture.device, ma_device_state_stopped);
+    result = hardening_prepare_playback_converter(&fixture);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    playbackConverterInitialized = MA_TRUE;
+    fixture.device.coreaudio.audioUnitPlayback = (ma_ptr)&g_oldPlaybackUnit;
+    g_hooks.startResult = -1;
+    ma_device__set_state(&fixture.device, ma_device_state_started);
     fixture.device.coreaudio.isDefaultPlaybackDevice = MA_TRUE;
     result = ma_context__init_device_tracking__coreaudio(&fixture.context);
     if (result != MA_SUCCESS) { failed = 1; goto done; }
@@ -816,7 +843,7 @@ static int hardening_test_public_uninit_waits_for_reroute(void)
     uninitThreadCreated = MA_TRUE;
     ma_event_wait(&untrackEnteredEvent);
 
-    if (ma_device_get_state(&fixture.device) != ma_device_state_stopped ||
+    if (ma_device_get_state(&fixture.device) != ma_device_state_started ||
         ma_atomic_load_32(&uninitData.complete) != MA_FALSE) {
         printf("public Core Audio uninit published terminal state before reroute retirement\n");
         failed = 1;
@@ -832,14 +859,16 @@ static int hardening_test_public_uninit_waits_for_reroute(void)
     startEventInitialized = MA_FALSE;
     stopEventInitialized = MA_FALSE;
     startStopLockInitialized = MA_FALSE;
+    playbackConverterInitialized = MA_FALSE;
 
     if (ma_atomic_load_32(&uninitData.complete) != MA_TRUE || g_hooks.initCount != 1 ||
-        g_hooks.publicReroutedCount != 1 || g_hooks.candidatePlaybackDisposeCount != 1 ||
+        g_hooks.startCount != 1 || g_hooks.publicReroutedCount != 0 ||
+        g_hooks.oldPlaybackDisposeCount != 1 || g_hooks.candidatePlaybackDisposeCount != 1 ||
         g_TrackedDeviceCount_CoreAudio != 0 || fixture.device.pContext != NULL ||
         ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0) {
-        printf("public Core Audio uninit/reroute mismatch: complete=%u init=%u rerouted=%u dispose=%u tracked=%u context=%p live=%lu\n",
-            ma_atomic_load_32(&uninitData.complete), g_hooks.initCount, g_hooks.publicReroutedCount,
-            g_hooks.candidatePlaybackDisposeCount, g_TrackedDeviceCount_CoreAudio, (void*)fixture.device.pContext,
+        printf("public Core Audio uninit/reroute mismatch: complete=%u init=%u start=%u rerouted=%u dispose=%u/%u tracked=%u context=%p live=%lu\n",
+            ma_atomic_load_32(&uninitData.complete), g_hooks.initCount, g_hooks.startCount, g_hooks.publicReroutedCount,
+            g_hooks.oldPlaybackDisposeCount, g_hooks.candidatePlaybackDisposeCount, g_TrackedDeviceCount_CoreAudio, (void*)fixture.device.pContext,
             (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount));
         failed = 1;
     }
@@ -858,6 +887,7 @@ done:
         startEventInitialized = MA_FALSE;
         stopEventInitialized = MA_FALSE;
         startStopLockInitialized = MA_FALSE;
+        playbackConverterInitialized = MA_FALSE;
     }
     if (deviceTracked) {
         ma_mutex_lock(&g_DeviceTrackingMutex_CoreAudio);
@@ -878,6 +908,7 @@ done:
     if (startEventInitialized) { ma_event_uninit(&fixture.device.startEvent); }
     if (wakeupEventInitialized) { ma_event_uninit(&fixture.device.wakeupEvent); }
     if (coreStopEventInitialized) { ma_event_uninit(&fixture.device.coreaudio.stopEvent); }
+    if (playbackConverterInitialized) { ma_data_converter_uninit(&fixture.device.playback.converter, &fixture.context.allocationCallbacks); }
     g_pReinitEnteredEvent = NULL;
     g_pReinitReleaseEvent = NULL;
     g_pUntrackEnteredEvent = NULL;
