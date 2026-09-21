@@ -7,7 +7,7 @@
 - **Local reproduction:** not reproduced
 - **Local toolchain:** GCC 16.2.1, C++23, `-O3 -flto`
 - **Reported platform:** Windows GCC/MinGW; compiler version omitted
-- **Scope decision:** on 2026-09-20 the owner rejected deploying or running
+- **Scope decision:** on 2026-09-21 the owner rejected deploying or running
   GCC/MinGW on Windows for this effort
 
 The report describes `-Wstringop-overflow` diagnostics involving node-bus

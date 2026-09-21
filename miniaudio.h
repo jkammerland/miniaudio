@@ -7145,7 +7145,7 @@ struct ma_device_config
         ma_bool8 noAutoStreamRouting;       /* Disables automatic stream routing. */
         ma_bool8 noHardwareOffloading;      /* Disables WASAPI's hardware offloading feature. */
         ma_uint32 loopbackProcessID;        /* The process ID to include or exclude for loopback mode. Set to 0 to capture audio from all processes. Process loopback is endpoint-independent, so specifying an explicit device ID at the same time is invalid. */
-        ma_bool8 loopbackProcessExclude;    /* When set to true, excludes the process specified by loopbackProcessID. By default, the process will be included. */
+        ma_bool8 loopbackProcessExclude;    /* When set to true, excludes the process tree specified by loopbackProcessID. By default, only that process tree will be included. */
     } wasapi;
     struct
     {
@@ -8871,6 +8871,23 @@ on an optimized pass-through fast path. You can retrieve the format, channel cou
 
 When compiling for UWP you must ensure you call this function on the main UI thread because the operating system may need to present the user with a message
 asking for permissions. Please refer to the official documentation for ActivateAudioInterfaceAsync() for more information.
+
+WASAPI process loopback is available on Windows 10 build 20348 and newer. Configure a loopback device with a nonzero
+`wasapi.loopbackProcessID` to capture only that process tree, or set `wasapi.loopbackProcessExclude` to capture every process except that tree:
+
+```c
+ma_device_config config = ma_device_config_init(ma_device_type_loopback);
+config.capture.format = ma_format_f32;
+config.capture.channels = 2;
+config.sampleRate = 48000;
+config.dataCallback = data_callback;
+config.wasapi.loopbackProcessID = targetProcessID;
+config.wasapi.loopbackProcessExclude = MA_FALSE;
+```
+
+Process loopback is endpoint-independent and shared-mode only. Combining it with an explicit capture device ID or exclusive mode returns
+`MA_INVALID_DEVICE_CONFIG`; an unsupported Windows build or missing activation API returns `MA_NOT_IMPLEMENTED`. Initialization remains synchronous even
+though WASAPI activation is asynchronous internally, and can return `MA_TIMEOUT`. A process-loopback request is never retried as whole-system loopback.
 
 ALSA Specific: When initializing the default device, requesting shared mode will try using the "dmix" device for playback and the "dsnoop" device for capture.
 If these fail it will try falling back to the "hw" device.

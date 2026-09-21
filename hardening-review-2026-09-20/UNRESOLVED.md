@@ -1,394 +1,185 @@
-# Hardening implementation: unresolved work and validation limits
-
-Status date: 2026-09-20  
-Reviewed implementation HEAD: `ca92a4b1627a52b1ad865f5a97381014a13686b4`
-
-This is the authoritative follow-up queue for the implementation requested by
-`IMPLEMENTATION-PROMPT.md`. It records source-established defects, reproduced
-regressions, missing deterministic tests, and environment-limited work. An
-unavailable environment is not a pass. Existing fixes and passing tests remain
-useful evidence, but the implementation is **not acceptance-ready** while the
-delivery blockers below remain.
-
-## Independent Astra-max review
-
-Batch Codex job `cde2b7f425041dd3` reviewed the complete prompt, issue dossiers,
-commits `47c2eef8..ca92a4b`, production and test diffs, local RED/GREEN artifacts,
-and fetched Windows/macOS evidence. It used `gpt-6-astra` at `max` reasoning and
-made no repository changes.
-
-Review outputs:
-
-- `/home/ai-dev1/.codex/codex-mcp-server/job-artifacts/cde2b7f425041dd3/tasks/task-0/REVIEW.md`
-- `/home/ai-dev1/.codex/codex-mcp-server/job-artifacts/cde2b7f425041dd3/tasks/task-0/FINDINGS.json`
-- `/home/ai-dev1/.codex/codex-mcp-server/job-artifacts/cde2b7f425041dd3/tasks/task-0/review-checks`
-
-The review reported 0 critical, 6 high, and 7 medium findings. One medium
-finding was the accuracy of the earlier draft of this document; this rewrite
-addresses that documentation finding. The remaining source and coverage
-findings are unresolved unless explicitly stated otherwise below.
-
-## Delivery-blocking source defects and regression
-
-### F01 — SMPL count/read disagreement can overrun metadata storage (high)
-
-Status: **source-proven conditional defect; not fixed**.  
-Snapshot location: `miniaudio.h:81425`.
-
-The count pass reserves an SMPL record only when structural validation accepts
-the chunk. The read helper can consume the complete fixed header on rejection,
-and the read pass interprets complete consumption as materialization success
-and advances `metadataCursor`. In a mixed-metadata file this can write a record
-that the count pass did not reserve. The current isolated invalid-SMPL test has
-zero accepted metadata and therefore bypasses the vulnerable materialization
-pass.
-
-Required work:
-
-- return acceptance separately from bytes consumed;
-- advance/publish only fully initialized accepted records;
-- enforce record and pool capacity in the materialization pass; and
-- add mixed-record, invalid-SMPL, and short-read allocation-accounting tests.
-
-### F02 — WASAPI reroute publishes clients before converter setup is safe (high)
-
-Status: **source-proven conditional defect; not fixed**.  
-Snapshot location: `miniaudio.h:24767`.
-
-The reroute path retires old clients and publishes replacement COM state before
-`ma_device__post_init_setup()` rebuilds converters. Post-init first uninitializes
-the published converter and can then fail allocation before replacing it. The
-object may retain freed ownership and be uninitialized again during ordinary
-device teardown. Candidate publication is transactional for a COM subset, not
-for the complete device state.
-
-Required work:
-
-- construct clients, converters, caches, and related state in temporary owned
-  storage before publication;
-- leave either the valid old state or an explicitly empty destroyable state on
-  every failure; and
-- inject failures at each post-init stage with exact release-count assertions.
-
-### F03 — Failed synchronous resource load can free a shared node (high)
-
-Status: **source-proven concurrency defect; not fixed**.  
-Snapshot location: `miniaudio.h:71315`.
-
-A newly inserted BUSY node becomes visible after the BST lock is released.
-Another acquisition can increment its reference before the first synchronous
-load fails. The creator failure path removes/frees the node based on creator
-ownership without retiring the second acquisition and performs the tree removal
-without the BST lock. The landed missing-file tests have no second acquirer or
-barrier.
-
-Required work:
-
-- publish failure to existing holders and retire only the failing caller's
-  ownership;
-- serialize tree mutation and preserve the node until references/jobs retire;
-  and
-- add a deterministic shared-acquisition custom-VFS failure test, separately
-  from the publish-before-job-retirement investigation.
-
-### F04 — MP3 declared length still controls resource-manager allocation (high)
-
-Status: **source-proven required outcome incomplete; not fixed**.  
-Snapshot location: `miniaudio.h:95530`.
-
-The widened multiplication prevents the original 32-bit wrap, but the Xing
-declared frame count is still returned as decoder length without validation
-against actual decoded input. The resource-manager known-length decoded path
-then allocates and clears that declared size when it fits `size_t`. The current
-bounded allocation regression uses `ma_decode_memory()`, which grows storage by
-actual decoded frames and therefore does not exercise this consumer.
-
-Required work:
-
-- treat unverified metadata length as a hint rather than allocation authority;
-- use a validated bound or incremental decoded storage; and
-- test the resource-manager decoded path with a refusing/recording allocator
-  and an independent decoded-length expectation.
-
-### F05 — Failed CoreAudio reroute leaves stale published ownership (high)
-
-Status: **source-proven conditional defect; not fixed or runtime-injected**.  
-Snapshot location: `miniaudio.h:36487`.
-
-CoreAudio rerouting disposes published capture/playback units and frees the
-published capture `AudioBufferList` without clearing the owners. If replacement
-initialization then fails, ordinary teardown can dispose/free those stale fields
-again.
-
-Required work:
-
-- stage the complete replacement before retiring old state, or clear every
-  retired owner and enter a coherent stopped state;
-- include generic post-init/converter failures in the transaction; and
-- add deterministic failure/teardown tests plus permitted native confirmation.
-
-### F06 — Failed CoreAudio duplex initialization remains globally tracked (high)
-
-Status: **source-proven conditional lifetime defect; not fixed**.  
-Snapshot location: `miniaudio.h:36649`.
-
-Default capture is added to CoreAudio's global tracking list before duplex
-playback initialization. The playback-failure branch disposes capture but does
-not untrack the device; generic public-init failure cleanup does not call backend
-untrack. Caller storage can therefore be released while a later property
-callback retains its pointer.
-
-Required work:
-
-- publish tracking only after complete device initialization or unwind it from
-  every partial-init failure; and
-- test capture-success/playback-failure followed by a property notification,
-  with exact cleanup accounting.
-
-### F07 — Valid RF64 with metadata enabled is rejected (medium)
-
-Status: **reproduced compatibility regression; not fixed**.  
-Snapshot location: `miniaudio.h:81830`.
-
-The new known-file-size guard checks the RF64 data chunk's raw sentinel size
-before resolving it through `ds64`. The independent reviewer generated a valid
-one-sample RF64 file with miniaudio's own writer. Normal and metadata-enabled
-reads both pass on baseline `47c2eef`; on `ca92a4b`, normal read passes and the
-metadata-enabled read fails.
-
-Reproducer and logs:
-
-- `review-checks/valid-rf64-roundtrip.c`
-- `review-checks/valid-rf64-47c2eef.log` — exit 0
-- `review-checks/valid-rf64-ca92a4b.log` — exit 1
-
-Required work: resolve RF64 sentinel lengths from `ds64` before bounds/traversal
-checks in both passes and land a valid writer/metadata-reader round-trip test.
-
-### F08 — Internal WASAPI reroute emits a public stopped notification (medium)
-
-Status: **source-proven contract violation; not fixed**.  
-Snapshot location: `miniaudio.h:24755`.
-
-The documented contract says stopped notifications are not emitted for
-rerouting. The control worker calls the normal internal stop path; its boolean
-controls requested-state bookkeeping but does not suppress the audio worker's
-public stopped notification. A restart can then emit started before the separate
-rerouted notification.
-
-Required work: represent internal routing separately from externally requested
-stop/start notifications and test successful/failed reroute notification order,
-including concurrent public state changes.
-
-### F09 — WAIT_INIT ignores notification initialization failure (medium)
-
-Status: **source-proven failure-path defect; not fixed**.  
-Snapshot location: `miniaudio.h:71118`.
-
-`ma_resource_manager_inline_notification_init()` can fail, but the acquisition
-path ignores its result and may pass, signal, wait on, or uninitialize an invalid
-notification object. The prompt explicitly required tracking notification and
-fence initialization.
-
-Required work: check initialization before publication, track every initialized
-or acquired stage, unwind only completed stages, and inject notification/fence
-failures with exact signal/wait/uninit counts.
-
-### F10 — Failed decoded loads can leak decoder/data-supply ownership (medium)
-
-Status: **source-proven failure-path leak; not fixed**.  
-Snapshot location: `miniaudio.h:71167`.
-
-Decoded supply storage can be allocated before PAGE-job posting. PAGE-post
-failure destroys only the decoder, and an inline WAIT_INIT failure can then
-remove/free the node without releasing the supply. A decoder length-query
-failure also returns after successful decoder initialization without complete
-decoder cleanup. The current missing-file regression fails before these owners
-exist.
-
-Required work: centralize staged decoder/supply cleanup and test length-query,
-mid-decode, PAGE-post, custom-VFS, and allocation failures without freeing
-shared or externally registered storage.
-
-### F11 — Steam Audio example direction state has a data race (medium)
-
-Status: **inherited source-proven example defect; not fixed or SDK-validated**.  
-Snapshot location: `examples/engine_steamaudio.c:260`.
-
-The audio thread reads three ordinary direction floats while the main/control
-thread writes them after playback starts. No bounded block-boundary snapshot is
-present. The implementation prompt required this example change only with real
-SDK validation; that SDK environment was unavailable, so the example was left
-unchanged rather than claiming a fix.
-
-Required work: implement a bounded preallocated snapshot adopted at audio-block
-boundaries, then validate fixed/partial/tail frame handling and effect ownership
-with the real Steam Audio SDK.
-
-## Mandatory lifecycle coverage still absent
-
-### F12 — WASAPI test covers publication bits, not lifecycle/quiescence (medium)
-
-Status: **architecture implemented, mandatory deterministic validation absent**.
-
-`hardening_wasapi_lifecycle.c` tests role/flow filtering, bit coalescing, and the
-closed publication gate. Source inspection shows that the callback does not
-store the borrowed ID pointer, but mutating the test buffer without a later
-consumer/assertion does not prove non-retention or lifetime safety. The test
-also does not start the control worker, initialize the operation lock, use fake
-COM/audio clients, process a full command ring, inject worker/candidate/post-init
-failures, race public start/stop with reroute, or prove
-unregister/callback/Release retirement. Ordinary native playback supplements
-but does not replace those tests.
-
-Required work:
-
-- fake-interface barriers for callback entry, unregister, final Release, worker
-  drain/join, and free;
-- full-ring command processing and payload-lifetime checks;
-- COM-worker initialization and every candidate/post-init failure; and
-- successful/failed reroute ordering with concurrent public state changes and
-  shutdown.
-
-Until then, describe #1149 as an implemented nonblocking publication/control
-worker design with incomplete lifecycle proof, not as a completed lifecycle fix.
-
-## Open platform reports and feature work
-
-### #1152: WASAPI exclusive-capture duplication/discontinuity
-
-Status: **unresolved; capture endpoint connected, reproduction pending**.
-
-The earlier Windows worker run exposed no capture endpoint. On 2026-09-20 the
-owner reported that a capture device had been connected; enumeration, exclusive
-mode, and format support have not yet been verified. No packet/cache/flag/
-device-QPC trace or watermark evidence exists. Do not infer that draining
-multiple packets itself is wrong. Reproduction requires the connected endpoint
-to support exclusive capture and the bounded preallocated trace specified by
-the implementation prompt.
-
-### #1155: optional-libopus use-after-free report
-
-Status: **unresolved; ownership sequence not established**.
-
-Observed runtime packages were `opusfile-0.12-18.fc44.x86_64`,
-`opus-1.6-2.fc44.x86_64`, and `libogg-1.3.6-2.fc44.x86_64`. Development headers
-and pkg-config metadata were unavailable. A valid owner-mediated sequence and a
-sanitizer trace are required before changing ownership; concurrent public
-read/uninit is not assumed valid.
-
-### #1157: GCC/MinGW LTO atomic or node-bus diagnostics
-
-Status: **unresolved; Windows GCC/MinGW validation explicitly owner-declined**.
-
-Historical local runs reported GCC 16.2.1 C and C++23 success with and without
-LTO, but the retained `gcc-lto-*` binaries do not preserve complete commands,
-exact-source identifiers, and exit records, so that matrix is not independently
-certified. Windows had no MinGW. On 2026-09-20 the owner explicitly rejected
-deploying or running GCC/MinGW on Windows. Do not provision, install, or execute
-MinGW on Windows for this effort. The report therefore remains unresolved and
-outside the accepted validation scope; this decision is not evidence of a pass
-or a fix. Reopening it requires a new owner decision or an externally supplied
-exact compiler/triple/flags/diagnostic and reproducer.
-
-### #484: process-scoped WASAPI loopback
-
-Status: **feature incomplete**.
-
-Include/exclude initialization returned `MA_INVALID_ARGS`. The desktop path has
-not completed the dedicated asynchronous activation flow, and no two-watermark
-content-isolation environment was available. Required coverage includes
-unsupported-OS behavior, activation cancellation/late completion, two process
-trees including children and exit, no-target silence, and proof of no fallback
-to ordinary whole-system loopback.
-
-## Other acceptance and validation gaps
-
-The following are mandatory or materially relevant gaps, not passing results:
-
-- Resource manager: plain `ASYNC`, custom-VFS, allocation, job-post, shared-node,
-  registered-external-data, notification/fence, and manual-job-pump cases are
-  absent. The separate publish-before-job-retirement interleaving remains
-  unforced and unchanged.
-- WAV/BEXT/SMPL: file/callback short reads, failed seeks, mixed metadata, and a
-  real 32-bit size-conversion build remain incomplete. Valid RF64 is currently
-  regressed as F07.
-- MP3: callback/file paths, optional fields, fallback decoders, and the
-  resource-manager allocation consumer remain incomplete.
-- EOF: the regression asserts one overall end callback, but not notification
-  timing after the final converted frame across looping, resampling, cache, and
-  period boundaries.
-- Gain: scalar/SSE2 tests are meaningful and include split blocks and 33
-  channels. Other architecture-specific implementations require native runners;
-  arm64 success does not imply a separate NEON gainer implementation was tested.
-- Callback real-time behavior: source review was performed, but there is no
-  allocation/lock instrumentation or worst-case callback-cost evidence.
-- Local 32-bit libc development headers and optional Opus/Vorbis development
-  configurations were unavailable.
-
-## Residual diagnostics
-
-Focused final test sources are clean for the targeted C89, format, and
-uninitialized-output checks. Aggressive clang-cl builds still report inherited
-header diagnostics including `-Wunsafe-buffer-usage`, reserved identifiers,
-C-style casts in C++ consumers, and null-pointer style. macOS analysis reports
-four inherited FLAC `runningOrder` dead stores. They were preserved rather than
-suppressed and were not established as runtime defects by this work.
-
-## Native evidence and provenance limits
-
-- Full Windows matrices ran on `6923868`; exact final `ca92a4b` ran the three
-  changed targets under MSVC Debug and clang-cl ASan, 6/6.
-- Full macOS matrices ran on production-equivalent predecessors; exact final
-  `ca92a4b` ran the three changed targets under Apple Debug and LLVM ASan/UBSan,
-  6/6.
-- Windows playback passed with 55 callbacks and 26,400 frames. There were zero
-  capture endpoints and no MinGW.
-- macOS device tests timed out after start with zero callbacks on baseline and
-  final source; capture permission was denied. Those are failures/environment
-  limits, not device passes.
-- Measured Linux x86_64, Windows x64, and macOS arm64 ABI values matched their
-  baselines. This is not proof for every compiler, packing mode, or public type.
-- Historical RED artifacts support several original failures, but complete
-  command/exit/revision-scoped parent/fixed pairs were not preserved for every
-  issue. Existing binaries alone are not accepted as durable proof.
-
-Independent review verified all fetched artifact manifests: 904 listed entries
-with zero mismatches, and 897 native `SHA256SUMS` entries with zero mismatches.
+# Hardening implementation: remaining work and validation limits
+
+Status date: 2026-09-21
+Implementation reviewed through: `2d7617964c567982366b0c7408e26f6a3d46a0de`
+
+This is the authoritative remaining-work record for
+`IMPLEMENTATION-PROMPT.md`. A platform or hardware limitation is never counted
+as a pass. Conversely, an issue is not kept open after deterministic tests and
+the required source invariant establish the fix. The original Astra-max review
+findings are retained below with their disposition so the history is auditable.
+
+## Current unresolved table
+
+| Item | Current status | Evidence obtained | What is still missing / why it remains open |
+|---|---|---|---|
+| #1152 WASAPI exclusive-capture duplication | **Unresolved; not reproduced on the available USB microphone** | 27 bounded Windows runs; 25 packet-instrumented; 7,372 successful `GetBuffer` packets paired with 7,372 full releases; duration/QPC ratios 0.99350–1.00458; no duplicate packet tuple or ~1.44× duration | Only `Microphone (USB Condenser Microphone)` was available. Shared input was silent, no acoustic/frame-index watermark path existed, and the reported Realtek/M-Audio devices were not tested. No production patch is justified without reproduction. |
+| #1155 alleged optional-libopus UAF | **Unresolved as an alleged UAF; no valid owner-mediated UAF reproduced** | Hash-pinned Opus/Vorbis dependencies; valid, malformed, truncated, chained, seek/EOF, nonseekable, allocator/VFS/open failure, callback lifetime, and deterministic resource-manager cancellation tests under normal, C89-option, ASan/UBSan, and TSan builds | The public report still lacks a valid call sequence and sanitizer stack. Concurrent public read/uninit is not assumed supported. Two real nonseekable callback-contract bugs were fixed, but they are not evidence of the alleged UAF. |
+| #1157 Windows GCC/MinGW LTO diagnostics | **Owner-rejected / outside accepted deployment scope** | Native GCC 16.2.1 C/C++ LTO checks outside Windows did not reproduce the warning | The owner explicitly will not deploy or run GCC/MinGW on Windows. This is documented scope rejection, not a pass or fix. Reopening requires a new owner decision or an external exact compiler/triple/flags diagnostic and reproducer. |
+| #484 process-specific WASAPI content isolation | **Implemented; acoustic include/exclude result unresolved on this host** | Dedicated desktop `ActivateAudioInterfaceAsync` path; OS/symbol/config gates; heap-owned late-callback-safe completion state; deterministic include/exclude/failure/timeout tests; Windows Debug 15/15 and C89-option WASAPI 2/2; live initialization and ten 288,000-frame captures succeeded | Every whole-system positive control and process capture was bitwise silent even though producer callback references contained the intended tones. Without a nonzero whole-system control, silence cannot prove include/exclude filtering. Multiple-endpoint switching and a public cancel API are also unavailable; device initialization is synchronous. |
+| CoreAudio real-device behavior | **Source/lifecycle fixes complete; hardware exercise limited** | Transactional deterministic lifecycle/failure tests and native macOS builds passed | The isolated macOS account had no usable playback callbacks and capture permission was denied. This limits hardware confirmation; it does not invalidate the deterministic ownership fixes. |
+| 32-bit and additional architecture coverage | **Validation limitation** | Linux x86_64, Windows x64, and macOS arm64 ABI measurements matched their baselines; scalar/SSE2 and available sanitizer configurations passed | A real 32-bit libc/toolchain build and every architecture-specific DSP implementation were not available. No ABI change was made, but this is not proof for every compiler and packing mode. |
+| Steam Audio checkout with the host's default C++14 mode | **External dependency/toolchain limitation; miniaudio integration validated with a C++17 build override** | A fresh `phonon` build from tracked-clean commit `902e09545ae6bfd06768bcd38980b009317641ac`, followed by the miniaudio hardening and TSan tests, passed | Steam Audio's bundled FlatBuffers selects the host's Abseil `string_view` while Steam Audio requests C++14; current Abseil requires C++17. The external checkout needs its own permanent dependency/standard fix. No Steam Audio source was changed here. |
+
+## Disposition of the independent Astra-max findings
+
+Batch Codex job `cde2b7f425041dd3` reviewed the earlier implementation through
+`ca92a4b` with `gpt-6-astra` at `max` reasoning. It reported 0 critical, 6
+high, and 7 medium findings. The following scoped commits address every source
+or mandatory-test finding from that review:
+
+| Finding | Disposition | Commit and proof focus |
+|---|---|---|
+| F01 SMPL count/read disagreement | **Fixed** | `1c1efd5`: acceptance is separate from bytes consumed; materialization is capacity checked; mixed valid/invalid metadata and short reads are tested. |
+| F02 WASAPI reroute publishes before converter setup | **Fixed** | `fcc0270`: candidate clients and generic post-init state are completed before publication; injected failures preserve the old state or an empty destroyable state. |
+| F03 failed synchronous load frees a shared node | **Fixed** | `b25511c`: failure is published and only the creator reference is retired through the locked unacquire path; a barrier test holds a second acquisition. |
+| F04 MP3 declared length controls allocation | **Fixed** | `a4d0966`: Xing/Info length is a hint; the actual stream is scanned before exposing an allocation length; resource-manager refusing-allocation coverage is included. |
+| F05 failed CoreAudio reroute leaves stale ownership | **Fixed** | `90e3bad`: staged replacement/retirement and failure teardown have exact ownership tests. |
+| F06 failed CoreAudio duplex init remains tracked | **Fixed** | `90e3bad`: tracking is published only for complete initialization and partial failures untrack deterministically. |
+| F07 valid RF64 metadata regression | **Fixed** | `1c1efd5`: `ds64` resolves the RF64 sentinel before bounds checks; writer/metadata-reader round trips pass. |
+| F08 WASAPI internal reroute emits public stop/start | **Fixed** | `fcc0270`: internal notification suppression and ordering tests distinguish reroute lifecycle from public state requests. |
+| F09 WAIT_INIT ignores notification failure | **Fixed** | `5ddd7c0`: notification/fence stages are checked and unwound exactly; failure injection covers signal/wait/uninit counts. |
+| F10 failed decoded loads leak decoder/supply | **Fixed** | `3f2a48c`: staged cleanup covers length-query, PAGE-post, decode, VFS, and allocation failures. |
+| F11 Steam Audio direction data race | **Fixed** | `6a83e67`: bounded block-boundary snapshots replace ordinary cross-thread floats; Steam Audio 4.8.1 from `../steam-audio` passed fixed/partial/tail and sanitizer/TSan tests. |
+| F12 incomplete WASAPI lifecycle proof | **Fixed** | `fcc0270`: expanded fake-interface/barrier coverage exercises coalescing, full queues, candidate/post-init failures, public-state races, quiescence, worker join, and exact release accounting. |
+
+The follow-up also confirmed and fixed a separate resource-manager retirement
+race in `ee9b745`: a stream-load job previously signalled initialization before
+its final `executionPointer` write. The waiter could destroy/zero the stream,
+after which the worker wrote into retired storage. The job now advances its
+execution pointer before publishing completion; deterministic notification
+interleaving and TSan pass without adding a wait that would deadlock a manual
+job pump.
+
+## New callback-contract defects found during optional-codec validation
+
+The #1155 investigation did not reproduce its alleged UAF, but stronger tests
+found two independent defects in the optional wrappers. A callback source may
+be nonseekable only when the wrapper advertises that consistently:
+
+```c
+/* Wrong: a seek callback without tell advertises an unusable partial pair. */
+callbacks.seek = onSeek;
+callbacks.tell = NULL;
+
+/* Fixed: supply both, or advertise neither. */
+if (onSeek != NULL && onTell != NULL) {
+    callbacks.seek = wrapper_seek;
+    callbacks.tell = wrapper_tell;
+}
+```
+
+Vorbis could call a null tell function and crash at address zero. Opus rejected
+the same valid nonseekable source as `MA_INVALID_FILE`. Commit `9d7e8a3` makes
+seek/tell an atomic capability pair in both wrappers and adds independently
+selectable dependency modes:
+
+- `MINIAUDIO_FETCH_LIBVORBIS` / `MINIAUDIO_FETCH_LIBOPUS` fetch hash-pinned
+  sources;
+- `MINIAUDIO_REQUIRE_LIBVORBIS` / `MINIAUDIO_REQUIRE_LIBOPUS` fail configure
+  visibly when a requested development dependency is absent;
+- the ordinary configuration remains offline and does not download anything.
+
+Pinned inputs are libogg 1.3.6, libopus 1.6.1, opusfile 0.12, and libvorbis
+commit `1b75110b5a2754ba1931d82dd83cb822b266a21d`. Released libvorbis 1.3.7 was
+not selected because UBSan found a signed-shift defect and it predates the
+upstream `ov_pcm_page_seek` security fix.
+
+## #1152 evidence and exact limitation
+
+Windows evidence is in `/tmp/miniaudio-1152-20260921-1-evidence`. Its artifact
+manifest SHA-256 is
+`bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`.
+
+The tested endpoint was:
+
+```text
+Microphone (USB Condenser Microphone)
+{0.0.1.00000000}.{9e87ea05-2f7d-4660-a61d-caf0b5c2d0e2}
+```
+
+Shared f32/48 kHz/stereo, exclusive native s24/48 kHz/mono, and miniaudio's
+reported s16/48 kHz/stereo conversion all initialized. Exclusive WAVs contained
+nonzero input around 0.03 peak. Shared WAVs were silent in the worker session.
+The packet accounting was internally exact, including induced discontinuity
+stress; the reported ordinary repeated-discontinuity/duplicated-period/~1.44×
+pattern did not occur. Useful manual-listening files include
+`exclusive-reported-10.wav` and `exclusive-device-native-10.wav`.
+
+This closes the requested reproduction attempt, not the upstream report. It
+would be wrong to change the packet-draining loop based only on the report.
+
+## #484 implementation and evidence boundary
+
+Commits `0b4727e` and `2d76179` implement and validate the desktop path without
+changing public layout:
+
+```c
+if (processID != 0) {
+    if (explicitDeviceID != NULL) return MA_INVALID_DEVICE_CONFIG;
+    if (!supportedOS || activateAsync == NULL) return MA_NOT_IMPLEMENTED;
+    return activate_process_loopback_async(L"VAD\\Process_Loopback", params);
+}
+```
+
+The async completion handler is heap-owned and COM-reference-counted. A
+30-second bounded wait may return `MA_TIMEOUT`; a later callback retains valid
+state and performs the final release. Query-interface and activation failures
+release every obtained interface. Process mode skips endpoint properties,
+hardware offload, IAudioClient3, and endpoint rerouting, and it never retries
+with PID zero.
+
+Native evidence is in `/tmp/miniaudio-0484-2d76179-evidence`; artifact manifest
+SHA-256 is
+`ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`.
+Windows 10.0.26200.9457 exposed `ActivateAudioInterfaceAsync`. The following
+all initialized and ran through the exact public API: whole-system controls,
+include, exclude, target child created after capture start, no-stream target,
+nonexistent PID, and target exit while capture continued. Ten captures each
+contained exactly 288,000 frames (six seconds), but all samples were zero. The
+producer reference WAVs contain the requested watermarks. Therefore the
+content filter remains unverified until a Windows audio environment produces a
+nonzero whole-system loopback control.
+
+The API has no public object to cancel while synchronous `ma_device_init()` is
+still running. The deterministic timeout/late-callback test proves safe
+retirement, not user-visible cancel-during-activation semantics.
+
+## Other validation limits
+
+- The MSVC `MINIAUDIO_FORCE_C89=ON` configuration passes but CMake explicitly
+  notes that MSVC cannot enforce C89. Strict C89 is covered on compilers that
+  support the language mode; the Windows run is a configuration check only.
+- Optional codec tests are independently selectable so one installed codec
+  cannot conceal the other's absence. Ordinary builds remain download-free.
+- A fresh Steam Audio build used C++17 through a CMake compiler-rule override
+  because its C++14 FlatBuffers snapshot detects a host Abseil version that no
+  longer supports C++14. This was a validation-only workaround in `/tmp`; the
+  tracked `../steam-audio` source was not modified.
+- The callback and packet probes cover miniaudio allocation hooks, not every
+  allocation a Windows driver or COM implementation might perform internally.
+- The macOS real-device limitation remains recorded above; deterministic
+  lifecycle ownership, not an unavailable physical callback, is the regression
+  gate for the CoreAudio fixes.
+- No `timer_wheels` source was modified. Future coroutine integration must keep
+  physical callback retirement separate from logical cancellation and must not
+  retain or independently resume raw coroutine handles.
 
 ## Post-fetch cleanup receipts
 
-The native artifact snapshots were written before caller cleanup and therefore
-say `retained_pending_fetch`. Later endpoint lifecycle receipts record actual
-cleanup:
-
-- `/tmp/miniaudio-hardening-implementation/lifecycle-post-fetch-windows-ca92a4b.json`
-  (`aa88d25c2371ff97c8c650f235bdb3c937ca759eba08a9e7f9e17427b1798e0d`):
-  Windows staging/build removed, 50,998,127 file bytes recovered; exact source
-  worktrees retained.
-- `/tmp/miniaudio-hardening-implementation/lifecycle-post-fetch-mac-ca92a4b.json`
-  (`0653de7e3297c9d4bdbf4250c0972f4356b432f1d0084b5542a96dc05833a86d`):
-  macOS staging/build removed, 41,127,936 allocated bytes recovered; exact source
-  worktrees retained.
-
-The earlier fetched snapshots remain immutable historical evidence; these two
-post-fetch receipts substantiate the later cleanup action.
-
-## Future coroutine integration constraints
-
-No `timer_wheels` integration code was changed. A future bridge must use one
-generation-bound resume token per suspension, post completion to the owning
-loop before inline resumption when affinity is required, separate logical
-cancellation from physical callback retirement, keep retirement progress
-serviceable through shutdown, and idempotently release owned payloads for
-duplicate or late completion. Raw coroutine handles must not be retained or
-independently resumed.
+All fetched evidence was hash-verified before removing attempt-owned paths.
+For #484 attempt 1, Windows staging/build removal recovered 679,677,920 file
+bytes; attempt 2 recovered 463,045,218 file bytes. Clean exact source checkouts
+at `C:\codex-worker\repos\miniaudio-hardening-0b4727e` and
+`C:\codex-worker\repos\miniaudio-hardening-2d76179` were retained. The #1152
+owned staging/build roots are absent and its exact source checkout is retained;
+an earlier cleanup-reporting typo prevented a trustworthy recovered-byte count,
+which is recorded rather than guessed.
 
 ## Release gate
 
-Do not describe this implementation as complete until F01–F10 are fixed with
-focused regressions and F12's deterministic lifecycle coverage exists. F11 can
-remain explicitly unresolved only while real Steam Audio SDK validation is
-unavailable; do not claim the example fixed. #1152, #1155, #1157, and #484 may
-remain unresolved under the prompt's evidence gates, provided their limitations
-stay explicit.
+The original F01–F12 blockers are addressed. Release language must still keep
+#1152, the alleged #1155 UAF, owner-rejected #1157, #484 acoustic isolation,
+and the platform limits in the table explicit. A final Astra-max whole-series
+review and the repository's complete safe/practical checks remain required
+before calling the implementation handoff complete.

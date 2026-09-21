@@ -3,9 +3,9 @@
 ## Assessment
 
 - **Priority:** P1 Windows correctness
-- **Exact checkout:** suspect code present
-- **Native reproduction:** pending; a Windows capture endpoint was connected on
-  2026-09-20 but enumeration and exclusive-format support remain to be verified
+- **Exact checkout:** packet-accounting path instrumented at `6a83e67`
+- **Native reproduction:** not reproduced on the available USB condenser
+  microphone; the upstream report remains unresolved
 - **Reported setup:** Windows 11, exclusive capture, Realtek and M-Audio,
   s16/48 kHz/stereo
 
@@ -13,6 +13,30 @@ The reporter observes captured duration around 1.44 times wall-clock duration,
 duplicated periods, and repeated `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`.
 This is serious for recording, voice processing, and acoustic input, but the
 exact cause is not established from source inspection alone.
+
+## 2026-09-21 native result
+
+The connected endpoint was `Microphone (USB Condenser Microphone)`, ID
+`{0.0.1.00000000}.{9e87ea05-2f7d-4660-a61d-caf0b5c2d0e2}`. Twenty-seven
+bounded cases completed; 25 used callback-safe packet instrumentation. Across
+7,372 successful packets there were exactly 7,372 full releases on the same
+thread. No outstanding acquisition, cache-consumption mismatch,
+device-position regression, duplicate position/frame/hash tuple, trace drop,
+or miniaudio callback/read allocation was observed. Ordinary duration ratios
+were 0.99350–1.00458, not approximately 1.44.
+
+Shared f32/48 kHz/stereo, exclusive native s24/48 kHz/mono, and converted
+s16/48 kHz/stereo client input all initialized. Exclusive WAVs contain nonzero
+audio at about 0.03 peak. Shared-mode packets and WAVs were silent in the
+session-0 environment. Induced worker delay produced discontinuity flags but
+did not violate packet ownership or duplicate a packet. The ordinary reported
+pattern did not occur, so no production change was made.
+
+Evidence is in `/tmp/miniaudio-1152-20260921-1-evidence`; its artifact manifest
+SHA-256 is
+`bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`.
+`exclusive-reported-10.wav` and `exclusive-device-native-10.wav` are suitable
+for manual inspection.
 
 The capture loop at `miniaudio.h:24725` drains WASAPI packets, caches partial
 frames, calls `ReleaseBuffer` around line 24761, and obtains subsequent packets
@@ -75,19 +99,20 @@ A valid fix must maintain exact `GetBuffer`/`ReleaseBuffer` pairing and consume
 each packet once. Do not add sleeps, retries, blanket resets on every
 discontinuity, or deduplicate samples by content; legitimate audio can repeat.
 
-## Required Windows matrix
+## Remaining Windows matrix
 
 1. Shared and exclusive, capture-only and duplex.
 2. Native and converted formats; 10 ms and 30 ms requested periods plus the
    negotiated native periods.
-3. At least the reported Realtek and M-Audio classes, plus a virtual/loopback
-   device where available.
+3. The reported Realtek and M-Audio capture classes, plus a virtual/loopback
+   device where available. Only the USB condenser microphone has been tested.
 4. A known nonrepeating input signal with frame-index watermarking, verifying
    monotonic indices and exact duration.
 5. CPU load, delayed consumer, start/stop, device invalidation, and deliberate
    discontinuity.
-6. Instrumented debug build and normal optimized build, with no callback-side
-   dynamic allocation or blocking output.
+6. Longer/repeated campaigns, unplug/invalidation, and a positive acoustic or
+   frame-index watermark path. The current playback default is a Realtek
+   digital output with no established speaker-to-microphone route.
 
 Tests should assert frame positions/accounting, not merely compare audible
 output. A native reproduction is required before an implementation commit or a

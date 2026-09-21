@@ -3,90 +3,141 @@
 ## Assessment
 
 - **Priority:** P1 requested feature / platform correctness
-- **Exact checkout:** incomplete experimental path
-- **Local reproduction:** unavailable on Linux
-- **Platform:** Windows, modern process-loopback support
+- **Implementation:** `0b4727e` plus test correction `2d76179`
+- **Deterministic validation:** passed on native Windows MSVC
+- **Live activation:** passed on Windows build 26200
+- **Content isolation:** unresolved because the host's whole-system positive
+  control and every process capture were digital silence
 - **Security classification:** not a demonstrated memory-safety issue
 
-The public configuration contains process-loopback fields near
-`miniaudio.h:7147-7148`, but the WASAPI initialization path does not provide a
-verified desktop implementation. The issue remains open.
+The existing public fields were sufficient, so the implementation does not
+change public layout. A nonzero `wasapi.loopbackProcessID` now selects a
+dedicated desktop asynchronous activation path rather than sending the virtual
+process-loopback ID through `IMMDeviceEnumerator::GetDevice`.
 
-Historical discussion matters: the maintainer did test an implementation on
-Windows 11 in 2023 and received silence. “Never verified” should mean never
-verified working, not never tested.
+## Implemented behavior
 
-## Suspect architecture
-
-The path around `miniaudio.h:23382-23418` checks a nonzero process ID and builds
-process-loopback activation parameters, but backend activation diverges:
+The old desktop path built valid activation parameters but then tried to treat
+`VAD\Process_Loopback` as a physical endpoint. The implemented selection is:
 
 ```c
-if (processID != 0 && pDeviceID == NULL) {
-    /* Build AUDIOCLIENT_ACTIVATION_PARAMS for process loopback. */
-    ...
-}
-
-#if desktop_path
-    /* Existing endpoint/IMMDevice activation. */
-#else
-    /* ActivateAudioInterfaceAsync path. */
-#endif
-```
-
-Process loopback is endpoint-independent and uses modern asynchronous audio
-interface activation. Forcing the entire library into a UWP build mode is not
-an acceptable desktop fix because it changes enumeration, compatibility, and
-other backend behavior.
-
-## Potential implementation
-
-Keep the existing process-ID and include/exclude configuration, but select a
-dedicated activation path when process loopback is requested:
-
-```c
-if (config.processID != 0) {
-    if (!os_supports_process_loopback()) {
+if (deviceType == ma_device_type_loopback && processID != 0) {
+    if (explicitDeviceID != NULL) {
+        return MA_INVALID_DEVICE_CONFIG;
+    }
+    if (!os_supports_process_loopback() || activateAsync == NULL) {
         return MA_NOT_IMPLEMENTED;
     }
 
-    params.TargetProcessId = config.processID;
-    params.ProcessLoopbackMode = config.excludeProcessTree
+    params.TargetProcessId = processID;
+    params.ProcessLoopbackMode = exclude
         ? PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
         : PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
 
-    return activate_process_loopback_async(params, completionHandler);
+    return activate_audio_interface_async(
+        L"VAD\\Process_Loopback", params);
 }
 ```
 
-The completion handler needs stable backend-owned state, an initialization
-stage machine, cancellation/teardown coordination, and exact COM-threading
-rules. It must report unsupported OS/configuration explicitly rather than
-silently falling back to whole-system capture.
+Process loopback is endpoint-independent and shared-mode only. Combining a
+nonzero process ID with an explicit capture device or exclusive mode is rejected
+instead of silently becoming ordinary loopback. Unsupported OS/symbol cases
+return `MA_NOT_IMPLEMENTED`; activation failure is returned directly. There is
+no PID-zero retry.
 
-This feature should build on the safe WASAPI control/lifecycle executor
-proposed for #1149. It should not introduce a second independent worker or
-resume a coroutine from the activation callback.
+Desktop contexts load `ActivateAudioInterfaceAsync` opportunistically, so an
+older desktop still has ordinary WASAPI. `RtlGetVersion` performs the process
+feature gate without manifest-dependent version reporting. The implementation
+uses the review's Windows 10 build 20348 minimum.
 
-## Required Windows tests
+## Async lifetime hardening
 
-1. Supported OS build (Microsoft's sample specifies build 20348+) and an older
-   unsupported build/compatibility check.
-2. Two independent processes producing distinct watermarked tones.
-3. Include target process tree, exclude target process tree, and child process
-   creation after capture starts.
-4. Target with no active streams: documented silence, not random endpoint
-   capture.
-5. Target exit/restart, invalid PID, access restrictions, activation failure,
-   stop/cancel during activation, and device changes.
-6. Exact frame content/duration and no capture from disallowed processes.
+The prior UWP helper kept its completion object on the stack and waited
+forever. That cannot safely support a bounded failure path: a late COM callback
+would access dead stack storage. The shared desktop/UWP helper now allocates a
+COM-reference-counted completion object:
 
-## API/ABI and integration impact
+```c
+result = wait_for_activation(handler, 30000);
+if (result != MA_SUCCESS) {
+    operation->Release();
+    handler->Release();       /* Callback's COM reference keeps it alive. */
+    return result;
+}
+```
 
-The existing fields appear sufficient, so no public API expansion should be
-required. Internal asynchronous state should use a sidecar if necessary to
-preserve public layout. Document OS requirements and return codes.
+The final `Release` closes the event and frees the handler. Activation-result
+and query-interface failures release every interface they obtained. The helper
+also fixes the earlier UWP error path that could free an explicit device-ID
+string it did not allocate or leak an activated interface after failed
+`QueryInterface`.
 
-This feature belongs after parser/resource-manager and #1149 correctness work.
-It should land as a separate `feat(wasapi)` commit rather than being described
-as part of a security fix.
+Public `ma_device_init()` remains synchronous; there is no initialized public
+device object to cancel while activation is pending. The bounded timeout and
+late-callback test prove safe physical retirement, not a public cancellation
+API.
+
+Process mode also skips endpoint property access, endpoint rerouting, hardware
+offload probing, and IAudioClient3 initialization. It publishes a virtual name
+and ID and uses the normal capture service after shared `IAudioClient`
+initialization.
+
+## Deterministic Windows tests
+
+`hardening_wasapi_process_loopback.c` covers:
+
+1. Include/exclude activation type, target PID, and virtual interface path.
+2. Explicit endpoint, exclusive mode, unsupported OS, and missing symbol.
+3. Activation-call, activation-result, and interface-query failures with exact
+   output/ref/allocation cleanup.
+4. Timeout followed by a simulated late callback; one allocation must remain
+   live until the late COM reference releases it.
+5. Proof that process requests do not call the ordinary endpoint activator.
+
+At exact commit `2d76179`, native MSVC Debug passed the complete configured
+suite 15/15. A separate `MINIAUDIO_FORCE_C89=ON` WASAPI run passed 2/2; MSVC
+does not enforce strict C89, so this is a configuration check rather than a
+language-conformance claim.
+
+## Live watermark attempt
+
+Evidence is in `/tmp/miniaudio-0484-2d76179-evidence`; artifact manifest
+SHA-256 is
+`ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`.
+The host was Windows 10.0.26200.9457 and exported
+`ActivateAudioInterfaceAsync`.
+
+An evidence-only probe launched independent target and sibling render
+processes. The target created a child only after capture reached 48,000 frames.
+Named events and captured frame counts—not arbitrary sleeps—synchronized the
+matrix. Producer callback reference files contain their assigned tones:
+
+- target: 697 + 941 Hz;
+- sibling: 1201 + 1601 Hz; and
+- late child: 2003 + 2503 Hz.
+
+Whole-system controls, include, exclude, no-stream target, nonexistent PID,
+target exit, and explicit producer endpoint all initialized. Ten populated
+captures each received non-null buffers for exactly 288,000 frames (six
+seconds). Every captured sample was zero. The whole-system positive controls
+were also zero even though producer callback references measured approximately
+0.08 amplitude.
+
+This means activation, lifecycle, frame delivery, target exit, and bounded
+teardown were exercised, but audio separation was not. Declaring target
+rejection from universal silence would be a vacuous test. A future run needs a
+Windows environment where the whole-system control first captures a nonzero
+watermark. The current host has only one render endpoint, `Realtek Digital
+Output (Realtek(R) Audio)`, so cross-endpoint/default-switch evidence is also
+unavailable.
+
+The saved `live-*.wav` files permit manual inspection, but they are bitwise
+silent; the `.reference.wav` files are producer callback data, not loopback
+captures.
+
+## Remaining acceptance boundary
+
+The source feature and deterministic lifetime/configuration contract are
+implemented. The issue remains unresolved only for live include/exclude content
+isolation, multiple-endpoint changes, and any future decision to expose public
+activation cancellation. No whole-system fallback or ABI change is present.

@@ -4,8 +4,10 @@
 
 - **Priority:** P1 investigation gate
 - **Exact checkout:** optional wrapper is present; alleged failure unconfirmed
-- **Local reproduction:** unavailable
-- **Build coverage:** `opusfile` was not installed/found
+- **Local reproduction:** the alleged UAF was not reproduced under a valid
+  owner-mediated sequence
+- **Build coverage:** hash-pinned Opus and Vorbis configurations now pass
+  normal, C89-option, ASan/UBSan, and TSan tests
 - **Report quality:** tested-version placeholder, no public PoC or full stack
 
 The issue claims a 168-byte use-after-free read involving the optional Opus
@@ -15,6 +17,30 @@ public input. This is not enough evidence to choose a correct patch.
 
 The report remains actionable as an audit/test requirement because decoder
 callback and resource-manager lifetimes are security-sensitive.
+
+## 2026-09-21 pinned investigation
+
+Commit `9d7e8a3` adds opt-in FetchContent support and visible `REQUIRE` modes. The
+ordinary build remains offline. The tested inputs are:
+
+- libogg 1.3.6;
+- libopus 1.6.1;
+- opusfile 0.12; and
+- libvorbis commit `1b75110b5a2754ba1931d82dd83cb822b266a21d`.
+
+The matrix covers valid, malformed, truncated, chained, seek/EOF and
+nonseekable inputs; allocator, VFS, callback, and open failures; callback
+userdata and close counts; and resource-manager cancel-before-start and
+cancel-during-read with deterministic events. No sanitizer established the
+reported UAF under the supported owner-mediated lifecycle. Concurrent public
+read and uninit remains outside the assumed contract.
+
+Stronger tests did find two different callback-contract defects. Both wrappers
+advertised seek independently of tell. Vorbis could then call a null tell
+function and crash at address zero; Opus rejected the same valid nonseekable
+source as `MA_INVALID_FILE`. The fix supplies seek and tell only as a pair, or
+supplies neither. These bugs are fixed and tested, but must not be mislabeled
+as the alleged UAF.
 
 ## Relevant code
 
@@ -98,5 +124,7 @@ ownership.
 ## Disposition
 
 Do not claim #1155 fixed or affected as a confirmed UAF. Record it as unresolved
-pending a reproducible valid call sequence. The current baseline CMake pass did
-not compile this decoder and supplies no evidence about it.
+pending a reproducible valid call sequence. The optional decoder integration
+and the two independently reproduced nonseekable-source bugs are fixed; that
+evidence narrows the remaining report but does not establish its ownership
+claim.
