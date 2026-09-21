@@ -1,185 +1,145 @@
-# Hardening implementation: remaining work and validation limits
+# Hardening implementation: unresolved work and validation limits
 
 Status date: 2026-09-21
-Implementation reviewed through: `2d7617964c567982366b0c7408e26f6a3d46a0de`
+Implementation reconciled through: `f07c3f0`
 
 This is the authoritative remaining-work record for
-`IMPLEMENTATION-PROMPT.md`. A platform or hardware limitation is never counted
-as a pass. Conversely, an issue is not kept open after deterministic tests and
-the required source invariant establish the fix. The original Astra-max review
-findings are retained below with their disposition so the history is auditable.
+`IMPLEMENTATION-PROMPT.md`. A hardware, toolchain, or acoustic limitation is
+not counted as a pass. Conversely, an issue is not kept open after a
+deterministic regression and the required source invariant establish the fix.
 
 ## Current unresolved table
 
 | Item | Current status | Evidence obtained | What is still missing / why it remains open |
 |---|---|---|---|
-| #1152 WASAPI exclusive-capture duplication | **Unresolved; not reproduced on the available USB microphone** | 27 bounded Windows runs; 25 packet-instrumented; 7,372 successful `GetBuffer` packets paired with 7,372 full releases; duration/QPC ratios 0.99350–1.00458; no duplicate packet tuple or ~1.44× duration | Only `Microphone (USB Condenser Microphone)` was available. Shared input was silent, no acoustic/frame-index watermark path existed, and the reported Realtek/M-Audio devices were not tested. No production patch is justified without reproduction. |
-| #1155 alleged optional-libopus UAF | **Unresolved as an alleged UAF; no valid owner-mediated UAF reproduced** | Hash-pinned Opus/Vorbis dependencies; valid, malformed, truncated, chained, seek/EOF, nonseekable, allocator/VFS/open failure, callback lifetime, and deterministic resource-manager cancellation tests under normal, C89-option, ASan/UBSan, and TSan builds | The public report still lacks a valid call sequence and sanitizer stack. Concurrent public read/uninit is not assumed supported. Two real nonseekable callback-contract bugs were fixed, but they are not evidence of the alleged UAF. |
-| #1157 Windows GCC/MinGW LTO diagnostics | **Owner-rejected / outside accepted deployment scope** | Native GCC 16.2.1 C/C++ LTO checks outside Windows did not reproduce the warning | The owner explicitly will not deploy or run GCC/MinGW on Windows. This is documented scope rejection, not a pass or fix. Reopening requires a new owner decision or an external exact compiler/triple/flags diagnostic and reproducer. |
-| #484 process-specific WASAPI content isolation | **Implemented; acoustic include/exclude result unresolved on this host** | Dedicated desktop `ActivateAudioInterfaceAsync` path; OS/symbol/config gates; heap-owned late-callback-safe completion state; deterministic include/exclude/failure/timeout tests; Windows Debug 15/15 and C89-option WASAPI 2/2; live initialization and ten 288,000-frame captures succeeded | Every whole-system positive control and process capture was bitwise silent even though producer callback references contained the intended tones. Without a nonzero whole-system control, silence cannot prove include/exclude filtering. Multiple-endpoint switching and a public cancel API are also unavailable; device initialization is synchronous. |
-| CoreAudio real-device behavior | **Source/lifecycle fixes complete; hardware exercise limited** | Transactional deterministic lifecycle/failure tests and native macOS builds passed | The isolated macOS account had no usable playback callbacks and capture permission was denied. This limits hardware confirmation; it does not invalidate the deterministic ownership fixes. |
-| 32-bit and additional architecture coverage | **Validation limitation** | Linux x86_64, Windows x64, and macOS arm64 ABI measurements matched their baselines; scalar/SSE2 and available sanitizer configurations passed | A real 32-bit libc/toolchain build and every architecture-specific DSP implementation were not available. No ABI change was made, but this is not proof for every compiler and packing mode. |
-| Steam Audio checkout with the host's default C++14 mode | **External dependency/toolchain limitation; miniaudio integration validated with a C++17 build override** | A fresh `phonon` build from tracked-clean commit `902e09545ae6bfd06768bcd38980b009317641ac`, followed by the miniaudio hardening and TSan tests, passed | Steam Audio's bundled FlatBuffers selects the host's Abseil `string_view` while Steam Audio requests C++14; current Abseil requires C++17. The external checkout needs its own permanent dependency/standard fix. No Steam Audio source was changed here. |
+| #1152 WASAPI exclusive-capture duplication | **Unresolved; not reproduced on the available USB microphone** | 27 bounded Windows runs, 25 packet-instrumented; 7,372 successful `GetBuffer` calls paired with 7,372 full releases; duration/QPC ratios 0.99350-1.00458; no duplicate packet tuple or approximately 1.44x duration. A later five-second shared/exclusive smoke test also initialized and shut down cleanly; exclusive input was nonzero. | Only `Microphone (USB Condenser Microphone)` was available. Shared input was silent in session 0, no acoustic/frame-index watermark reached this endpoint, and the reported Realtek/M-Audio devices were not tested. Changing the packet-draining loop without reproducing the fault would be speculative. |
+| #1155 alleged optional-libopus UAF | **Unresolved as the alleged UAF; no valid owner-mediated UAF reproduced** | Pinned Opus/Vorbis dependencies; valid, malformed, truncated, chained, seek/EOF, nonseekable, allocator/VFS/open failure, callback-lifetime, and deterministic resource-manager cancellation tests under normal, C89-option, ASan/UBSan, and TSan builds. Three real callback-contract defects were fixed separately. | The report still lacks a supported call sequence and sanitizer stack. Concurrent public read/uninit is not assumed valid. The seek/tell and EOF fixes are not evidence for the alleged ownership UAF. |
+| #1157 Windows GCC/MinGW LTO diagnostics | **Owner-rejected / outside the accepted deployment scope** | Native Linux GCC 16.2.1 C/C++ LTO checks did not reproduce the diagnostic. | The owner explicitly will not deploy or run GCC/MinGW on Windows. No MinGW toolchain was provisioned or executed. This is a documented scope rejection, not a pass or a fix. Reopening requires a new owner decision or an external exact compiler/triple/flags reproducer. |
+| #484 process-specific WASAPI content isolation | **Implemented; acoustic include/exclude result unresolved on this host** | Desktop process-loopback activation, OS/symbol/config gates, timeout-safe completion ownership, public automatic-context error preservation, virtual metadata, and deterministic include/exclude/failure/timeout tests pass. Ten native six-second captures initialized and returned 288,000 frames each. | Whole-system controls and every process capture were bitwise silent, while producer reference WAVs contained the intended watermarks. Silence cannot prove filtering without a nonzero loopback control. There is also no public object to cancel while synchronous `ma_device_init()` is still activating. |
+| CoreAudio real-device behavior | **Deterministic lifecycle and actual worker dispatch fixed; physical I/O remains unverified** | Transactional reroute/failure ownership tests, a barrier-driven pending-reroute dispatch through the real control worker, native Apple Clang Debug/C89/ASan/UBSan/TSan runs, and clean teardown all pass. | The isolated macOS account had no usable playback callback and capture permission was denied. Real playback/capture, hotplug, and duplex device-change behavior therefore remain hardware/permission limitations. |
+| #1153 original audible spatialization report | **Related gain defects fixed; original audible scenario not reproduced** | Independent scalar/SSE2 mathematical-oracle tests cover split ramps, target changes, tails, guards, in/out-of-place operation, null advancement, and 1/2/6/8/33 channels. Steam Audio snapshot synchronization passes with the real SDK. | The report's Windows listener-rotation/spatialization symptom was not reproduced acoustically. The deterministic defects are closed, but they do not prove that every cause of the original audible report is gone. |
+| 32-bit and additional architecture coverage | **Validation limitation** | Linux x86_64, Windows x64, and macOS arm64 ABI samples matched their baselines; scalar/SSE2 and available sanitizer configurations pass. Checked arithmetic covers the hostile metadata paths. | No usable 32-bit libc/toolchain was available, and not every architecture-specific DSP implementation or compiler packing mode was exercised. No public layout change was made, but this is not universal ABI proof. |
+| Steam Audio checkout with its default C++14 mode | **External dependency/toolchain limitation; miniaudio integration validated with a C++17 override** | A fresh `phonon` build from tracked commit `902e09545ae6bfd06768bcd38980b009317641ac`, followed by miniaudio fixed/partial/tail, C89-option, ASan/UBSan, and TSan tests, passed. | Steam Audio's bundled FlatBuffers selects the host Abseil `string_view`, while Steam Audio requests C++14 and current Abseil requires C++17. The external checkout needs its own dependency/standard fix. No Steam Audio source was changed by this task. |
 
-## Disposition of the independent Astra-max findings
+## Disposition of the final independent-review findings
 
-Batch Codex job `cde2b7f425041dd3` reviewed the earlier implementation through
-`ca92a4b` with `gpt-6-astra` at `max` reasoning. It reported 0 critical, 6
-high, and 7 medium findings. The following scoped commits address every source
-or mandatory-test finding from that review:
+Batch Codex job `db5bbdbcca10ee51` used `gpt-6-astra` to review the complete
+series through `aa84825`. It found no critical issue, but identified additional
+source and proof gaps. The following commits address them without weakening a
+test:
 
-| Finding | Disposition | Commit and proof focus |
+| Finding | Disposition | Commit / proof |
 |---|---|---|
-| F01 SMPL count/read disagreement | **Fixed** | `1c1efd5`: acceptance is separate from bytes consumed; materialization is capacity checked; mixed valid/invalid metadata and short reads are tested. |
-| F02 WASAPI reroute publishes before converter setup | **Fixed** | `fcc0270`: candidate clients and generic post-init state are completed before publication; injected failures preserve the old state or an empty destroyable state. |
-| F03 failed synchronous load frees a shared node | **Fixed** | `b25511c`: failure is published and only the creator reference is retired through the locked unacquire path; a barrier test holds a second acquisition. |
-| F04 MP3 declared length controls allocation | **Fixed** | `a4d0966`: Xing/Info length is a hint; the actual stream is scanned before exposing an allocation length; resource-manager refusing-allocation coverage is included. |
-| F05 failed CoreAudio reroute leaves stale ownership | **Fixed** | `90e3bad`: staged replacement/retirement and failure teardown have exact ownership tests. |
-| F06 failed CoreAudio duplex init remains tracked | **Fixed** | `90e3bad`: tracking is published only for complete initialization and partial failures untrack deterministically. |
-| F07 valid RF64 metadata regression | **Fixed** | `1c1efd5`: `ds64` resolves the RF64 sentinel before bounds checks; writer/metadata-reader round trips pass. |
-| F08 WASAPI internal reroute emits public stop/start | **Fixed** | `fcc0270`: internal notification suppression and ordering tests distinguish reroute lifecycle from public state requests. |
-| F09 WAIT_INIT ignores notification failure | **Fixed** | `5ddd7c0`: notification/fence stages are checked and unwound exactly; failure injection covers signal/wait/uninit counts. |
-| F10 failed decoded loads leak decoder/supply | **Fixed** | `3f2a48c`: staged cleanup covers length-query, PAGE-post, decode, VFS, and allocation failures. |
-| F11 Steam Audio direction data race | **Fixed** | `6a83e67`: bounded block-boundary snapshots replace ordinary cross-thread floats; Steam Audio 4.8.1 from `../steam-audio` passed fixed/partial/tail and sanitizer/TSan tests. |
-| F12 incomplete WASAPI lifecycle proof | **Fixed** | `fcc0270`: expanded fake-interface/barrier coverage exercises coalescing, full queues, candidate/post-init failures, public-state races, quiescence, worker join, and exact release accounting. |
+| `CORE-001`: buffer/node completion preceded physical job retirement | **Fixed** | `3dd73e1`: buffer load/free and node load/page jobs advance their execution pointer before publishing completion; deterministic owner teardown checks the exact ordering. |
+| `CORE-002` and `CORE-005`: nested WAV LIST records bypassed slot capacity; empty trailing INFO was rejected | **Fixed** | `fb932dd`: capacity is checked immediately before each emitted record, including LIST children; empty containers consume no slot. Undercount and valid trailing-empty tests pass. |
+| `CORE-003` / `BR-003`: notification `Release` exposed quiescence before its final sidecar access | **Fixed** | `66e188f`: an atomic retirement state counts active `Release` calls separately from COM references; teardown waits through the final sidecar access. A barrier stops `Release` in the formerly unsafe interval. |
+| `CORE-004` / `BR-004`: late WASAPI activation retained a context-scoped allocator | **Fixed** | `66e188f`: detached activation state uses `HeapAlloc`/`HeapFree`, independent of context allocator lifetime. Late completion after allocator retirement is tested. |
+| `CORE-006`: public callback decoders falsely advertised tell support | **Fixed** | `aac73b2`: the bridge passes a tell adapter only when the caller supplied tell capability; public Opus/Vorbis callback tests pass. `bed44d0` applies the same rule to built-in MP3 and fixes the native null-call crash found by the full Windows suite. |
+| `CORE-007`: nonseekable Opus mapped normal `MA_AT_END` to I/O error | **Fixed** | `aac73b2`: zero-byte `MA_AT_END` becomes opusfile EOF; a full nonseekable drain must finish as `MA_AT_END`. |
+| `CORE-008` / `R03`: #1128 test lacked semantic, cleanup, path, and optional-field coverage | **Fixed** | `6f98e1c` forces MP3 selection and checks format, frames, and allocation cleanup. `f07c3f0` adds memory/file/callback paths, every flag combination, exact TOC/LAME boundaries, valid Xing/Info/LAME/tag-free controls, and commits tag state only after complete validation. |
+| `R04`: EOF coverage omitted boundary, looping, resampling, and notification timing | **Fixed** | `b55d1fe`: exact sample/frame and notification-order tests cover direct, split, resampled, cache-boundary, and loop-transition cases. |
+| `R05`: CoreAudio's real worker dispatch branch was untested | **Fixed** | `a39d5de`: a deterministic barrier publishes reroute work to the actual control worker and waits for acknowledgement. `0ecda7d` makes its allocator telemetry atomic; native TSan then passes. |
+| `R06` / `BR-006`: automatic context selection overwrote process-loopback errors | **Fixed** | `66e188f`: process-loopback stops fallback after WASAPI; top-level `ma_device_init(NULL, ...)` tests preserve `MA_INVALID_DEVICE_CONFIG` and `MA_NOT_IMPLEMENTED` semantics. |
+| `BR-001`: desktop `StringFromIID` introduced an Ole32 link dependency | **Fixed** | `66e188f`: fixed interface strings replace the call. Native standalone C/C++ implementation link checks require no explicit libraries and contain no `StringFromIID`/Ole32 import. |
+| `BR-002`: stale UWP activation-helper identifier | **Fixed** | `66e188f`: the UWP branch calls the current async helper; Windows SDK C and C++ UWP-family object builds pass. Packaging/runtime deployment was not attempted. |
+| `BR-005`: generic pre-worker init rollback could strand WASAPI state | **Fixed** | `66e188f`: a dedicated pre-worker rollback invokes backend teardown and releases staged generic resources without joining a worker that was never created. |
+| `BR-007`: initial WASAPI client failure released COM services on the caller thread | **Fixed** | `66e188f`: initial render/capture service cleanup is dispatched through the WASAPI command worker; injected event failure checks exact release counts and thread identities. |
+| `BR-008`: process-loopback metadata fell back to a physical endpoint | **Fixed** | `66e188f`: device-scoped info returns the virtual ID/name and negotiated native format without endpoint enumeration. |
 
-The follow-up also confirmed and fixed a separate resource-manager retirement
-race in `ee9b745`: a stream-load job previously signalled initialization before
-its final `executionPointer` write. The waiter could destroy/zero the stream,
-after which the worker wrote into retired storage. The job now advances its
-execution pointer before publishing completion; deterministic notification
-interleaving and TSan pass without adding a wait that would deadlock a manual
-job pump.
+The earlier Astra review findings F01-F12 remain fixed by `1c1efd5`,
+`b25511c`, `3f2a48c`, `5ddd7c0`, `a4d0966`, `fcc0270`, `90e3bad`, and
+`6a83e67`. Stream job retirement was separately fixed by `ee9b745`; the
+remaining buffer/node variants are covered by `3dd73e1` above.
 
-## New callback-contract defects found during optional-codec validation
+## Why the later fixes matter
 
-The #1155 investigation did not reproduce its alleged UAF, but stronger tests
-found two independent defects in the optional wrappers. A callback source may
-be nonseekable only when the wrapper advertises that consistently:
+Completion and physical retirement are different events. The safe ordering is:
 
 ```c
-/* Wrong: a seek callback without tell advertises an unusable partial pair. */
-callbacks.seek = onSeek;
-callbacks.tell = NULL;
+/* The worker performs its final object access first. */
+ma_job_set_execution_pointer(...);
 
-/* Fixed: supply both, or advertise neither. */
-if (onSeek != NULL && onTell != NULL) {
-    callbacks.seek = wrapper_seek;
-    callbacks.tell = wrapper_tell;
-}
+/* Only then may a waiter observe completion and destroy the owner. */
+ma_async_notification_signal(...);
 ```
 
-Vorbis could call a null tell function and crash at address zero. Opus rejected
-the same valid nonseekable source as `MA_INVALID_FILE`. Commit `9d7e8a3` makes
-seek/tell an atomic capability pair in both wrappers and adds independently
-selectable dependency modes:
-
-- `MINIAUDIO_FETCH_LIBVORBIS` / `MINIAUDIO_FETCH_LIBOPUS` fetch hash-pinned
-  sources;
-- `MINIAUDIO_REQUIRE_LIBVORBIS` / `MINIAUDIO_REQUIRE_LIBOPUS` fail configure
-  visibly when a requested development dependency is absent;
-- the ordinary configuration remains offline and does not download anything.
-
-Pinned inputs are libogg 1.3.6, libopus 1.6.1, opusfile 0.12, and libvorbis
-commit `1b75110b5a2754ba1931d82dd83cb822b266a21d`. Released libvorbis 1.3.7 was
-not selected because UBSan found a signed-shift defect and it predates the
-upstream `ov_pcm_page_seek` security fix.
-
-## #1152 evidence and exact limitation
-
-Windows evidence is in `/tmp/miniaudio-1152-20260921-1-evidence`. Its artifact
-manifest SHA-256 is
-`bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`.
-
-The tested endpoint was:
-
-```text
-Microphone (USB Condenser Microphone)
-{0.0.1.00000000}.{9e87ea05-2f7d-4660-a61d-caf0b5c2d0e2}
-```
-
-Shared f32/48 kHz/stereo, exclusive native s24/48 kHz/mono, and miniaudio's
-reported s16/48 kHz/stereo conversion all initialized. Exclusive WAVs contained
-nonzero input around 0.03 peak. Shared WAVs were silent in the worker session.
-The packet accounting was internally exact, including induced discontinuity
-stress; the reported ordinary repeated-discontinuity/duplicated-period/~1.44×
-pattern did not occur. Useful manual-listening files include
-`exclusive-reported-10.wav` and `exclusive-device-native-10.wav`.
-
-This closes the requested reproduction attempt, not the upstream report. It
-would be wrong to change the packet-draining loop based only on the report.
-
-## #484 implementation and evidence boundary
-
-Commits `0b4727e` and `2d76179` implement and validate the desktop path without
-changing public layout:
+A callback capability must also remain absent all the way through adapters:
 
 ```c
-if (processID != 0) {
-    if (explicitDeviceID != NULL) return MA_INVALID_DEVICE_CONFIG;
-    if (!supportedOS || activateAsync == NULL) return MA_NOT_IMPLEMENTED;
-    return activate_process_loopback_async(L"VAD\\Process_Loopback", params);
-}
+backend_on_init(
+    read_adapter,
+    seek_adapter,
+    decoder->onTell != NULL ? tell_adapter : NULL,
+    decoder);
 ```
 
-The async completion handler is heap-owned and COM-reference-counted. A
-30-second bounded wait may return `MA_TIMEOUT`; a later callback retains valid
-state and performs the final release. Query-interface and activation failures
-release every obtained interface. Process mode skips endpoint properties,
-hardware offload, IAudioClient3, and endpoint rerouting, and it never retries
-with PID zero.
+Finally, optional MP3 metadata is parsed into locals. Declared frame count,
+delay, padding, and Xing/Info classification are published only after every
+flag-selected field fits inside both the decoded frame and initialized bytes.
+An incomplete later field therefore cannot leave a partially trusted length.
 
-Native evidence is in `/tmp/miniaudio-0484-2d76179-evidence`; artifact manifest
-SHA-256 is
-`ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`.
-Windows 10.0.26200.9457 exposed `ActivateAudioInterfaceAsync`. The following
-all initialized and ran through the exact public API: whole-system controls,
-include, exclude, target child created after capture start, no-stream target,
-nonexistent PID, and target exit while capture continued. Ten captures each
-contained exactly 288,000 frames (six seconds), but all samples were zero. The
-producer reference WAVs contain the requested watermarks. Therefore the
-content filter remains unverified until a Windows audio environment produces a
-nonzero whole-system loopback control.
+## Validation matrix through `f07c3f0`
 
-The API has no public object to cancel while synchronous `ma_device_init()` is
-still running. The deterministic timeout/late-callback test proves safe
-retirement, not user-visible cancel-during-activation semantics.
+| Environment | Result | Scope / qualification |
+|---|---|---|
+| Linux GCC 16.2.1 Debug | **13/13 pass** | Complete ordinary registered suite. |
+| Linux GCC 16.2.1 Release | **13/13 pass** | Complete ordinary registered suite. |
+| Linux GCC strict C89 option | **12/12 pass** | C++ test is intentionally not registered in C89 mode. |
+| Linux GCC Release + LTO + warnings-as-errors | **13/13 pass** | Complete ordinary registered suite. This is not Windows MinGW validation. |
+| Linux Clang 22.1.8 C90 + C++23 + warnings-as-errors | **13/13 pass** | Complete ordinary registered suite. |
+| Forced C++23 implementation build | **3/3 focused pass** | MP3, resource-manager, and EOF hardening targets plus the library. |
+| Pinned Opus/Vorbis Debug | **15/15 pass** | libogg 1.3.6, libopus 1.6.1, opusfile 0.12, libvorbis commit `1b75110b...`. |
+| Pinned Opus/Vorbis C89 option | **14/14 pass** | C++ test not registered. |
+| ASan/UBSan | **7/7 focused pass** | WAV, WAV metadata, resource manager, MP3, EOF, Opus, and Vorbis. |
+| TSan | **4/4 focused pass** | Resource manager, generic device rollback, Opus, and Vorbis. |
+| Steam Audio real SDK | **pass in normal, C89-option, ASan/UBSan, and TSan** | Uses the C++17 validation build described in the unresolved table. |
+| macOS arm64 Apple Clang 21.0.0 | **CoreAudio focused pass in Debug, C89, ASan/UBSan, and follow-up TSan** | Deterministic lifecycle and actual worker dispatch; no physical I/O claim. Evidence manifests `86cd93b...` and `7edb6fc...`. |
+| Windows x64 MSVC 19.51 / SDK 10.0.26100.0 | **WASAPI 3/3, lifecycle 100/100, UWP C/C++ objects, direct-link C/C++, and microphone shared/exclusive smoke pass at `66e188f`; full 15/15 pass at `bed44d0`** | The first broad run exposed the MP3 null-tell crash, which `bed44d0` fixed. Shared microphone data was silent; exclusive data was nonzero. Evidence manifests `6523c24...` and `7d57c796...`. A final exact-HEAD native pass is still required after the last MP3 matrix commit and final review. |
 
-## Other validation limits
+No test was skipped, retried, weakened, or given a wider semantic tolerance.
+The Windows Debug generation test's original 30-second external bound was
+retained as a failure; the same unmodified test completed in 36.76-40.55
+seconds under a documented 90-second per-test bound.
 
-- The MSVC `MINIAUDIO_FORCE_C89=ON` configuration passes but CMake explicitly
-  notes that MSVC cannot enforce C89. Strict C89 is covered on compilers that
-  support the language mode; the Windows run is a configuration check only.
-- Optional codec tests are independently selectable so one installed codec
-  cannot conceal the other's absence. Ordinary builds remain download-free.
-- A fresh Steam Audio build used C++17 through a CMake compiler-rule override
-  because its C++14 FlatBuffers snapshot detects a host Abseil version that no
-  longer supports C++14. This was a validation-only workaround in `/tmp`; the
-  tracked `../steam-audio` source was not modified.
-- The callback and packet probes cover miniaudio allocation hooks, not every
-  allocation a Windows driver or COM implementation might perform internally.
-- The macOS real-device limitation remains recorded above; deterministic
-  lifecycle ownership, not an unavailable physical callback, is the regression
-  gate for the CoreAudio fixes.
-- No `timer_wheels` source was modified. Future coroutine integration must keep
-  physical callback retirement separate from logical cancellation and must not
-  retain or independently resume raw coroutine handles.
+## Audio evidence available for manual inspection
 
-## Post-fetch cleanup receipts
+- #1152 exclusive microphone:
+  `/tmp/miniaudio-1152-20260921-1-evidence/exclusive-reported-10.wav`
+  and `exclusive-device-native-10.wav` contain nonzero USB microphone input.
+- Latest five-second microphone smoke:
+  `/tmp/miniaudio-wasapi-adfaebc4-evidence/microphone-exclusive.wav` is
+  nonzero; `microphone-shared.wav` is valid but silent.
+- #484 process-loopback captures and their watermarked producer references are
+  under `/tmp/miniaudio-0484-2d76179-evidence`. The `live-*.wav` capture files
+  are silent; the corresponding `*.reference.wav` files contain the tones.
 
-All fetched evidence was hash-verified before removing attempt-owned paths.
-For #484 attempt 1, Windows staging/build removal recovered 679,677,920 file
-bytes; attempt 2 recovered 463,045,218 file bytes. Clean exact source checkouts
-at `C:\codex-worker\repos\miniaudio-hardening-0b4727e` and
-`C:\codex-worker\repos\miniaudio-hardening-2d76179` were retained. The #1152
-owned staging/build roots are absent and its exact source checkout is retained;
-an earlier cleanup-reporting typo prevented a trustworthy recovered-byte count,
-which is recorded rather than guessed.
+## Evidence and lifecycle status
 
-## Release gate
+- #1152 evidence manifest: `bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`.
+- #484 evidence manifest: `ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`.
+- CoreAudio dispatch evidence manifests:
+  `86cd93b00a1dd46ab84e4778ab23aca872ebd0fdb049ea8a0c360da3ebfe4923`
+  and `7edb6fc6551cd53af8c270b2c844f6729fb2a170247869eb47e8da540ab4df26`.
+- WASAPI evidence manifests:
+  `6523c24feb934718efdd965ff2fac2e833a7f990c11e1278f4fc7baae91f450e`
+  and `7d57c79648db7d116ee62d368269249223bd8860a44cee2e426dc023dd62356d`.
+- The CoreAudio attempt-owned workspace was removed after evidence retrieval.
+  The current Windows staging/build roots remain retained only for the
+  authorized final exact-HEAD continuation; the clean source checkout is
+  preserved.
 
-The original F01–F12 blockers are addressed. Release language must still keep
-#1152, the alleged #1155 UAF, owner-rejected #1157, #484 acoustic isolation,
-and the platform limits in the table explicit. A final Astra-max whole-series
-review and the repository's complete safe/practical checks remain required
-before calling the implementation handoff complete.
+No `timer_wheels` source was modified. Future coroutine integration must keep
+logical cancellation separate from physical callback retirement, post
+affinity-bound completion before inline resume, retain one generation-bound
+resume token per suspension, and never retain or independently resume a raw
+coroutine handle.
+
+## Remaining release gate
+
+The locally confirmed implementation defects and the later independent-review
+findings above are fixed. Before final handoff, continue the three Astra-max
+review conversations against the current series, resolve any evidence-backed
+finding, run final exact-HEAD Windows/macOS validation justified by subsequent
+changes, fetch and verify evidence, and close the retained Windows lifecycle
+ledger. Do not convert the unresolved table's hardware, acoustic, owner-scope,
+or external-dependency limits into passes.
