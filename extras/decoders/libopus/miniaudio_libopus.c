@@ -52,9 +52,13 @@ static int ma_libopus_of_callback__read(void* pUserData, unsigned char* pBufferO
 {
     ma_libopus* pOpus = (ma_libopus*)pUserData;
     ma_result result;
-    size_t bytesRead;
+    size_t bytesRead = 0;
 
     result = pOpus->onRead(pOpus->pReadSeekTellUserData, (void*)pBufferOut, bytesToRead, &bytesRead);
+
+    if (result == MA_AT_END) {
+        return (int)bytesRead;
+    }
 
     if (result != MA_SUCCESS) {
         return -1;

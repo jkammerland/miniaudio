@@ -88,6 +88,16 @@ static ma_result hardening_vorbis_seek(void* pUserData, ma_int64 offset, ma_seek
     return MA_SUCCESS;
 }
 
+static ma_result hardening_vorbis_decoder_read(ma_decoder* pDecoder, void* pBufferOut, size_t bytesToRead, size_t* pBytesRead)
+{
+    return hardening_vorbis_read(pDecoder->pUserData, pBufferOut, bytesToRead, pBytesRead);
+}
+
+static ma_result hardening_vorbis_decoder_seek(ma_decoder* pDecoder, ma_int64 offset, ma_seek_origin origin)
+{
+    return hardening_vorbis_seek(pDecoder->pUserData, offset, origin);
+}
+
 static ma_result hardening_vorbis_tell(void* pUserData, ma_int64* pCursor)
 {
     hardening_vorbis_stream* pStream;
@@ -250,6 +260,47 @@ static int hardening_test_optional_tell(const unsigned char* pData, size_t dataS
     stream.active = MA_FALSE;
     if (stream.callbackAfterRetirementCount != 0) {
         printf("unseekable Vorbis used callback userdata after retirement\n");
+        failed = 1;
+    }
+    return failed;
+}
+
+static int hardening_test_public_callback_decoder(const unsigned char* pData, size_t dataSize)
+{
+    hardening_vorbis_stream stream;
+    ma_decoding_backend_vtable* pBackends[1];
+    ma_decoder_config config;
+    ma_decoder decoder;
+    ma_result result;
+    ma_uint64 framesRead;
+    float frames[128 * 2];
+    int failed;
+
+    failed = 0;
+    hardening_vorbis_stream_init(&stream, pData, dataSize);
+    pBackends[0] = ma_decoding_backend_libvorbis;
+    config = ma_decoder_config_init(ma_format_f32, 0, 0);
+    config.ppCustomBackendVTables = pBackends;
+    config.customBackendCount = 1;
+
+    result = ma_decoder_init(hardening_vorbis_decoder_read, hardening_vorbis_decoder_seek, &stream, &config, &decoder);
+    if (result != MA_SUCCESS) {
+        printf("public callback Vorbis initialization failed: %d\n", result);
+        return 1;
+    }
+
+    framesRead = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, frames, 128, &framesRead);
+    if (result != MA_SUCCESS || framesRead != 128) {
+        printf("public callback Vorbis read returned %d with %lu frames\n", result, (unsigned long)framesRead);
+        failed = 1;
+    }
+    ma_decoder_uninit(&decoder);
+    stream.active = MA_FALSE;
+    if (stream.tellCount != 0 || stream.callbackAfterRetirementCount != 0) {
+        printf("public callback Vorbis advertised tell=%u or used retired userdata=%u\n",
+            stream.tellCount,
+            stream.callbackAfterRetirementCount);
         failed = 1;
     }
     return failed;
@@ -437,6 +488,7 @@ int main(int argc, char** argv)
     failed = 0;
     failed += hardening_test_direct(pData, dataSize);
     failed += hardening_test_optional_tell(pData, dataSize);
+    failed += hardening_test_public_callback_decoder(pData, dataSize);
     failed += hardening_test_malformed_and_truncated(pData, dataSize);
     failed += hardening_test_chained(pData, dataSize);
     free(pData);

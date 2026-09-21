@@ -64167,7 +64167,15 @@ static ma_result ma_decoder_init_from_vtable__internal(const ma_decoding_backend
 
     backendConfig = ma_decoding_backend_config_init(pConfig->format, pConfig->seekPointCount);
 
-    result = pVTable->onInit(pVTableUserData, ma_decoder_internal_on_read__custom, ma_decoder_internal_on_seek__custom, ma_decoder_internal_on_tell__custom, pDecoder, &backendConfig, &pDecoder->allocationCallbacks, &pBackend);
+    result = pVTable->onInit(
+        pVTableUserData,
+        ma_decoder_internal_on_read__custom,
+        ma_decoder_internal_on_seek__custom,
+        pDecoder->onTell != NULL ? ma_decoder_internal_on_tell__custom : NULL,
+        pDecoder,
+        &backendConfig,
+        &pDecoder->allocationCallbacks,
+        &pBackend);
     if (result != MA_SUCCESS) {
         return result;  /* Failed to initialize the backend from this vtable. */
     }

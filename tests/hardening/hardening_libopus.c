@@ -26,6 +26,7 @@ typedef struct
     ma_uint32 seekCount;
     ma_uint32 tellCount;
     ma_uint32 callbackAfterRetirementCount;
+    ma_bool32 returnAtEnd;
 } hardening_memory_stream;
 
 typedef struct
@@ -107,6 +108,10 @@ static ma_result hardening_memory_read(void* pUserData, void* pBufferOut, size_t
         *pBytesRead = bytesToRead;
     }
 
+    if (bytesToRead == 0 && pStream->returnAtEnd) {
+        return MA_AT_END;
+    }
+
     return MA_SUCCESS;
 }
 
@@ -147,6 +152,16 @@ static ma_result hardening_memory_seek(void* pUserData, ma_int64 offset, ma_seek
     pStream->cursor = (size_t)target;
     pStream->seekCount += 1;
     return MA_SUCCESS;
+}
+
+static ma_result hardening_decoder_read(ma_decoder* pDecoder, void* pBufferOut, size_t bytesToRead, size_t* pBytesRead)
+{
+    return hardening_memory_read(pDecoder->pUserData, pBufferOut, bytesToRead, pBytesRead);
+}
+
+static ma_result hardening_decoder_seek(ma_decoder* pDecoder, ma_int64 offset, ma_seek_origin origin)
+{
+    return hardening_memory_seek(pDecoder->pUserData, offset, origin);
 }
 
 static ma_result hardening_memory_tell(void* pUserData, ma_int64* pCursor)
@@ -382,6 +397,93 @@ static int hardening_test_optional_tell(const unsigned char* pData, size_t dataS
     stream.active = MA_FALSE;
     if (stream.callbackAfterRetirementCount != 0) {
         printf("Opus without tell callback used callback userdata after retirement\n");
+        failed = 1;
+    }
+    return failed;
+}
+
+static int hardening_test_public_callback_decoder(const unsigned char* pData, size_t dataSize)
+{
+    hardening_memory_stream stream;
+    ma_decoding_backend_vtable* pBackends[1];
+    ma_decoder_config config;
+    ma_decoder decoder;
+    ma_result result;
+    ma_uint64 framesRead;
+    float frames[128 * 2];
+    int failed;
+
+    failed = 0;
+    hardening_memory_stream_init(&stream, pData, dataSize);
+    pBackends[0] = ma_decoding_backend_libopus;
+    config = ma_decoder_config_init(ma_format_f32, 0, 0);
+    config.ppCustomBackendVTables = pBackends;
+    config.customBackendCount = 1;
+
+    result = ma_decoder_init(hardening_decoder_read, hardening_decoder_seek, &stream, &config, &decoder);
+    if (result != MA_SUCCESS) {
+        printf("public callback Opus initialization failed: %d\n", result);
+        return 1;
+    }
+
+    framesRead = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, frames, 128, &framesRead);
+    if (result != MA_SUCCESS || framesRead != 128) {
+        printf("public callback Opus read returned %d with %lu frames\n", result, (unsigned long)framesRead);
+        failed = 1;
+    }
+    ma_decoder_uninit(&decoder);
+    stream.active = MA_FALSE;
+    if (stream.tellCount != 0 || stream.callbackAfterRetirementCount != 0) {
+        printf("public callback Opus advertised tell=%u or used retired userdata=%u\n",
+            stream.tellCount,
+            stream.callbackAfterRetirementCount);
+        failed = 1;
+    }
+    return failed;
+}
+
+static int hardening_test_at_end_callback(const unsigned char* pData, size_t dataSize)
+{
+    hardening_memory_stream stream;
+    ma_decoding_backend_config config;
+    ma_libopus opus;
+    ma_result result;
+    ma_uint64 framesRead;
+    ma_uint64 totalFramesRead;
+    float frames[512 * 2];
+    ma_uint32 iteration;
+    int failed;
+
+    failed = 0;
+    hardening_memory_stream_init(&stream, pData, dataSize);
+    stream.returnAtEnd = MA_TRUE;
+    config = ma_decoding_backend_config_init(ma_format_f32, 0);
+    result = ma_libopus_init(hardening_memory_read, hardening_memory_seek, NULL, &stream, &config, NULL, &opus);
+    if (result != MA_SUCCESS) {
+        printf("non-seekable Opus MA_AT_END initialization failed: %d\n", result);
+        return 1;
+    }
+
+    totalFramesRead = 0;
+    result = MA_SUCCESS;
+    for (iteration = 0; iteration < 8192 && result == MA_SUCCESS; ++iteration) {
+        framesRead = 0;
+        result = ma_libopus_read_pcm_frames(&opus, frames, 512, &framesRead);
+        totalFramesRead += framesRead;
+    }
+    if (result != MA_AT_END || totalFramesRead < 1600000 || totalFramesRead > 1800000) {
+        printf("non-seekable Opus MA_AT_END drain returned %d with %lu frames after %u iterations\n",
+            result,
+            (unsigned long)totalFramesRead,
+            iteration);
+        failed = 1;
+    }
+
+    ma_libopus_uninit(&opus, NULL);
+    stream.active = MA_FALSE;
+    if (stream.callbackAfterRetirementCount != 0) {
+        printf("non-seekable Opus MA_AT_END drain used callback userdata after retirement\n");
         failed = 1;
     }
     return failed;
@@ -985,6 +1087,8 @@ int main(int argc, char** argv)
     failed = 0;
     failed += hardening_test_direct_lifetime(pData, dataSize);
     failed += hardening_test_optional_tell(pData, dataSize);
+    failed += hardening_test_public_callback_decoder(pData, dataSize);
+    failed += hardening_test_at_end_callback(pData, dataSize);
     failed += hardening_test_backend_failures(pData, dataSize);
     failed += hardening_test_malformed_and_truncated(pData, dataSize);
     failed += hardening_test_chained(pData, dataSize);
