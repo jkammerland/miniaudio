@@ -819,6 +819,9 @@ if(MINIAUDIO_BUILD_TESTS)
     if(WIN32)
         add_miniaudio_test(miniaudio_hardening_wasapi_lifecycle hardening/hardening_wasapi_lifecycle.c)
         add_test(NAME miniaudio_hardening_wasapi_lifecycle COMMAND miniaudio_hardening_wasapi_lifecycle)
+
+        add_miniaudio_test(miniaudio_hardening_wasapi_process_loopback hardening/hardening_wasapi_process_loopback.c)
+        add_test(NAME miniaudio_hardening_wasapi_process_loopback COMMAND miniaudio_hardening_wasapi_process_loopback)
     endif()
 
     if(APPLE)

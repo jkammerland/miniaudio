@@ -7144,7 +7144,7 @@ struct ma_device_config
         ma_bool8 noDefaultQualitySRC;       /* When set to true, disables the use of AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY. */
         ma_bool8 noAutoStreamRouting;       /* Disables automatic stream routing. */
         ma_bool8 noHardwareOffloading;      /* Disables WASAPI's hardware offloading feature. */
-        ma_uint32 loopbackProcessID;        /* The process ID to include or exclude for loopback mode. Set to 0 to capture audio from all processes. Ignored when an explicit device ID is specified. */
+        ma_uint32 loopbackProcessID;        /* The process ID to include or exclude for loopback mode. Set to 0 to capture audio from all processes. Process loopback is endpoint-independent, so specifying an explicit device ID at the same time is invalid. */
         ma_bool8 loopbackProcessExclude;    /* When set to true, excludes the process specified by loopbackProcessID. By default, the process will be included. */
     } wasapi;
     struct
@@ -21747,6 +21747,7 @@ typedef struct  {
 
 typedef BOOL      (WINAPI * ma_PFNVerifyVersionInfoW) (ma_OSVERSIONINFOEXW* lpVersionInfo, DWORD dwTypeMask, DWORDLONG dwlConditionMask);
 typedef ULONGLONG (WINAPI * ma_PFNVerSetConditionMask)(ULONGLONG dwlConditionMask, DWORD dwTypeBitMask, BYTE dwConditionMask);
+typedef LONG      (WINAPI * ma_PFNRtlGetVersion)      (ma_OSVERSIONINFOEXW* lpVersionInformation);
 
 
 #ifndef PROPERTYKEY_DEFINED
@@ -21771,9 +21772,7 @@ static const PROPERTYKEY MA_PKEY_Device_FriendlyName             = {{0xA45C254E,
 static const PROPERTYKEY MA_PKEY_AudioEngine_DeviceFormat        = {{0xF19F064D, 0x82C,  0x4E27, {0xBC, 0x73, 0x68, 0x82, 0xA1, 0xBB, 0x8E, 0x4C}},  0};
 
 static const IID MA_IID_IUnknown                                 = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}}; /* 00000000-0000-0000-C000-000000000046 */
-#if !defined(MA_WIN32_DESKTOP) && !defined(MA_WIN32_GDK)
 static const IID MA_IID_IAgileObject                             = {0x94EA2B94, 0xE9CC, 0x49E0, {0xC0, 0xFF, 0xEE, 0x64, 0xCA, 0x8F, 0x5B, 0x90}}; /* 94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90 */
-#endif
 
 static const IID MA_IID_IAudioClient                             = {0x1CB9AD4C, 0xDBFA, 0x4C32, {0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}}; /* 1CB9AD4C-DBFA-4C32-B178-C2F568A703B2 = __uuidof(IAudioClient) */
 static const IID MA_IID_IAudioClient2                            = {0x726778CD, 0xF60A, 0x4EDA, {0x82, 0xDE, 0xE4, 0x76, 0x10, 0xCD, 0x78, 0xAA}}; /* 726778CD-F60A-4EDA-82DE-E47610CD78AA = __uuidof(IAudioClient2) */
@@ -21781,11 +21780,9 @@ static const IID MA_IID_IAudioClient3                            = {0x7ED4EE07, 
 static const IID MA_IID_IAudioRenderClient                       = {0xF294ACFC, 0x3146, 0x4483, {0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2}}; /* F294ACFC-3146-4483-A7BF-ADDCA7C260E2 = __uuidof(IAudioRenderClient) */
 static const IID MA_IID_IAudioCaptureClient                      = {0xC8ADBD64, 0xE71E, 0x48A0, {0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17}}; /* C8ADBD64-E71E-48A0-A4DE-185C395CD317 = __uuidof(IAudioCaptureClient) */
 static const IID MA_IID_IMMNotificationClient                    = {0x7991EEC9, 0x7E89, 0x4D85, {0x83, 0x90, 0x6C, 0x70, 0x3C, 0xEC, 0x60, 0xC0}}; /* 7991EEC9-7E89-4D85-8390-6C703CEC60C0 = __uuidof(IMMNotificationClient) */
-#if !defined(MA_WIN32_DESKTOP) && !defined(MA_WIN32_GDK)
 static const IID MA_IID_DEVINTERFACE_AUDIO_RENDER                = {0xE6327CAD, 0xDCEC, 0x4949, {0xAE, 0x8A, 0x99, 0x1E, 0x97, 0x6A, 0x79, 0xD2}}; /* E6327CAD-DCEC-4949-AE8A-991E976A79D2 */
 static const IID MA_IID_DEVINTERFACE_AUDIO_CAPTURE               = {0x2EEF81BE, 0x33FA, 0x4800, {0x96, 0x70, 0x1C, 0xD4, 0x74, 0x97, 0x2C, 0x3F}}; /* 2EEF81BE-33FA-4800-9670-1CD474972C3F */
 static const IID MA_IID_IActivateAudioInterfaceCompletionHandler = {0x41D949AB, 0x9862, 0x444A, {0x80, 0xF6, 0xC2, 0x61, 0x33, 0x4D, 0xA5, 0xEB}}; /* 41D949AB-9862-444A-80F6-C261334DA5EB */
-#endif
 
 static const IID MA_CLSID_MMDeviceEnumerator                     = {0xBCDE0395, 0xE52F, 0x467C, {0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E}}; /* BCDE0395-E52F-467C-8E3D-C4579291692E = __uuidof(MMDeviceEnumerator) */
 static const IID MA_IID_IMMDeviceEnumerator                      = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}}; /* A95664D2-9614-4F35-A746-DE8DB63617E6 = __uuidof(IMMDeviceEnumerator) */
@@ -21799,9 +21796,6 @@ static const IID MA_IID_IMMDeviceEnumerator                      = {0xA95664D2, 
 typedef struct ma_IMMDeviceEnumerator                      ma_IMMDeviceEnumerator;
 typedef struct ma_IMMDeviceCollection                      ma_IMMDeviceCollection;
 typedef struct ma_IMMDevice                                ma_IMMDevice;
-#else
-typedef struct ma_IActivateAudioInterfaceCompletionHandler ma_IActivateAudioInterfaceCompletionHandler;
-typedef struct ma_IActivateAudioInterfaceAsyncOperation    ma_IActivateAudioInterfaceAsyncOperation;
 #endif
 typedef struct ma_IPropertyStore                           ma_IPropertyStore;
 typedef struct ma_IAudioClient                             ma_IAudioClient;
@@ -21809,6 +21803,8 @@ typedef struct ma_IAudioClient2                            ma_IAudioClient2;
 typedef struct ma_IAudioClient3                            ma_IAudioClient3;
 typedef struct ma_IAudioRenderClient                       ma_IAudioRenderClient;
 typedef struct ma_IAudioCaptureClient                      ma_IAudioCaptureClient;
+typedef struct ma_IActivateAudioInterfaceCompletionHandler ma_IActivateAudioInterfaceCompletionHandler;
+typedef struct ma_IActivateAudioInterfaceAsyncOperation    ma_IActivateAudioInterfaceAsyncOperation;
 
 typedef ma_int64                                           MA_REFERENCE_TIME;
 
@@ -21980,27 +21976,27 @@ static MA_INLINE ULONG   ma_IUnknown_Release(ma_IUnknown* pThis)                
     static MA_INLINE HRESULT ma_IMMDevice_OpenPropertyStore(ma_IMMDevice* pThis, DWORD stgmAccess, ma_IPropertyStore** ppProperties) { return pThis->lpVtbl->OpenPropertyStore(pThis, stgmAccess, ppProperties); }
     static MA_INLINE HRESULT ma_IMMDevice_GetId(ma_IMMDevice* pThis, WCHAR** pID)                                     { return pThis->lpVtbl->GetId(pThis, pID); }
     static MA_INLINE HRESULT ma_IMMDevice_GetState(ma_IMMDevice* pThis, DWORD *pState)                                { return pThis->lpVtbl->GetState(pThis, pState); }
-#else
-    /* IActivateAudioInterfaceAsyncOperation */
-    typedef struct
-    {
-        /* IUnknown */
-        HRESULT (STDMETHODCALLTYPE * QueryInterface)(ma_IActivateAudioInterfaceAsyncOperation* pThis, const IID* const riid, void** ppObject);
-        ULONG   (STDMETHODCALLTYPE * AddRef)        (ma_IActivateAudioInterfaceAsyncOperation* pThis);
-        ULONG   (STDMETHODCALLTYPE * Release)       (ma_IActivateAudioInterfaceAsyncOperation* pThis);
-
-        /* IActivateAudioInterfaceAsyncOperation */
-        HRESULT (STDMETHODCALLTYPE * GetActivateResult)(ma_IActivateAudioInterfaceAsyncOperation* pThis, HRESULT *pActivateResult, ma_IUnknown** ppActivatedInterface);
-    } ma_IActivateAudioInterfaceAsyncOperationVtbl;
-    struct ma_IActivateAudioInterfaceAsyncOperation
-    {
-        ma_IActivateAudioInterfaceAsyncOperationVtbl* lpVtbl;
-    };
-    static MA_INLINE HRESULT ma_IActivateAudioInterfaceAsyncOperation_QueryInterface(ma_IActivateAudioInterfaceAsyncOperation* pThis, const IID* const riid, void** ppObject) { return pThis->lpVtbl->QueryInterface(pThis, riid, ppObject); }
-    static MA_INLINE ULONG   ma_IActivateAudioInterfaceAsyncOperation_AddRef(ma_IActivateAudioInterfaceAsyncOperation* pThis)                                                 { return pThis->lpVtbl->AddRef(pThis); }
-    static MA_INLINE ULONG   ma_IActivateAudioInterfaceAsyncOperation_Release(ma_IActivateAudioInterfaceAsyncOperation* pThis)                                                { return pThis->lpVtbl->Release(pThis); }
-    static MA_INLINE HRESULT ma_IActivateAudioInterfaceAsyncOperation_GetActivateResult(ma_IActivateAudioInterfaceAsyncOperation* pThis, HRESULT *pActivateResult, ma_IUnknown** ppActivatedInterface) { return pThis->lpVtbl->GetActivateResult(pThis, pActivateResult, ppActivatedInterface); }
 #endif
+
+/* IActivateAudioInterfaceAsyncOperation */
+typedef struct
+{
+    /* IUnknown */
+    HRESULT (STDMETHODCALLTYPE * QueryInterface)(ma_IActivateAudioInterfaceAsyncOperation* pThis, const IID* const riid, void** ppObject);
+    ULONG   (STDMETHODCALLTYPE * AddRef)        (ma_IActivateAudioInterfaceAsyncOperation* pThis);
+    ULONG   (STDMETHODCALLTYPE * Release)       (ma_IActivateAudioInterfaceAsyncOperation* pThis);
+
+    /* IActivateAudioInterfaceAsyncOperation */
+    HRESULT (STDMETHODCALLTYPE * GetActivateResult)(ma_IActivateAudioInterfaceAsyncOperation* pThis, HRESULT *pActivateResult, ma_IUnknown** ppActivatedInterface);
+} ma_IActivateAudioInterfaceAsyncOperationVtbl;
+struct ma_IActivateAudioInterfaceAsyncOperation
+{
+    ma_IActivateAudioInterfaceAsyncOperationVtbl* lpVtbl;
+};
+static MA_INLINE HRESULT ma_IActivateAudioInterfaceAsyncOperation_QueryInterface(ma_IActivateAudioInterfaceAsyncOperation* pThis, const IID* const riid, void** ppObject) { return pThis->lpVtbl->QueryInterface(pThis, riid, ppObject); }
+static MA_INLINE ULONG   ma_IActivateAudioInterfaceAsyncOperation_AddRef(ma_IActivateAudioInterfaceAsyncOperation* pThis)                                                 { return pThis->lpVtbl->AddRef(pThis); }
+static MA_INLINE ULONG   ma_IActivateAudioInterfaceAsyncOperation_Release(ma_IActivateAudioInterfaceAsyncOperation* pThis)                                                { return pThis->lpVtbl->Release(pThis); }
+static MA_INLINE HRESULT ma_IActivateAudioInterfaceAsyncOperation_GetActivateResult(ma_IActivateAudioInterfaceAsyncOperation* pThis, HRESULT *pActivateResult, ma_IUnknown** ppActivatedInterface) { return pThis->lpVtbl->GetActivateResult(pThis, pActivateResult, ppActivatedInterface); }
 
 /* IPropertyStore */
 typedef struct
@@ -22230,36 +22226,38 @@ static MA_INLINE HRESULT ma_IAudioCaptureClient_GetBuffer(ma_IAudioCaptureClient
 static MA_INLINE HRESULT ma_IAudioCaptureClient_ReleaseBuffer(ma_IAudioCaptureClient* pThis, ma_uint32 numFramesRead)                 { return pThis->lpVtbl->ReleaseBuffer(pThis, numFramesRead); }
 static MA_INLINE HRESULT ma_IAudioCaptureClient_GetNextPacketSize(ma_IAudioCaptureClient* pThis, ma_uint32* pNumFramesInNextPacket)   { return pThis->lpVtbl->GetNextPacketSize(pThis, pNumFramesInNextPacket); }
 
-#if defined(MA_WIN32_UWP)
 /* mmdevapi Functions */
 typedef HRESULT (WINAPI * MA_PFN_ActivateAudioInterfaceAsync)(const wchar_t* deviceInterfacePath, const IID* riid, MA_PROPVARIANT* activationParams, ma_IActivateAudioInterfaceCompletionHandler* completionHandler, ma_IActivateAudioInterfaceAsyncOperation** activationOperation);
-#endif
 
 /* Avrt Functions */
 typedef HANDLE (WINAPI * MA_PFN_AvSetMmThreadCharacteristicsA)(const char* TaskName, DWORD* TaskIndex);
 typedef BOOL   (WINAPI * MA_PFN_AvRevertMmThreadCharacteristics)(HANDLE AvrtHandle);
 
-#if !defined(MA_WIN32_DESKTOP) && !defined(MA_WIN32_GDK)
-typedef struct ma_completion_handler_uwp ma_completion_handler_uwp;
+#ifndef MA_WASAPI_ACTIVATION_TIMEOUT_MILLISECONDS
+#define MA_WASAPI_ACTIVATION_TIMEOUT_MILLISECONDS 30000
+#endif
+
+typedef struct ma_completion_handler ma_completion_handler;
 
 typedef struct
 {
     /* IUnknown */
-    HRESULT (STDMETHODCALLTYPE * QueryInterface)(ma_completion_handler_uwp* pThis, const IID* const riid, void** ppObject);
-    ULONG   (STDMETHODCALLTYPE * AddRef)        (ma_completion_handler_uwp* pThis);
-    ULONG   (STDMETHODCALLTYPE * Release)       (ma_completion_handler_uwp* pThis);
+    HRESULT (STDMETHODCALLTYPE * QueryInterface)(ma_completion_handler* pThis, const IID* const riid, void** ppObject);
+    ULONG   (STDMETHODCALLTYPE * AddRef)        (ma_completion_handler* pThis);
+    ULONG   (STDMETHODCALLTYPE * Release)       (ma_completion_handler* pThis);
 
     /* IActivateAudioInterfaceCompletionHandler */
-    HRESULT (STDMETHODCALLTYPE * ActivateCompleted)(ma_completion_handler_uwp* pThis, ma_IActivateAudioInterfaceAsyncOperation* pActivateOperation);
-} ma_completion_handler_uwp_vtbl;
-struct ma_completion_handler_uwp
+    HRESULT (STDMETHODCALLTYPE * ActivateCompleted)(ma_completion_handler* pThis, ma_IActivateAudioInterfaceAsyncOperation* pActivateOperation);
+} ma_completion_handler_vtbl;
+struct ma_completion_handler
 {
-    ma_completion_handler_uwp_vtbl* lpVtbl;
+    ma_completion_handler_vtbl* lpVtbl;
     MA_ATOMIC(4, ma_uint32) counter;
     HANDLE hEvent;
+    ma_allocation_callbacks allocationCallbacks;
 };
 
-static HRESULT STDMETHODCALLTYPE ma_completion_handler_uwp_QueryInterface(ma_completion_handler_uwp* pThis, const IID* const riid, void** ppObject)
+static HRESULT STDMETHODCALLTYPE ma_completion_handler_QueryInterface(ma_completion_handler* pThis, const IID* const riid, void** ppObject)
 {
     /*
     We need to "implement" IAgileObject which is just an indicator that's used internally by WASAPI for some multithreading management. To
@@ -22272,26 +22270,31 @@ static HRESULT STDMETHODCALLTYPE ma_completion_handler_uwp_QueryInterface(ma_com
 
     /* Getting here means the IID is IUnknown or IMMNotificationClient. */
     *ppObject = (void*)pThis;
-    ((ma_completion_handler_uwp_vtbl*)pThis->lpVtbl)->AddRef(pThis);
+    ((ma_completion_handler_vtbl*)pThis->lpVtbl)->AddRef(pThis);
     return S_OK;
 }
 
-static ULONG STDMETHODCALLTYPE ma_completion_handler_uwp_AddRef(ma_completion_handler_uwp* pThis)
+static ULONG STDMETHODCALLTYPE ma_completion_handler_AddRef(ma_completion_handler* pThis)
 {
     return (ULONG)ma_atomic_fetch_add_32(&pThis->counter, 1) + 1;
 }
 
-static ULONG STDMETHODCALLTYPE ma_completion_handler_uwp_Release(ma_completion_handler_uwp* pThis)
+static ULONG STDMETHODCALLTYPE ma_completion_handler_Release(ma_completion_handler* pThis)
 {
     ma_uint32 newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
     if (newRefCount == 0) {
-        return 0;   /* We don't free anything here because we never allocate the object on the heap. */
+        ma_allocation_callbacks allocationCallbacks = pThis->allocationCallbacks;
+        if (pThis->hEvent != NULL) {
+            CloseHandle(pThis->hEvent);
+        }
+        ma_free(pThis, &allocationCallbacks);
+        return 0;
     }
 
     return (ULONG)newRefCount;
 }
 
-static HRESULT STDMETHODCALLTYPE ma_completion_handler_uwp_ActivateCompleted(ma_completion_handler_uwp* pThis, ma_IActivateAudioInterfaceAsyncOperation* pActivateOperation)
+static HRESULT STDMETHODCALLTYPE ma_completion_handler_ActivateCompleted(ma_completion_handler* pThis, ma_IActivateAudioInterfaceAsyncOperation* pActivateOperation)
 {
     (void)pActivateOperation;
     SetEvent(pThis->hEvent);
@@ -22299,40 +22302,55 @@ static HRESULT STDMETHODCALLTYPE ma_completion_handler_uwp_ActivateCompleted(ma_
 }
 
 
-static ma_completion_handler_uwp_vtbl g_maCompletionHandlerVtblInstance = {
-    ma_completion_handler_uwp_QueryInterface,
-    ma_completion_handler_uwp_AddRef,
-    ma_completion_handler_uwp_Release,
-    ma_completion_handler_uwp_ActivateCompleted
+static ma_completion_handler_vtbl g_maCompletionHandlerVtblInstance = {
+    ma_completion_handler_QueryInterface,
+    ma_completion_handler_AddRef,
+    ma_completion_handler_Release,
+    ma_completion_handler_ActivateCompleted
 };
 
-static ma_result ma_completion_handler_uwp_init(ma_completion_handler_uwp* pHandler)
+static ma_result ma_completion_handler_create(ma_context* pContext, ma_completion_handler** ppHandler)
 {
-    MA_ASSERT(pHandler != NULL);
-    MA_ZERO_OBJECT(pHandler);
+    ma_completion_handler* pHandler;
+
+    MA_ASSERT(pContext != NULL);
+    MA_ASSERT(ppHandler != NULL);
+
+    *ppHandler = NULL;
+    pHandler = (ma_completion_handler*)ma_calloc(sizeof(*pHandler), &pContext->allocationCallbacks);
+    if (pHandler == NULL) {
+        return MA_OUT_OF_MEMORY;
+    }
 
     pHandler->lpVtbl = &g_maCompletionHandlerVtblInstance;
     pHandler->counter = 1;
+    ma_allocation_callbacks_init_copy(&pHandler->allocationCallbacks, &pContext->allocationCallbacks);
     pHandler->hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (pHandler->hEvent == NULL) {
-        return ma_result_from_GetLastError(GetLastError());
+        ma_result result = ma_result_from_GetLastError(GetLastError());
+        ma_free(pHandler, &pContext->allocationCallbacks);
+        return result;
     }
 
+    *ppHandler = pHandler;
     return MA_SUCCESS;
 }
 
-static void ma_completion_handler_uwp_uninit(ma_completion_handler_uwp* pHandler)
+static ma_result ma_completion_handler_wait(ma_completion_handler* pHandler, DWORD timeoutInMilliseconds)
 {
-    if (pHandler->hEvent != NULL) {
-        CloseHandle(pHandler->hEvent);
+    DWORD waitResult = WaitForSingleObject((HANDLE)pHandler->hEvent, timeoutInMilliseconds);
+    if (waitResult == WAIT_OBJECT_0) {
+        return MA_SUCCESS;
     }
+    if (waitResult == WAIT_TIMEOUT) {
+        return MA_TIMEOUT;
+    }
+    return ma_result_from_GetLastError(GetLastError());
 }
 
-static void ma_completion_handler_uwp_wait(ma_completion_handler_uwp* pHandler)
-{
-    WaitForSingleObject((HANDLE)pHandler->hEvent, INFINITE);
-}
-#endif  /* !MA_WIN32_DESKTOP */
+#ifndef MA_WASAPI_COMPLETION_HANDLER_WAIT
+#define MA_WASAPI_COMPLETION_HANDLER_WAIT(pHandler, timeoutInMilliseconds) ma_completion_handler_wait((pHandler), (timeoutInMilliseconds))
+#endif
 
 /* We need a virtual table for our notification client object that's used for detecting changes to the default device. */
 #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
@@ -23199,20 +23217,31 @@ static ma_result ma_context_get_IAudioClient_Desktop__wasapi(ma_context* pContex
 
     return MA_SUCCESS;
 }
-#else
-static ma_result ma_context_get_IAudioClient_UWP__wasapi(ma_context* pContext, ma_device_type deviceType, const ma_device_id* pDeviceID, MA_PROPVARIANT* pActivationParams, ma_IAudioClient** ppAudioClient, ma_IUnknown** ppActivatedInterface)
+#endif
+
+static ma_result ma_context_get_IAudioClient_Async__wasapi(ma_context* pContext, ma_device_type deviceType, const ma_device_id* pDeviceID, MA_PROPVARIANT* pActivationParams, ma_IAudioClient** ppAudioClient, ma_IUnknown** ppActivatedInterface)
 {
     ma_IActivateAudioInterfaceAsyncOperation *pAsyncOp = NULL;
-    ma_completion_handler_uwp completionHandler;
+    ma_completion_handler* pCompletionHandler = NULL;
     IID iid;
-    WCHAR* iidStr;
+    WCHAR* iidStr = NULL;
     HRESULT hr;
     ma_result result;
-    HRESULT activateResult;
-    ma_IUnknown* pActivatedInterface;
+    HRESULT activateResult = E_FAIL;
+    ma_IUnknown* pActivatedInterface = NULL;
+    ma_bool32 freeIIDString = MA_FALSE;
 
     MA_ASSERT(pContext != NULL);
     MA_ASSERT(ppAudioClient != NULL);
+
+    *ppAudioClient = NULL;
+    if (ppActivatedInterface != NULL) {
+        *ppActivatedInterface = NULL;
+    }
+
+    if (pContext->wasapi.ActivateAudioInterfaceAsync == NULL) {
+        return MA_NOT_IMPLEMENTED;
+    }
 
     if (pDeviceID != NULL) {
         iidStr = (WCHAR*)pDeviceID->wasapi;
@@ -23232,35 +23261,53 @@ static ma_result ma_context_get_IAudioClient_UWP__wasapi(ma_context* pContext, m
             ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to convert device IID to string for ActivateAudioInterfaceAsync(). Out of memory.\n");
             return ma_result_from_HRESULT(hr);
         }
+        freeIIDString = MA_TRUE;
     }
 
-    result = ma_completion_handler_uwp_init(&completionHandler);
+    result = ma_completion_handler_create(pContext, &pCompletionHandler);
     if (result != MA_SUCCESS) {
-        ma_CoTaskMemFree(pContext, iidStr);
+        if (freeIIDString) {
+            ma_CoTaskMemFree(pContext, iidStr);
+        }
         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to create event for waiting for ActivateAudioInterfaceAsync().\n");
         return result;
     }
 
-    hr = ((MA_PFN_ActivateAudioInterfaceAsync)pContext->wasapi.ActivateAudioInterfaceAsync)(iidStr, &MA_IID_IAudioClient, pActivationParams, (ma_IActivateAudioInterfaceCompletionHandler*)&completionHandler, (ma_IActivateAudioInterfaceAsyncOperation**)&pAsyncOp);
-    if (FAILED(hr)) {
-        ma_completion_handler_uwp_uninit(&completionHandler);
+    hr = ((MA_PFN_ActivateAudioInterfaceAsync)pContext->wasapi.ActivateAudioInterfaceAsync)(iidStr, &MA_IID_IAudioClient, pActivationParams, (ma_IActivateAudioInterfaceCompletionHandler*)pCompletionHandler, (ma_IActivateAudioInterfaceAsyncOperation**)&pAsyncOp);
+    if (freeIIDString) {
         ma_CoTaskMemFree(pContext, iidStr);
+    }
+    if (FAILED(hr)) {
+        if (pAsyncOp != NULL) {
+            ma_IActivateAudioInterfaceAsyncOperation_Release(pAsyncOp);
+        }
+        ma_completion_handler_Release(pCompletionHandler);
         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] ActivateAudioInterfaceAsync() failed.\n");
         return ma_result_from_HRESULT(hr);
     }
 
-    if (pDeviceID == NULL) {
-        ma_CoTaskMemFree(pContext, iidStr);
+    if (pAsyncOp == NULL) {
+        ma_completion_handler_Release(pCompletionHandler);
+        ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] ActivateAudioInterfaceAsync() returned no operation.\n");
+        return MA_ERROR;
     }
 
-    /* Wait for the async operation for finish. */
-    ma_completion_handler_uwp_wait(&completionHandler);
-    ma_completion_handler_uwp_uninit(&completionHandler);
+    result = MA_WASAPI_COMPLETION_HANDLER_WAIT(pCompletionHandler, MA_WASAPI_ACTIVATION_TIMEOUT_MILLISECONDS);
+    if (result != MA_SUCCESS) {
+        ma_IActivateAudioInterfaceAsyncOperation_Release(pAsyncOp);
+        ma_completion_handler_Release(pCompletionHandler);
+        ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Timed out or failed while waiting for ActivateAudioInterfaceAsync().\n");
+        return result;
+    }
 
     hr = ma_IActivateAudioInterfaceAsyncOperation_GetActivateResult(pAsyncOp, &activateResult, &pActivatedInterface);
     ma_IActivateAudioInterfaceAsyncOperation_Release(pAsyncOp);
+    ma_completion_handler_Release(pCompletionHandler);
 
     if (FAILED(hr) || FAILED(activateResult)) {
+        if (pActivatedInterface != NULL) {
+            ma_IUnknown_Release(pActivatedInterface);
+        }
         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to activate device.\n");
         return FAILED(hr) ? ma_result_from_HRESULT(hr) : ma_result_from_HRESULT(activateResult);
     }
@@ -23268,6 +23315,7 @@ static ma_result ma_context_get_IAudioClient_UWP__wasapi(ma_context* pContext, m
     /* Here is where we grab the IAudioClient interface. */
     hr = ma_IUnknown_QueryInterface(pActivatedInterface, &MA_IID_IAudioClient, (void**)ppAudioClient);
     if (FAILED(hr)) {
+        ma_IUnknown_Release(pActivatedInterface);
         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to query IAudioClient interface.\n");
         return ma_result_from_HRESULT(hr);
     }
@@ -23280,7 +23328,6 @@ static ma_result ma_context_get_IAudioClient_UWP__wasapi(ma_context* pContext, m
 
     return MA_SUCCESS;
 }
-#endif
 
 
 /* https://docs.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ne-audioclientactivationparams-audioclient_activation_type */
@@ -23330,6 +23377,50 @@ typedef struct
 #endif
 
 #define MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK L"VAD\\Process_Loopback"
+#define MA_WASAPI_PROCESS_LOOPBACK_MIN_BUILD 20348
+
+static ma_bool32 ma_context_is_process_loopback_supported__wasapi(ma_context* pContext)
+{
+#if defined(MA_WIN32_DESKTOP)
+    ma_handle ntdll;
+    ma_PFNRtlGetVersion RtlGetVersion;
+    ma_OSVERSIONINFOEXW versionInfo;
+    LONG status;
+
+    ntdll = ma_dlopen(ma_context_get_log(pContext), "ntdll.dll");
+    if (ntdll == NULL) {
+        return MA_FALSE;
+    }
+
+    RtlGetVersion = (ma_PFNRtlGetVersion)ma_dlsym(ma_context_get_log(pContext), ntdll, "RtlGetVersion");
+    if (RtlGetVersion == NULL) {
+        ma_dlclose(ma_context_get_log(pContext), ntdll);
+        return MA_FALSE;
+    }
+
+    MA_ZERO_OBJECT(&versionInfo);
+    versionInfo.dwOSVersionInfoSize = sizeof(versionInfo);
+    status = RtlGetVersion(&versionInfo);
+    ma_dlclose(ma_context_get_log(pContext), ntdll);
+    if (status != 0) {
+        return MA_FALSE;
+    }
+
+    return versionInfo.dwMajorVersion > 10 ||
+           (versionInfo.dwMajorVersion == 10 && versionInfo.dwBuildNumber >= MA_WASAPI_PROCESS_LOOPBACK_MIN_BUILD);
+#elif defined(MA_WIN32_UWP)
+    /* UWP already requires asynchronous activation. Unsupported systems report failure from the API. */
+    (void)pContext;
+    return MA_TRUE;
+#else
+    (void)pContext;
+    return MA_FALSE;
+#endif
+}
+
+#ifndef MA_WASAPI_PROCESS_LOOPBACK_SUPPORTED
+#define MA_WASAPI_PROCESS_LOOPBACK_SUPPORTED(pContext) ma_context_is_process_loopback_supported__wasapi((pContext))
+#endif
 
 static ma_result ma_context_get_IAudioClient__wasapi(ma_context* pContext, ma_device_type deviceType, const ma_device_id* pDeviceID, ma_uint32 loopbackProcessID, ma_bool32 loopbackProcessExclude, ma_IAudioClient** ppAudioClient, ma_WASAPIDeviceInterface** ppDeviceInterface)
 {
@@ -23340,8 +23431,17 @@ static ma_result ma_context_get_IAudioClient__wasapi(ma_context* pContext, ma_de
     MA_PROPVARIANT* pActivationParams = NULL;
     ma_device_id virtualDeviceID;
 
-    /* Activation parameters specific to loopback mode. Note that process-specific loopback will only work when a default device ID is specified. */
-    if (deviceType == ma_device_type_loopback && loopbackProcessID != 0 && pDeviceID == NULL) {
+    if (deviceType == ma_device_type_loopback && loopbackProcessID != 0) {
+        if (pDeviceID != NULL) {
+            ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Process loopback is endpoint-independent and cannot be combined with an explicit device ID.\n");
+            return MA_INVALID_ARGS;
+        }
+
+        if (!MA_WASAPI_PROCESS_LOOPBACK_SUPPORTED(pContext) || pContext->wasapi.ActivateAudioInterfaceAsync == NULL) {
+            ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Process loopback requires Windows 10 Build %u or newer and ActivateAudioInterfaceAsync().\n", MA_WASAPI_PROCESS_LOOPBACK_MIN_BUILD);
+            return MA_NOT_IMPLEMENTED;
+        }
+
         usingProcessLoopback = MA_TRUE;
     }
 
@@ -23357,17 +23457,24 @@ static ma_result ma_context_get_IAudioClient__wasapi(ma_context* pContext, ma_de
         activationParams.blob.pBlobData = (BYTE*)&audioclientActivationParams;
         pActivationParams = &activationParams;
 
-        /* When requesting a specific device ID we need to use a special device ID. */
+        /* Process loopback activates a virtual, endpoint-independent audio interface. */
+        MA_ZERO_OBJECT(&virtualDeviceID);
         MA_COPY_MEMORY(virtualDeviceID.wasapi, MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, (ma_wcslen(MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK) + 1) * sizeof(wchar_t)); /* +1 for the null terminator. */
         pDeviceID = &virtualDeviceID;
     } else {
         pActivationParams = NULL;   /* No activation parameters required. */
     }
 
-#if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
+#if defined(MA_WIN32_DESKTOP)
+    if (usingProcessLoopback) {
+        result = ma_context_get_IAudioClient_Async__wasapi(pContext, deviceType, pDeviceID, pActivationParams, ppAudioClient, (ma_IUnknown**)ppDeviceInterface);
+    } else {
+        result = ma_context_get_IAudioClient_Desktop__wasapi(pContext, deviceType, pDeviceID, pActivationParams, ppAudioClient, ppDeviceInterface);
+    }
+#elif defined(MA_WIN32_GDK)
     result = ma_context_get_IAudioClient_Desktop__wasapi(pContext, deviceType, pDeviceID, pActivationParams, ppAudioClient, ppDeviceInterface);
 #else
-    result = ma_context_get_IAudioClient_UWP__wasapi(pContext, deviceType, pDeviceID, pActivationParams, ppAudioClient, ppDeviceInterface);
+    result = ma_context_get_IAudioClient_Async__wasapi(pContext, deviceType, pDeviceID, pActivationParams, ppAudioClient, ppDeviceInterface);
 #endif
 
     /*
@@ -23645,7 +23752,11 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
         return MA_INVALID_ARGS;
     }
 
-    usingProcessLoopback = deviceType == ma_device_type_loopback && pData->loopbackProcessID != 0 && pDeviceID == NULL;
+    usingProcessLoopback = deviceType == ma_device_type_loopback && pData->loopbackProcessID != 0;
+
+    if (usingProcessLoopback && pData->shareMode == ma_share_mode_exclusive) {
+        return MA_SHARE_MODE_NOT_SUPPORTED;
+    }
 
     pData->pAudioClient = NULL;
     pData->pRenderClient = NULL;
@@ -23670,7 +23781,7 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
     MA_ZERO_OBJECT(&wf);
 
     /* Try enabling hardware offloading. */
-    if (!pData->noHardwareOffloading) {
+    if (!usingProcessLoopback && !pData->noHardwareOffloading) {
         hr = ma_IAudioClient_QueryInterface(pData->pAudioClient, &MA_IID_IAudioClient2, (void**)&pAudioClient2);
         if (SUCCEEDED(hr)) {
             BOOL isHardwareOffloadingSupported = 0;
@@ -23741,7 +23852,7 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
                 wf.wBitsPerSample  = 32;
                 wf.nBlockAlign     = wf.nChannels * wf.wBitsPerSample / 8;
                 wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-                wf.cbSize          = sizeof(MA_WAVEFORMATEX);
+                wf.cbSize          = 0;
 
                 result = MA_SUCCESS;
             } else {
@@ -23918,7 +24029,7 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
         */
         #ifndef MA_WASAPI_NO_LOW_LATENCY_SHARED_MODE
         {
-            if ((streamFlags & MA_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM) == 0 || nativeSampleRate == wf.nSamplesPerSec) {
+            if (!usingProcessLoopback && ((streamFlags & MA_AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM) == 0 || nativeSampleRate == wf.nSamplesPerSec)) {
                 ma_IAudioClient3* pAudioClient3 = NULL;
                 hr = ma_IAudioClient_QueryInterface(pData->pAudioClient, &MA_IID_IAudioClient3, (void**)&pAudioClient3);
                 if (SUCCEEDED(hr)) {
@@ -24032,9 +24143,15 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
     }
 
 
-    /* Grab the name of the device. */
+    if (usingProcessLoopback) {
+        ma_strcpy_s(pData->deviceName, sizeof(pData->deviceName), "Process Loopback");
+        MA_ZERO_OBJECT(&pData->id);
+        MA_COPY_MEMORY(pData->id.wasapi, MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, (ma_wcslen(MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK) + 1) * sizeof(wchar_t));
+    }
+
+    /* Grab the name of an endpoint-backed device. */
     #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
-    {
+    if (!usingProcessLoopback) {
         ma_IPropertyStore *pProperties;
         hr = ma_IMMDevice_OpenPropertyStore(pDeviceInterface, STGM_READ, &pProperties);
         if (SUCCEEDED(hr)) {
@@ -24057,7 +24174,7 @@ static ma_result ma_device_init_internal__wasapi(ma_context* pContext, ma_device
     and whether or not it matches with our ma_device.
     */
     #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
-    {
+    if (!usingProcessLoopback) {
         /* Desktop */
         ma_context_get_device_id_from_MMDevice__wasapi(pContext, pDeviceInterface, &pData->id);
     }
@@ -24072,7 +24189,11 @@ done:
     /* Clean up. */
 #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
     if (pDeviceInterface != NULL) {
-        ma_IMMDevice_Release(pDeviceInterface);
+        if (usingProcessLoopback) {
+            ma_IUnknown_Release((ma_IUnknown*)pDeviceInterface);
+        } else {
+            ma_IMMDevice_Release(pDeviceInterface);
+        }
     }
 #else
     if (pDeviceInterface != NULL) {
@@ -24362,9 +24483,16 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     pDevice->wasapi.loopbackProcessID      = pConfig->wasapi.loopbackProcessID;
     pDevice->wasapi.loopbackProcessExclude = pConfig->wasapi.loopbackProcessExclude;
 
-    /* Exclusive mode is not allowed with loopback. */
-    if (pConfig->deviceType == ma_device_type_loopback && pConfig->playback.shareMode == ma_share_mode_exclusive) {
-        return MA_INVALID_DEVICE_CONFIG;
+    if (pConfig->deviceType == ma_device_type_loopback) {
+        /* WASAPI loopback, including process loopback, is shared-mode only. */
+        if (pDescriptorCapture->shareMode == ma_share_mode_exclusive) {
+            return MA_INVALID_DEVICE_CONFIG;
+        }
+
+        /* Process loopback is not associated with a physical render endpoint. */
+        if (pConfig->wasapi.loopbackProcessID != 0 && pDescriptorCapture->pDeviceID != NULL) {
+            return MA_INVALID_DEVICE_CONFIG;
+        }
     }
 
     if (pConfig->deviceType == ma_device_type_capture || pConfig->deviceType == ma_device_type_duplex || pConfig->deviceType == ma_device_type_loopback) {
@@ -24536,7 +24664,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
     */
 #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_GDK)
     if (pConfig->wasapi.noAutoStreamRouting == MA_FALSE) {
-        if ((pConfig->deviceType == ma_device_type_capture || pConfig->deviceType == ma_device_type_duplex || pConfig->deviceType == ma_device_type_loopback) && pConfig->capture.pDeviceID == NULL) {
+        if ((pConfig->deviceType == ma_device_type_capture || pConfig->deviceType == ma_device_type_duplex || pConfig->deviceType == ma_device_type_loopback) && pConfig->capture.pDeviceID == NULL && pConfig->wasapi.loopbackProcessID == 0) {
             pDevice->wasapi.allowCaptureAutoStreamRouting = MA_TRUE;
         }
         if ((pConfig->deviceType == ma_device_type_playback || pConfig->deviceType == ma_device_type_duplex) && pConfig->playback.pDeviceID == NULL) {
@@ -25468,7 +25596,7 @@ static ma_result ma_context_uninit__wasapi(ma_context* pContext)
         pContext->wasapi.hAvrt = NULL;
     }
 
-    #if defined(MA_WIN32_UWP)
+    #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_UWP)
     {
         if (pContext->wasapi.hMMDevapi) {
             ma_dlclose(ma_context_get_log(pContext), pContext->wasapi.hMMDevapi);
@@ -25539,7 +25667,7 @@ static ma_result ma_context_init__wasapi(ma_context* pContext, const ma_context_
     MA_ZERO_OBJECT(&pContext->wasapi);
 
 
-    #if defined(MA_WIN32_UWP)
+    #if defined(MA_WIN32_DESKTOP) || defined(MA_WIN32_UWP)
     {
         /* Link to mmdevapi so we can get access to ActivateAudioInterfaceAsync(). */
         pContext->wasapi.hMMDevapi = ma_dlopen(ma_context_get_log(pContext), "mmdevapi.dll");
@@ -25547,10 +25675,15 @@ static ma_result ma_context_init__wasapi(ma_context* pContext, const ma_context_
             pContext->wasapi.ActivateAudioInterfaceAsync = ma_dlsym(ma_context_get_log(pContext), pContext->wasapi.hMMDevapi, "ActivateAudioInterfaceAsync");
             if (pContext->wasapi.ActivateAudioInterfaceAsync == NULL) {
                 ma_dlclose(ma_context_get_log(pContext), pContext->wasapi.hMMDevapi);
-                return MA_NO_BACKEND;   /* ActivateAudioInterfaceAsync() could not be loaded. */
+                pContext->wasapi.hMMDevapi = NULL;
+                #if defined(MA_WIN32_UWP)
+                return MA_NO_BACKEND;   /* ActivateAudioInterfaceAsync() is required on UWP. */
+                #endif
             }
         } else {
-            return MA_NO_BACKEND;   /* Failed to load mmdevapi.dll which is required for ActivateAudioInterfaceAsync() */
+            #if defined(MA_WIN32_UWP)
+            return MA_NO_BACKEND;   /* Failed to load mmdevapi.dll, which is required on UWP. */
+            #endif
         }
     }
     #endif
