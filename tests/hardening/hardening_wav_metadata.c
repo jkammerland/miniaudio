@@ -18,7 +18,9 @@ typedef struct
     size_t dataSize;
     size_t cursor;
     size_t shortReadOffset;
+    size_t shortReadSize;
     ma_bool32 isMaterializationPass;
+    ma_bool32 shortReadDuringCount;
     ma_bool32 didShortRead;
 } metadata_stream;
 
@@ -136,12 +138,14 @@ static size_t metadata_stream_read(void* pUserData, void* pBufferOut, size_t byt
 {
     metadata_stream* pStream = (metadata_stream*)pUserData;
     size_t bytesAvailable = pStream->dataSize - pStream->cursor;
+    size_t shortReadSize = pStream->shortReadSize != 0 ? pStream->shortReadSize : 8;
+    ma_bool32 isShortReadPass = pStream->shortReadDuringCount ? !pStream->isMaterializationPass : pStream->isMaterializationPass;
 
     if (bytesToRead > bytesAvailable) {
         bytesToRead = bytesAvailable;
     }
-    if (pStream->isMaterializationPass && !pStream->didShortRead && pStream->cursor == pStream->shortReadOffset && bytesToRead > 8) {
-        bytesToRead = 8;
+    if (isShortReadPass && !pStream->didShortRead && pStream->cursor == pStream->shortReadOffset && bytesToRead > shortReadSize) {
+        bytesToRead = shortReadSize;
         pStream->didShortRead = MA_TRUE;
     }
     if (bytesToRead > 0) {
@@ -363,6 +367,95 @@ static int metadata_test_smpl_short_read(void)
     return 0;
 }
 
+static int metadata_test_trailing_empty_info_list(void)
+{
+    ma_uint8 infoList[14];
+    ma_uint8 emptyInfoList[4];
+    ma_uint8 wavData[1024];
+    metadata_allocator_state state;
+    ma_allocation_callbacks callbacks;
+    ma_dr_wav wav;
+    size_t wavSize;
+
+    MA_ZERO_MEMORY(infoList, sizeof(infoList));
+    MA_COPY_MEMORY(infoList + 0, "INFO", 4);
+    MA_COPY_MEMORY(infoList + 4, "INAM", 4);
+    metadata_write_u32le(infoList + 8, 2);
+    infoList[12] = 'A';
+    infoList[13] = '\0';
+    wavSize = metadata_make_wav(wavData, "LIST", infoList, (ma_uint32)sizeof(infoList));
+
+    MA_COPY_MEMORY(emptyInfoList, "INFO", 4);
+    wavSize = metadata_append_wav_chunk(wavData, wavSize, "LIST", emptyInfoList, (ma_uint32)sizeof(emptyInfoList));
+
+    MA_ZERO_OBJECT(&state);
+    callbacks = metadata_callbacks(&state);
+    if (!ma_dr_wav_init_memory_with_metadata(&wav, wavData, wavSize, 0, &callbacks)) {
+        printf("valid trailing empty INFO LIST failed to initialize\n");
+        return 1;
+    }
+    if (wav.metadataCount != 1 || wav.pMetadata[0].type != ma_dr_wav_metadata_type_list_info_title ||
+        wav.pMetadata[0].data.infoText.stringLength != 1 || strcmp(wav.pMetadata[0].data.infoText.pString, "A") != 0) {
+        printf("trailing empty INFO LIST changed preceding metadata\n");
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+
+    ma_dr_wav_uninit(&wav);
+    if (state.liveAllocationCount != 0) {
+        printf("trailing empty INFO LIST leaked metadata allocation\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int metadata_test_list_count_read_disagreement(void)
+{
+    ma_uint8 infoList[24];
+    ma_uint8 wavData[1024];
+    metadata_allocator_state state;
+    ma_allocation_callbacks callbacks;
+    metadata_stream stream;
+    ma_dr_wav wav;
+    size_t wavSize;
+    size_t listPayloadOffset;
+
+    MA_ZERO_MEMORY(infoList, sizeof(infoList));
+    MA_COPY_MEMORY(infoList + 0, "INFO", 4);
+    MA_COPY_MEMORY(infoList + 4, "INAM", 4);
+    metadata_write_u32le(infoList + 8, 2);
+    infoList[12] = 'A';
+    MA_COPY_MEMORY(infoList + 14, "IART", 4);
+    metadata_write_u32le(infoList + 18, 2);
+    infoList[22] = 'B';
+    wavSize = metadata_make_wav(wavData, "LIST", infoList, (ma_uint32)sizeof(infoList));
+    listPayloadOffset = 44 + 8;
+
+    MA_ZERO_OBJECT(&state);
+    callbacks = metadata_callbacks(&state);
+    MA_ZERO_OBJECT(&stream);
+    stream.pData = wavData;
+    stream.dataSize = wavSize;
+    stream.shortReadOffset = listPayloadOffset + 14;
+    stream.shortReadSize = 2;
+    stream.shortReadDuringCount = MA_TRUE;
+
+    if (ma_dr_wav_init_with_metadata(&wav, metadata_stream_read, metadata_stream_seek, metadata_stream_tell, &stream, 0, &callbacks)) {
+        printf("LIST count/read disagreement unexpectedly initialized\n");
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+    if (!stream.didShortRead) {
+        printf("LIST count/read disagreement did not exercise the count pass\n");
+        return 1;
+    }
+    if (state.liveAllocationCount != 0) {
+        printf("LIST count/read disagreement leaked metadata allocation\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int metadata_test_rf64_roundtrip(void)
 {
     ma_dr_wav wav;
@@ -442,6 +535,8 @@ int main(void)
     failed += metadata_test_smpl();
     failed += metadata_test_invalid_smpl_before_valid_metadata();
     failed += metadata_test_smpl_short_read();
+    failed += metadata_test_trailing_empty_info_list();
+    failed += metadata_test_list_count_read_disagreement();
     failed += metadata_test_rf64_roundtrip();
 
     return failed != 0;
