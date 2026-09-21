@@ -21,6 +21,9 @@ typedef struct
     ma_uint32 fenceReleaseCallCount;
     ma_uint32 failFenceAcquireCall;
     ma_result fenceAcquireFailureResult;
+    ma_resource_manager_data_stream* pRetirementDataStream;
+    void (* notificationEventOnSignal)(ma_async_notification* pNotification);
+    ma_uint32 notificationBeforeRetirementCount;
 } hardening_resource_manager_fault_state;
 
 static hardening_resource_manager_fault_state g_hardeningResourceManagerFaultState;
@@ -29,6 +32,17 @@ static void hardening_invalid_notification_on_signal(ma_async_notification* pNot
 {
     (void)pNotification;
     g_hardeningResourceManagerFaultState.invalidNotificationSignalCount += 1;
+}
+
+static void hardening_retirement_notification_on_signal(ma_async_notification* pNotification)
+{
+    ma_resource_manager_data_stream* pDataStream;
+
+    pDataStream = g_hardeningResourceManagerFaultState.pRetirementDataStream;
+    if (pDataStream != NULL && pDataStream->executionPointer != pDataStream->executionCounter) {
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount += 1;
+    }
+    g_hardeningResourceManagerFaultState.notificationEventOnSignal(pNotification);
 }
 
 static ma_result hardening_inline_notification_event_init(ma_async_notification_event* pNotificationEvent)
@@ -45,6 +59,10 @@ static ma_result hardening_inline_notification_event_init(ma_async_notification_
     result = ma_async_notification_event_init(pNotificationEvent);
     if (result == MA_SUCCESS) {
         g_hardeningResourceManagerFaultState.notificationInitSuccessCount += 1;
+        if (g_hardeningResourceManagerFaultState.pRetirementDataStream != NULL) {
+            g_hardeningResourceManagerFaultState.notificationEventOnSignal = pNotificationEvent->cb.onSignal;
+            pNotificationEvent->cb.onSignal = hardening_retirement_notification_on_signal;
+        }
     }
     return result;
 }
@@ -1170,6 +1188,60 @@ static int resource_manager_test_data_stream_load_failure(ma_result lengthResult
     return failed;
 }
 
+static int resource_manager_test_data_stream_notification_after_retirement(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_config config;
+    ma_resource_manager_data_stream dataStream;
+    ma_result result;
+    int failed;
+
+    MA_ZERO_OBJECT(&fixture);
+    fixture.vfs.callbacks.onOpen  = hardening_decoder_vfs_on_open;
+    fixture.vfs.callbacks.onClose = hardening_decoder_vfs_on_close;
+    fixture.vfs.callbacks.onRead  = hardening_decoder_vfs_on_read;
+    fixture.vfs.callbacks.onSeek  = hardening_decoder_vfs_on_seek;
+    fixture.vfs.callbacks.onTell  = hardening_decoder_vfs_on_tell;
+    fixture.vfs.openResult = MA_SUCCESS;
+    fixture.backendState.lengthResult = MA_NOT_IMPLEMENTED;
+    fixture.backendState.lengthInFrames = 13;
+    fixture.backendState.readResult = MA_SUCCESS;
+    fixture.pBackendVTable = &g_hardening_decoder_backend_vtable;
+
+    config = ma_resource_manager_config_init();
+    config.pVFS = (ma_vfs*)&fixture.vfs;
+    config.ppCustomDecodingBackendVTables = &fixture.pBackendVTable;
+    config.customDecodingBackendCount = 1;
+    config.pCustomDecodingBackendUserData = &fixture.backendState;
+    result = ma_resource_manager_init(&config, &fixture.resourceManager);
+    if (result != MA_SUCCESS) {
+        printf("data stream retirement fixture init failed: %d\n", result);
+        return 1;
+    }
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.pRetirementDataStream = &dataStream;
+    result = ma_resource_manager_data_stream_init(&fixture.resourceManager, "stream-retirement.custom", 0, NULL, &dataStream);
+    g_hardeningResourceManagerFaultState.pRetirementDataStream = NULL;
+
+    failed = 0;
+    if (result != MA_NOT_IMPLEMENTED || g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount != 0) {
+        printf("data stream retirement was result=%d early-notifications=%u\n",
+            result,
+            g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount);
+        failed = 1;
+    }
+    if (fixture.backendState.initCount != 1 || fixture.backendState.uninitCount != 1 || fixture.vfs.openCount != 1 || fixture.vfs.closeCount != 1) {
+        printf("data stream retirement lifetime was decoder=%u/%u VFS=%u/%u\n",
+            fixture.backendState.initCount,
+            fixture.backendState.uninitCount,
+            fixture.vfs.openCount,
+            fixture.vfs.closeCount);
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data stream retirement");
+    return failed;
+}
+
 static int resource_manager_test_decoder_length_failure_cleanup(void)
 {
     hardening_resource_manager_fixture fixture;
@@ -1506,6 +1578,7 @@ int main(void)
     failed += resource_manager_test_data_stream_uninit_post_failure();
     failed += resource_manager_test_data_stream_load_failure(MA_NOT_IMPLEMENTED, MA_FALSE, MA_NOT_IMPLEMENTED, "data stream length failure");
     failed += resource_manager_test_data_stream_load_failure(MA_SUCCESS, MA_TRUE, MA_OUT_OF_MEMORY, "data stream page allocation failure");
+    failed += resource_manager_test_data_stream_notification_after_retirement();
     failed += resource_manager_test_decoder_length_failure_cleanup();
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_FALSE, "flat-mid-decode-failure.custom");
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_TRUE, "paged-mid-decode-failure.custom");

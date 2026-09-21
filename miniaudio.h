@@ -74451,7 +74451,13 @@ done:
     /* We can only change the status away from MA_BUSY. If it's set to anything else it means an error has occurred somewhere or the uninitialization process has started (most likely). */
     ma_atomic_compare_and_swap_i32(&pDataStream->result, MA_BUSY, result);
 
-    /* Only signal the other threads after the result has been set just for cleanliness sake. */
+    /*
+    Retire the job before publishing completion. A waiter may destroy or reuse the stream as soon as
+    the notification or fence is signalled, so this must be the last access to pDataStream.
+    */
+    ma_atomic_fetch_add_32(&pDataStream->executionPointer, 1);
+
+    /* Only signal the other threads after the result has been set and the job has retired. */
     if (pJob->data.resourceManager.loadDataStream.pInitNotification != NULL) {
         ma_async_notification_signal(pJob->data.resourceManager.loadDataStream.pInitNotification);
     }
@@ -74459,7 +74465,6 @@ done:
         ma_fence_release(pJob->data.resourceManager.loadDataStream.pInitFence);
     }
 
-    ma_atomic_fetch_add_32(&pDataStream->executionPointer, 1);
     return result;
 }
 
