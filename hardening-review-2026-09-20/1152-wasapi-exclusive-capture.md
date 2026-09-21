@@ -38,6 +38,26 @@ SHA-256 is
 `exclusive-reported-10.wav` and `exclusive-device-native-10.wav` are suitable
 for manual inspection.
 
+### Final plugged-microphone continuation
+
+The final native campaign explicitly selected the same plugged-in USB endpoint
+at production commit `346acda` (production `miniaudio.h` is byte-identical at
+the final `a1229bf` test-only commit). Ten additional five-second cases covered
+shared/exclusive, native/converted input, 10/30 ms requested periods, and
+five-segment stop/start cycles. They added 3,109 successful packet acquisitions
+and 3,109 full releases with no ownership, cache, position, tuple, trace-drop,
+or callback-allocation violation. Ratios were 0.97991-1.00104; exclusive WAV
+peaks were 0.028-0.033 and shared WAVs were silent.
+
+Combined with the earlier campaign, 37 bounded cases (35 packet-instrumented)
+account for 10,481 successful packets and releases. The approximately 1.44x
+duration defect still did not reproduce. Evidence and listenable WAVs are in
+`/tmp/miniaudio-native-win-346acda-evidence`; transport manifest SHA-256 is
+`b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`.
+This increases confidence in the tested USB endpoint but does not substitute
+for the reporter's Realtek/M-Audio hardware or a known acoustic/frame-index
+watermark reaching the microphone.
+
 The capture loop at `miniaudio.h:24725` drains WASAPI packets, caches partial
 frames, calls `ReleaseBuffer` around line 24761, and obtains subsequent packets
 around line 24771. Discontinuity recovery near 24808 is conditional on duplex

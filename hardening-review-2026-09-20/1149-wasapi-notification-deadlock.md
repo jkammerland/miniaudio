@@ -3,8 +3,10 @@
 ## Assessment
 
 - **Priority:** P0 Windows lifecycle/correctness
-- **Exact checkout:** affected in source
-- **Local reproduction:** unavailable on Linux; native Windows validation needed
+- **Original checkout:** affected in source
+- **Current implementation:** fixed by transactional control-worker and
+  teardown commits through `0ab5917`
+- **Native validation:** MSVC lifecycle tests and 100/100 stress runs pass
 - **Platform:** Windows WASAPI
 - **Real-time concern:** OS callback performs blocking lifecycle work
 
@@ -14,9 +16,13 @@ violates the Windows callback contract and can deadlock with device/audio
 threads or teardown. The path also ignores reroute failure and restarts the
 device even if reinitialization cleared its clients and failed.
 
-The issue remains open. The maintainer explicitly declined to rework the 0.11.x
-path and favored a 0.12 redesign. This fork therefore remains affected even
-though newer development code differs.
+The upstream issue remains open, but this fork no longer performs rerouting in
+the notification callback. The callback publishes bounded coalesced work to a
+pre-created control worker. Candidate backend state is transactional; teardown
+stops publication, serializes terminal state, quiesces callbacks and `Release`,
+and can release COM services/quit even when local event creation is injected to
+fail. The source discussion below describes the original affected path and the
+constraints that shaped the implemented fix.
 
 ## Suspect code
 
@@ -119,8 +125,10 @@ then native hardware/virtual-device validation:
 5. Queue/event saturation and repeated init/destroy cycles.
 6. No callback after sidecar free, no COM leak, and no wait/lock/allocation in
    the OS callback, verified with instrumentation.
-7. Native MSVC and MinGW builds; Windows x86/x64 size, alignment, and offset
-   checks, with other supported architectures covered in CI.
+7. Native MSVC builds and Windows x86/x64 size, alignment, and offset checks,
+   with other supported architectures covered in CI. Windows MinGW is an
+   explicit owner-rejected deployment target for this effort and is recorded
+   as an exclusion, not a pass.
 
 Do not claim the Windows problem fixed based on compilation or Linux tests.
 

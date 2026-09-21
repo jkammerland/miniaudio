@@ -3,7 +3,8 @@
 ## Assessment
 
 - **Priority:** P1 requested feature / platform correctness
-- **Implementation:** `0b4727e` plus test correction `2d76179`
+- **Implementation:** `0b4727e` plus lifetime/test corrections through
+  `0ab5917` and `a1229bf`
 - **Deterministic validation:** passed on native Windows MSVC
 - **Live activation:** passed on Windows build 26200
 - **Content isolation:** unresolved because the host's whole-system positive
@@ -99,6 +100,12 @@ suite 15/15. A separate `MINIAUDIO_FORCE_C89=ON` WASAPI run passed 2/2; MSVC
 does not enforce strict C89, so this is a configuration check rather than a
 language-conformance claim.
 
+The final MSVC run at `a1229bf` again passed 15/15. The process-loopback test
+passed directly and in 100/100 independent processes. In every invocation,
+nine non-vacuous checkpoints required exactly one handler allocation and one
+event creation, exact live ownership across the simulated late callback, and
+matching free/close counts after retirement.
+
 ## Live watermark attempt
 
 Evidence is in `/tmp/miniaudio-0484-2d76179-evidence`; artifact manifest
@@ -134,6 +141,18 @@ unavailable.
 The saved `live-*.wav` files permit manual inspection, but they are bitwise
 silent; the `.reference.wav` files are producer callback data, not loopback
 captures.
+
+The final live continuation repeated the matrix against byte-identical
+production code. Whole-system, include, exclude, target-exit, no-stream,
+nonexistent-PID, and explicit-endpoint cases each delivered 288,000 frames.
+The whole-system positive control and every capture were again bitwise silent;
+producer references remained nonzero. One optional child-only calibration did
+not meet its frame-trigger precondition and is retained as a failed calibration,
+not counted as isolation evidence. Only one active render endpoint was
+available, so cross-endpoint/default-switch behavior remains untested.
+Evidence is in `/tmp/miniaudio-native-win-346acda-evidence` with transport
+manifest SHA-256
+`b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`.
 
 ## Remaining acceptance boundary
 
