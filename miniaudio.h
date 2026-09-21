@@ -65937,6 +65937,11 @@ static ma_bool32 ma_mp3_dr_callback__tell(void* pUserData, ma_int64* pCursor)
     ma_result result;
 
     MA_ASSERT(pMP3 != NULL);
+    MA_ASSERT(pCursor != NULL);
+
+    if (pMP3->onTell == NULL) {
+        return MA_FALSE;  /* Not implemented. */
+    }
 
     result = pMP3->onTell(pMP3->pReadSeekTellUserData, pCursor);
     if (result != MA_SUCCESS) {
@@ -66045,7 +66050,7 @@ MA_API ma_result ma_mp3_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_p
     {
         ma_bool32 mp3Result;
 
-        mp3Result = ma_dr_mp3_init(&pMP3->dr, ma_mp3_dr_callback__read, ma_mp3_dr_callback__seek, ma_mp3_dr_callback__tell, NULL, pMP3, pAllocationCallbacks);
+        mp3Result = ma_dr_mp3_init(&pMP3->dr, ma_mp3_dr_callback__read, ma_mp3_dr_callback__seek, onTell != NULL ? ma_mp3_dr_callback__tell : NULL, NULL, pMP3, pAllocationCallbacks);
         if (mp3Result != MA_TRUE) {
             return MA_INVALID_FILE;
         }

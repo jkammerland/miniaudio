@@ -31,6 +31,13 @@ typedef struct
     size_t cursor;
 } mp3_memory_vfs;
 
+typedef struct
+{
+    const ma_uint8* pData;
+    size_t dataSize;
+    size_t cursor;
+} mp3_callback_stream;
+
 static void* mp3_malloc(size_t size, void* pUserData)
 {
     mp3_allocator_state* pState = (mp3_allocator_state*)pUserData;
@@ -164,6 +171,84 @@ static ma_result mp3_memory_vfs_on_tell(ma_vfs* pVFS, ma_vfs_file file, ma_int64
     (void)file;
     *pCursor = (ma_int64)pMemoryVFS->cursor;
     return MA_SUCCESS;
+}
+
+static ma_result mp3_callback_read(void* pUserData, void* pBufferOut, size_t bytesToRead, size_t* pBytesRead)
+{
+    mp3_callback_stream* pStream = (mp3_callback_stream*)pUserData;
+    size_t bytesRemaining = pStream->dataSize - pStream->cursor;
+
+    if (bytesToRead > bytesRemaining) {
+        bytesToRead = bytesRemaining;
+    }
+    if (bytesToRead > 0) {
+        memcpy(pBufferOut, pStream->pData + pStream->cursor, bytesToRead);
+        pStream->cursor += bytesToRead;
+    }
+    if (pBytesRead != NULL) {
+        *pBytesRead = bytesToRead;
+    }
+
+    return MA_SUCCESS;
+}
+
+static ma_result mp3_callback_seek(void* pUserData, ma_int64 offset, ma_seek_origin origin)
+{
+    mp3_callback_stream* pStream = (mp3_callback_stream*)pUserData;
+    ma_int64 base;
+
+    if (origin == ma_seek_origin_start) {
+        base = 0;
+    } else if (origin == ma_seek_origin_current) {
+        base = (ma_int64)pStream->cursor;
+    } else if (origin == ma_seek_origin_end) {
+        base = (ma_int64)pStream->dataSize;
+    } else {
+        return MA_INVALID_ARGS;
+    }
+
+    if (offset < -base || offset > (ma_int64)pStream->dataSize - base) {
+        return MA_BAD_SEEK;
+    }
+
+    pStream->cursor = (size_t)(base + offset);
+    return MA_SUCCESS;
+}
+
+static int mp3_test_optional_tell(void)
+{
+    mp3_callback_stream stream;
+    ma_decoding_backend_config config;
+    ma_mp3 mp3;
+    ma_result result;
+    ma_uint64 framesRead;
+    float frames[32 * 2];
+    int failed;
+
+    MA_ZERO_OBJECT(&stream);
+    stream.pData = g_mp3_1117;
+    stream.dataSize = sizeof(g_mp3_1117);
+    config = ma_decoding_backend_config_init(ma_format_f32, 0);
+
+    result = ma_mp3_init(mp3_callback_read, mp3_callback_seek, NULL, &stream, &config, NULL, &mp3);
+    if (result != MA_SUCCESS) {
+        printf("MP3 callback initialization without tell failed: %d\n", result);
+        return 1;
+    }
+
+    failed = 0;
+    framesRead = 0;
+    result = ma_mp3_read_pcm_frames(&mp3, frames, 32, &framesRead);
+    if (result != MA_SUCCESS || framesRead != 32) {
+        printf("MP3 callback read without tell returned %d with %u:%08u frames\n",
+            result,
+            (ma_uint32)(framesRead >> 32),
+            (ma_uint32)framesRead);
+        failed = 1;
+    }
+
+    ma_mp3_uninit(&mp3, NULL);
+    return failed;
 }
 
 static int mp3_test_truncated_metadata(void)
@@ -422,6 +507,7 @@ done:
 int main(void)
 {
     int failed = 0;
+    failed += mp3_test_optional_tell();
     failed += mp3_test_truncated_metadata();
     failed += mp3_test_frame_count();
     failed += mp3_test_full_decode_allocation();
