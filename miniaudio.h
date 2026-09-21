@@ -36405,10 +36405,15 @@ static ma_result ma_device__track__coreaudio(ma_device* pDevice)
     return MA_SUCCESS;
 }
 
+#ifndef MA_COREAUDIO_DEVICE_UNTRACK_HOOK
+#define MA_COREAUDIO_DEVICE_UNTRACK_HOOK(pDevice) ((void)0)
+#endif
+
 static ma_result ma_device__untrack__coreaudio(ma_device* pDevice)
 {
     MA_ASSERT(pDevice != NULL);
 
+    MA_COREAUDIO_DEVICE_UNTRACK_HOOK(pDevice);
     ma_mutex_lock(&g_DeviceTrackingMutex_CoreAudio);
     {
         ma_uint32 iDevice;
@@ -45278,6 +45283,15 @@ MA_API void ma_device_uninit(ma_device* pDevice)
             ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
             ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
         }
+    }
+#endif
+
+    /* Remove desktop Core Audio devices before publishing terminal state. The default-device
+       worker holds the tracking mutex through reroute reconstruction, so this also waits for any
+       reconstruction already in flight and prevents a later one from observing this device. */
+#if defined(MA_HAS_COREAUDIO) && defined(MA_APPLE_DESKTOP)
+    if (pDevice->pContext->backend == ma_backend_coreaudio) {
+        ma_device__untrack__coreaudio(pDevice);
     }
 #endif
 

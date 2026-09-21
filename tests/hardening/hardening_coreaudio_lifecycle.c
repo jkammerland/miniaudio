@@ -3,10 +3,12 @@
 static ma_result hardening_coreaudio_init_internal(ma_context* pContext, ma_device_type deviceType, const ma_device_id* pDeviceID, void* pData, void* pDevice);
 static ma_result hardening_coreaudio_get_uid(ma_context* pContext, ma_uint32 objectID, size_t bufferSize, char* pBufferOut);
 static void hardening_coreaudio_callback_hook(void);
+static void hardening_coreaudio_untrack_hook(void* pDevice);
 
 #define MA_COREAUDIO_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData, pDevice) hardening_coreaudio_init_internal((pContext), (deviceType), (pDeviceID), (void*)(pData), (pDevice))
 #define MA_COREAUDIO_GET_AUDIO_OBJECT_UID(pContext, objectID, bufferSize, pBufferOut) hardening_coreaudio_get_uid((pContext), (objectID), (bufferSize), (pBufferOut))
 #define MA_COREAUDIO_DEFAULT_DEVICE_CALLBACK_HOOK() hardening_coreaudio_callback_hook()
+#define MA_COREAUDIO_DEVICE_UNTRACK_HOOK(pDevice) hardening_coreaudio_untrack_hook((void*)(pDevice))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
 
@@ -69,7 +71,12 @@ static ma_event* g_pCallbackEnteredEvent;
 static ma_event* g_pCallbackReleaseEvent;
 static ma_event* g_pSecondRemoveEvent;
 static ma_event* g_pRerouteCompletedEvent;
+static ma_event* g_pReinitEnteredEvent;
+static ma_event* g_pReinitReleaseEvent;
+static ma_event* g_pUntrackEnteredEvent;
 static volatile ma_uint32 g_callbackHookEnabled;
+static volatile ma_uint32 g_reinitHookEnabled;
+static volatile ma_uint32 g_untrackHookEnabled;
 
 typedef struct
 {
@@ -78,11 +85,25 @@ typedef struct
     volatile ma_uint32 complete;
 } hardening_uninit_thread_data;
 
+typedef struct
+{
+    ma_device* pDevice;
+    volatile ma_uint32 complete;
+} hardening_device_uninit_thread_data;
+
 static void hardening_coreaudio_callback_hook(void)
 {
     if (ma_atomic_load_32(&g_callbackHookEnabled) != MA_FALSE) {
         ma_event_signal(g_pCallbackEnteredEvent);
         ma_event_wait(g_pCallbackReleaseEvent);
+    }
+}
+
+static void hardening_coreaudio_untrack_hook(void* pDevice)
+{
+    (void)pDevice;
+    if (ma_atomic_load_32(&g_untrackHookEnabled) != MA_FALSE) {
+        ma_event_signal(g_pUntrackEnteredEvent);
     }
 }
 
@@ -243,6 +264,11 @@ static ma_result hardening_coreaudio_init_internal(ma_context* pContext, ma_devi
     (void)pDeviceID;
     (void)pDevice;
 
+    if (ma_atomic_load_32(&g_reinitHookEnabled) != MA_FALSE) {
+        ma_event_signal(g_pReinitEnteredEvent);
+        ma_event_wait(g_pReinitReleaseEvent);
+    }
+
     g_hooks.initCount += 1;
     if (deviceType == ma_device_type_capture) {
         g_hooks.captureInitCount += 1;
@@ -298,7 +324,12 @@ static void hardening_hooks_reset(void)
     g_pCallbackReleaseEvent = NULL;
     g_pSecondRemoveEvent = NULL;
     g_pRerouteCompletedEvent = NULL;
+    g_pReinitEnteredEvent = NULL;
+    g_pReinitReleaseEvent = NULL;
+    g_pUntrackEnteredEvent = NULL;
     ma_atomic_store_32(&g_callbackHookEnabled, MA_FALSE);
+    ma_atomic_store_32(&g_reinitHookEnabled, MA_FALSE);
+    ma_atomic_store_32(&g_untrackHookEnabled, MA_FALSE);
 }
 
 static void hardening_fixture_init(hardening_fixture* pFixture, ma_device_type deviceType)
@@ -695,6 +726,167 @@ done:
     return failed;
 }
 
+static ma_thread_result MA_THREADCALL hardening_public_device_uninit_thread(void* pUserData)
+{
+    hardening_device_uninit_thread_data* pThreadData = (hardening_device_uninit_thread_data*)pUserData;
+
+    ma_device_uninit(pThreadData->pDevice);
+    ma_atomic_store_32(&pThreadData->complete, MA_TRUE);
+    return (ma_thread_result)0;
+}
+
+static int hardening_test_public_uninit_waits_for_reroute(void)
+{
+    hardening_fixture fixture;
+    hardening_device_uninit_thread_data uninitData;
+    AudioObjectPropertyAddress address;
+    ma_event reinitEnteredEvent;
+    ma_event reinitReleaseEvent;
+    ma_event untrackEnteredEvent;
+    ma_thread uninitThread;
+    ma_result result;
+    ma_bool32 trackingInitialized = MA_FALSE;
+    ma_bool32 deviceTracked = MA_FALSE;
+    ma_bool32 reinitEnteredInitialized = MA_FALSE;
+    ma_bool32 reinitReleaseInitialized = MA_FALSE;
+    ma_bool32 untrackEnteredInitialized = MA_FALSE;
+    ma_bool32 coreStopEventInitialized = MA_FALSE;
+    ma_bool32 wakeupEventInitialized = MA_FALSE;
+    ma_bool32 startEventInitialized = MA_FALSE;
+    ma_bool32 stopEventInitialized = MA_FALSE;
+    ma_bool32 startStopLockInitialized = MA_FALSE;
+    ma_bool32 uninitThreadCreated = MA_FALSE;
+    int failed = 0;
+
+    hardening_fixture_init(&fixture, ma_device_type_playback);
+    MA_ZERO_OBJECT(&uninitData);
+    fixture.context.coreaudio.AudioObjectAddPropertyListener = (ma_proc)hardening_add_listener;
+    fixture.context.coreaudio.AudioObjectRemovePropertyListener = (ma_proc)hardening_remove_listener;
+    fixture.context.callbacks.onDeviceUninit = ma_device_uninit__coreaudio;
+
+    result = ma_event_init(&reinitEnteredEvent);
+    if (result != MA_SUCCESS) { return 1; }
+    reinitEnteredInitialized = MA_TRUE;
+    result = ma_event_init(&reinitReleaseEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    reinitReleaseInitialized = MA_TRUE;
+    result = ma_event_init(&untrackEnteredEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    untrackEnteredInitialized = MA_TRUE;
+    result = ma_event_init(&fixture.device.coreaudio.stopEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    coreStopEventInitialized = MA_TRUE;
+    result = ma_event_init(&fixture.device.wakeupEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    wakeupEventInitialized = MA_TRUE;
+    result = ma_event_init(&fixture.device.startEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    startEventInitialized = MA_TRUE;
+    result = ma_event_init(&fixture.device.stopEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    stopEventInitialized = MA_TRUE;
+    result = ma_mutex_init(&fixture.device.startStopLock);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    startStopLockInitialized = MA_TRUE;
+
+    ma_device__set_state(&fixture.device, ma_device_state_stopped);
+    fixture.device.coreaudio.isDefaultPlaybackDevice = MA_TRUE;
+    result = ma_context__init_device_tracking__coreaudio(&fixture.context);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    trackingInitialized = MA_TRUE;
+    result = ma_device__track__coreaudio(&fixture.device);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    deviceTracked = MA_TRUE;
+
+    g_pReinitEnteredEvent = &reinitEnteredEvent;
+    g_pReinitReleaseEvent = &reinitReleaseEvent;
+    g_pUntrackEnteredEvent = &untrackEnteredEvent;
+    ma_atomic_store_32(&g_reinitHookEnabled, MA_TRUE);
+    ma_atomic_store_32(&g_untrackHookEnabled, MA_TRUE);
+
+    address.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    address.mScope = kAudioObjectPropertyScopeGlobal;
+    address.mElement = AUDIO_OBJECT_PROPERTY_ELEMENT;
+    ma_default_device_changed__coreaudio(kAudioObjectSystemObject, 1, &address, NULL);
+    ma_event_wait(&reinitEnteredEvent);
+
+    uninitData.pDevice = &fixture.device;
+    result = ma_thread_create(&uninitThread, ma_thread_priority_normal, 0, hardening_public_device_uninit_thread, &uninitData, &fixture.context.allocationCallbacks);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    uninitThreadCreated = MA_TRUE;
+    ma_event_wait(&untrackEnteredEvent);
+
+    if (ma_device_get_state(&fixture.device) != ma_device_state_stopped ||
+        ma_atomic_load_32(&uninitData.complete) != MA_FALSE) {
+        printf("public Core Audio uninit published terminal state before reroute retirement\n");
+        failed = 1;
+    }
+
+    ma_atomic_store_32(&g_reinitHookEnabled, MA_FALSE);
+    ma_event_signal(&reinitReleaseEvent);
+    ma_thread_wait(&uninitThread);
+    uninitThreadCreated = MA_FALSE;
+    deviceTracked = MA_FALSE;
+    coreStopEventInitialized = MA_FALSE;
+    wakeupEventInitialized = MA_FALSE;
+    startEventInitialized = MA_FALSE;
+    stopEventInitialized = MA_FALSE;
+    startStopLockInitialized = MA_FALSE;
+
+    if (ma_atomic_load_32(&uninitData.complete) != MA_TRUE || g_hooks.initCount != 1 ||
+        g_hooks.publicReroutedCount != 1 || g_hooks.candidatePlaybackDisposeCount != 1 ||
+        g_TrackedDeviceCount_CoreAudio != 0 || fixture.device.pContext != NULL ||
+        ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0) {
+        printf("public Core Audio uninit/reroute mismatch: complete=%u init=%u rerouted=%u dispose=%u tracked=%u context=%p live=%lu\n",
+            ma_atomic_load_32(&uninitData.complete), g_hooks.initCount, g_hooks.publicReroutedCount,
+            g_hooks.candidatePlaybackDisposeCount, g_TrackedDeviceCount_CoreAudio, (void*)fixture.device.pContext,
+            (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount));
+        failed = 1;
+    }
+
+done:
+    ma_atomic_store_32(&g_reinitHookEnabled, MA_FALSE);
+    ma_atomic_store_32(&g_untrackHookEnabled, MA_FALSE);
+    if (reinitReleaseInitialized) {
+        ma_event_signal(&reinitReleaseEvent);
+    }
+    if (uninitThreadCreated) {
+        ma_thread_wait(&uninitThread);
+        deviceTracked = MA_FALSE;
+        coreStopEventInitialized = MA_FALSE;
+        wakeupEventInitialized = MA_FALSE;
+        startEventInitialized = MA_FALSE;
+        stopEventInitialized = MA_FALSE;
+        startStopLockInitialized = MA_FALSE;
+    }
+    if (deviceTracked) {
+        ma_mutex_lock(&g_DeviceTrackingMutex_CoreAudio);
+        ma_mutex_unlock(&g_DeviceTrackingMutex_CoreAudio);
+        ma_device__set_state(&fixture.device, ma_device_state_uninitialized);
+        ma_device_uninit__coreaudio(&fixture.device);
+        coreStopEventInitialized = MA_FALSE;
+    }
+    if (trackingInitialized) {
+        result = ma_context__uninit_device_tracking__coreaudio(&fixture.context);
+        if (result != MA_SUCCESS) {
+            printf("public Core Audio uninit tracking teardown failed: %d\n", result);
+            failed = 1;
+        }
+    }
+    if (startStopLockInitialized) { ma_mutex_uninit(&fixture.device.startStopLock); }
+    if (stopEventInitialized) { ma_event_uninit(&fixture.device.stopEvent); }
+    if (startEventInitialized) { ma_event_uninit(&fixture.device.startEvent); }
+    if (wakeupEventInitialized) { ma_event_uninit(&fixture.device.wakeupEvent); }
+    if (coreStopEventInitialized) { ma_event_uninit(&fixture.device.coreaudio.stopEvent); }
+    g_pReinitEnteredEvent = NULL;
+    g_pReinitReleaseEvent = NULL;
+    g_pUntrackEnteredEvent = NULL;
+    if (untrackEnteredInitialized) { ma_event_uninit(&untrackEnteredEvent); }
+    if (reinitReleaseInitialized) { ma_event_uninit(&reinitReleaseEvent); }
+    if (reinitEnteredInitialized) { ma_event_uninit(&reinitEnteredEvent); }
+    return failed;
+}
+
 static int hardening_test_control_worker_filters_explicit_endpoint(void)
 {
     hardening_fixture fixture;
@@ -963,6 +1155,7 @@ int main(void)
     failed += hardening_test_callback_retirement_before_pipe_close();
     failed += hardening_test_callback_publication_is_bounded_and_coalesced();
     failed += hardening_test_control_worker_dispatches_published_reroute();
+    failed += hardening_test_public_uninit_waits_for_reroute();
 
     g_ppTrackedDevices_CoreAudio = NULL;
     g_TrackedDeviceCap_CoreAudio = 0;
