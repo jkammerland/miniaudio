@@ -1,3 +1,6 @@
+static void post_init_failure_event_uninit(void* pEvent);
+
+#define MA_DEVICE_INIT_FAILURE_EVENT_UNINIT(pEvent) post_init_failure_event_uninit((void*)(pEvent))
 #include "../../miniaudio.c"
 
 #include <stdio.h>
@@ -19,6 +22,17 @@ typedef struct
 
 static ma_uint32 g_backendInitCount;
 static ma_uint32 g_backendUninitCount;
+static ma_uint32 g_failureEventUninitCount;
+static void* g_failureEventUninitOrder[3];
+
+static void post_init_failure_event_uninit(void* pEvent)
+{
+    if (g_failureEventUninitCount < ma_countof(g_failureEventUninitOrder)) {
+        g_failureEventUninitOrder[g_failureEventUninitCount] = pEvent;
+    }
+    g_failureEventUninitCount += 1;
+    ma_event_uninit((ma_event*)pEvent);
+}
 
 static ma_result post_init_backend_init_invalid_descriptor(ma_device* pDevice, const ma_device_config* pConfig, ma_device_descriptor* pPlayback, ma_device_descriptor* pCapture)
 {
@@ -35,6 +49,16 @@ static ma_result post_init_backend_uninit(ma_device* pDevice)
     (void)pDevice;
     g_backendUninitCount += 1;
     return MA_SUCCESS;
+}
+
+static ma_result post_init_backend_reject(ma_device* pDevice, const ma_device_config* pConfig, ma_device_descriptor* pPlayback, ma_device_descriptor* pCapture)
+{
+    (void)pDevice;
+    (void)pConfig;
+    (void)pPlayback;
+    (void)pCapture;
+    g_backendInitCount += 1;
+    return MA_ERROR;
 }
 
 static void* post_init_malloc(size_t size, void* pUserData)
@@ -262,6 +286,38 @@ static int post_init_test_backend_rollback_before_worker(void)
     return 0;
 }
 
+static int post_init_test_backend_rejection_releases_all_events(void)
+{
+    ma_context context;
+    ma_device device;
+    ma_device_config config;
+    ma_result result;
+
+    MA_ZERO_OBJECT(&context);
+    MA_ZERO_OBJECT(&device);
+    MA_ZERO_MEMORY(g_failureEventUninitOrder, sizeof(g_failureEventUninitOrder));
+    g_backendInitCount = 0;
+    g_backendUninitCount = 0;
+    g_failureEventUninitCount = 0;
+    context.callbacks.onDeviceInit = post_init_backend_reject;
+    context.callbacks.onDeviceUninit = post_init_backend_uninit;
+    config = ma_device_config_init(ma_device_type_playback);
+
+    result = ma_device_init(&context, &config, &device);
+    if (result != MA_ERROR || g_backendInitCount != 1 || g_backendUninitCount != 0 ||
+        g_failureEventUninitCount != 3 ||
+        g_failureEventUninitOrder[0] != &device.stopEvent ||
+        g_failureEventUninitOrder[1] != &device.startEvent ||
+        g_failureEventUninitOrder[2] != &device.wakeupEvent) {
+        printf("backend rejection cleanup mismatch: result=%d init=%u uninit=%u events=%u order=%p/%p/%p\n",
+            result, g_backendInitCount, g_backendUninitCount, g_failureEventUninitCount,
+            g_failureEventUninitOrder[0], g_failureEventUninitOrder[1], g_failureEventUninitOrder[2]);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -269,5 +325,6 @@ int main(void)
     failed += post_init_test_failure(2, "cache allocation failure");
     failed += post_init_test_success();
     failed += post_init_test_backend_rollback_before_worker();
+    failed += post_init_test_backend_rejection_releases_all_events();
     return failed != 0;
 }

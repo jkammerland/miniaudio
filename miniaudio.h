@@ -44867,10 +44867,15 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
     }
 
 
+#ifndef MA_DEVICE_INIT_FAILURE_EVENT_UNINIT
+#define MA_DEVICE_INIT_FAILURE_EVENT_UNINIT(pEvent) ma_event_uninit((pEvent))
+#endif
+
     result = pContext->callbacks.onDeviceInit(pDevice, pConfig, &descriptorPlayback, &descriptorCapture);
     if (result != MA_SUCCESS) {
-        ma_event_uninit(&pDevice->startEvent);
-        ma_event_uninit(&pDevice->wakeupEvent);
+        MA_DEVICE_INIT_FAILURE_EVENT_UNINIT(&pDevice->stopEvent);
+        MA_DEVICE_INIT_FAILURE_EVENT_UNINIT(&pDevice->startEvent);
+        MA_DEVICE_INIT_FAILURE_EVENT_UNINIT(&pDevice->wakeupEvent);
         ma_mutex_uninit(&pDevice->startStopLock);
         return result;
     }
