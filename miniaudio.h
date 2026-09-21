@@ -19088,6 +19088,9 @@ MA_API ma_result ma_job_queue_init_preallocated(const ma_job_queue_config* pConf
     if (result != MA_SUCCESS) {
         return result;
     }
+    if (pHeap == NULL) {
+        return MA_INVALID_ARGS;
+    }
 
     pQueue->_pHeap = pHeap;
     MA_ZERO_MEMORY(pHeap, heapLayout.sizeInBytes);

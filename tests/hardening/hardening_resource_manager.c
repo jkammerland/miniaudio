@@ -2162,6 +2162,24 @@ static int resource_manager_test_shared_synchronous_failure(void)
     return failed;
 }
 
+static int resource_manager_test_job_queue_rejects_null_heap(void)
+{
+    ma_job_queue_config config;
+    ma_job_queue queue;
+    ma_result result;
+
+    MA_ZERO_OBJECT(&queue);
+    config = ma_job_queue_config_init(MA_JOB_QUEUE_FLAG_NON_BLOCKING, 4);
+    result = ma_job_queue_init_preallocated(&config, NULL, &queue);
+    if (result != MA_INVALID_ARGS || queue._pHeap != NULL || queue.pJobs != NULL) {
+        printf("preallocated job queue accepted null heap: result=%d heap=%p jobs=%p\n",
+            result, queue._pHeap, (void*)queue.pJobs);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -2196,6 +2214,7 @@ int main(void)
     failed += resource_manager_test_custom_vfs_failure_cleanup();
     failed += resource_manager_test_external_decoded_storage_ownership();
     failed += resource_manager_test_shared_synchronous_failure();
+    failed += resource_manager_test_job_queue_rejects_null_heap();
 
     return failed != 0;
 }
