@@ -1,5 +1,11 @@
 # Implementation prompt: miniaudio backend hardening
 
+> **Execution status (2026-09-21):** implementation and exact native Windows
+> validation have reached `fee518b`. `UNRESOLVED.md` is the authoritative
+> current disposition. In particular, the owner explicitly rejected Windows
+> GCC/MinGW deployment; do not provision or run MinGW unless that decision is
+> later reversed.
+
 You are the lead engineer implementing and validating the miniaudio hardening
 work described below. This prompt authorizes implementation, local testing,
 native Windows/macOS offload validation, and scoped local commits. It does not
@@ -20,6 +26,8 @@ break, or modifying unrelated repositories.
 - Prior investigation evidence: `/tmp/miniaudio-audit-20260920`
 - Coroutine framework, read-only unless a separate proven framework defect
   requires explicit approval: `/home/ai-dev1/repos/timer_wheels`
+- Steam Audio source for the optional integration:
+  `/mnt/d2/agent-workspace/repos/steam-audio`
 
 The intended miniaudio/Steam Audio consumer is in another repository. Do not
 invent an integration in `timer_wheels` or in the experimental repositories.
@@ -63,8 +71,11 @@ deterministic source-invariant test proves the defect:
    do not infer that draining multiple packets is itself wrong.
 3. #1155: incomplete optional-libopus UAF claim. Pin dependencies and establish
    a valid call sequence before changing ownership.
-4. #1157: GCC/MinGW LTO atomic/node-bus diagnostics. Reproduce the exact warning
-   before changing atomics or object layout.
+4. #1157: GCC/MinGW LTO atomic/node-bus diagnostics. **Owner-rejected Windows
+   deployment scope.** Document it as unresolved/out of scope; do not install,
+   invoke, or claim MinGW passed. Reopen only after a new owner decision or an
+   external exact-toolchain reproducer, and never change atomics or layout for
+   an unreproduced diagnostic.
 5. #484: process-specific WASAPI loopback. Treat this as a separate feature
    commit after lifecycle correctness. Implement it only with explicit
    unsupported-OS behavior and native content tests; never silently fall back
@@ -227,7 +238,7 @@ available device and permission; record unavailable hardware/permissions as a
 limitation rather than skipping a core assertion. Any macOS-specific fix gets
 its own conventional commit and issue/evidence note.
 
-### Optional Opus and node/LTO work
+### Optional codecs and rejected MinGW scope
 
 For Opus, record exact `opusfile`, `libopus`, and `libogg` versions. Cover open
 failure, malformed/chained streams, seek/EOF, callback userdata lifetime,
@@ -235,11 +246,11 @@ resource-manager cancellation, and shutdown. Concurrent public read/uninit is
 not assumed valid; prove the owner-mediated sequence first. Do not add a blind
 reference count that moves final destruction onto an audio callback.
 
-For #1157, preserve real atomics and assertions. Obtain exact MinGW/GCC version
-and warning trace, compare C/C++, LTO/non-LTO, and add attach/detach/reattach,
-multi-bus, and resource-manager atomic lifetime tests. If it is a compiler
-false positive, isolate it and use the narrowest documented workaround only
-after checking generated code.
+For #1157, preserve real atomics and assertions, but do not provision or run a
+Windows MinGW/GCC toolchain. The owner has rejected that deployment target.
+Keep the report explicitly unresolved/out of scope; only a future reversal of
+that decision or a supplied external exact-toolchain reproducer can reopen the
+compiler investigation.
 
 ## Audio callback and coroutine lifetime requirements
 
@@ -327,7 +338,7 @@ and run Ninja in the same `cmd.exe` process. Test at least:
 
 - MSVC Debug and optimized builds;
 - Clang/clang-cl when present;
-- MinGW GCC/LTO when present or provisioned in an attempt-owned verified root;
+- do not install or run MinGW GCC/LTO under the current owner-rejected scope;
 - scalar/SIMD variants and all deterministic core tests;
 - ASan/UBSan configurations supported by the selected compiler;
 - fake WASAPI lifecycle/failure tests;
@@ -394,7 +405,8 @@ suggested sequence is:
 9. Separate `fix(coreaudio): ...` commits for each reproduced macOS defect
 10. `fix(examples): synchronize Steam Audio state updates`, only with SDK
     validation
-11. Conditional fixes for #1152, #1155, and #1157 after reproduction
+11. Conditional fixes for #1152 and #1155 after reproduction; leave #1157
+    unresolved under the owner-rejected Windows MinGW scope
 12. `feat(wasapi): support process-scoped loopback capture`, after correctness
 
 Reorder only when dependencies require it. Do not combine unrelated platform,

@@ -125,3 +125,17 @@ Steam Audio does not mitigate it.
 The upstream issue remains open. Development-branch guards are useful
 references but are not present in this fork and have not been imported or
 validated as a unit.
+
+## Implemented result
+
+The parser fixes use checked 64-bit arithmetic and split forward seeks rather
+than narrowing an untrusted remainder to `int`. The permanent sparse callback
+fixtures require a valid `INT_MAX` remainder to traverse with one bounded
+maximum seek, reject `INT_MAX + 1` and `UINT32_MAX` format remainders, and
+accept a valid unknown chunk larger than `INT_MAX` without allocating its
+declared payload. Operation budgets make an exhausted loop a test failure.
+
+`fee518b` also corrects Wave64 padding to round up to the next 8-byte boundary,
+so the large sparse fixtures no longer encode the parser's old self-consistent
+but nonstandard alignment. The final GCC/Clang strict builds, ASan/UBSan, and
+native MSVC suite all pass these cases.

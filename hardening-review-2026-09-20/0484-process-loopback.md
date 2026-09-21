@@ -4,7 +4,7 @@
 
 - **Priority:** P1 requested feature / platform correctness
 - **Implementation:** `0b4727e` plus lifetime/test corrections through
-  `0ab5917` and `a1229bf`
+  `fee518b`
 - **Deterministic validation:** passed on native Windows MSVC
 - **Live activation:** passed on Windows build 26200
 - **Content isolation:** unresolved because the host's whole-system positive
@@ -153,6 +153,32 @@ available, so cross-endpoint/default-switch behavior remains untested.
 Evidence is in `/tmp/miniaudio-native-win-346acda-evidence` with transport
 manifest SHA-256
 `b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`.
+
+## Exact `fee518b` watermarked campaign
+
+The final MSVC build passed the deterministic process-loopback target directly
+and in 100/100 independent bounded launches. A fresh live campaign then ran
+nine required named-event scenarios: whole-system control first, target
+include, sibling exclude, actual descendant inclusion, target exit while
+capture continued, nonexistent PID, no target stream, explicit whole-system
+render selection, and process capture with producers on that explicit render
+endpoint. Each captured exactly 288,000 frames; active producers crossed their
+48,000-frame thresholds and exited cleanly. The target, sibling, and child
+references contain distinct 697/941, 1201/1601, and 2003/2503 Hz pairs.
+
+Every captured file—including the whole-system positive control—remained
+bitwise zero while producer references were nonzero. Therefore activation,
+frame delivery, exit, and teardown pass, but include/exclude/descendant
+acoustic isolation does not. An initial child-only calibration exposed a
+harness circular wait and failed; a separately corrected named-event rerun
+completed, remained silent, and is recorded separately rather than replacing
+the failure.
+
+Evidence is under `/tmp/miniaudio-native-win-fee518b-evidence/loopback/`.
+For manual listening, compare `control.wav.role0.reference.wav` with
+`control.wav`, then the corresponding `include`, `exclude`, and `child` pairs.
+The transport manifest ID is
+`4f40ae7b301cf21f43436efd99e41d97f21465652cf8631d2c0304ba5911e52a`.
 
 ## Remaining acceptance boundary
 

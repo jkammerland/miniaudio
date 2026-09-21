@@ -2,7 +2,7 @@
 
 > **Current implementation status (2026-09-21):** the confirmed implementation
 > and independent-review findings have been addressed and natively validated
-> through `a1229bf`. See
+> through `fee518b`. See
 > [UNRESOLVED.md](UNRESOLVED.md) for the authoritative table of reports that
 > were not reproducible or could not receive a valid hardware/content verdict.
 > The proposal language below describes the earlier review phase and is retained
@@ -32,16 +32,16 @@ offload endpoints.
 
 | Priority | Issue | Checkout result | Platform |
 |---|---|---|---|
-| P0 | [#1151: malformed WAV decode loop](1151-malformed-wav-loop.md) | Fixed; multi-container/codec and bounded-fault regressions pass | All |
+| P0 | [#1151: malformed WAV decode loop](1151-malformed-wav-loop.md) | Fixed; large-remainder, W64 alignment, multi-container/codec, and bounded-fault regressions pass | All |
 | P0 | [#1101 / CVE-2026-32837: BEXT over-read](1101-bext-coding-history-overread.md) | Fixed with bounded metadata traversal | All, metadata opt-in |
 | P0 | [#1141: failed resource load UAF](1141-resource-manager-failed-load-uaf.md) | Fixed with owner and physical-retirement barriers | All |
 | P0-related | [#1129: resource-manager duplicate report](1129-resource-manager-error-path-uaf.md) | Fixed with the same ownership family | All |
 | P0-related | [#1139: resource-manager duplicate report](1139-resource-manager-error-path-uaf.md) | Fixed with the same ownership family | All |
 | P0 | [#1138: SMPL metadata allocation](1138-smpl-unbounded-allocation.md) | Fixed with checked chunk bounds and allocation caps | All, metadata opt-in |
-| P0 | [#1123: fact-chunk underflow](1123-fact-chunk-seek-underflow.md) | Fixed; fact sizes 0-3/4/8 are covered | All |
+| P0 | [#1123: fact-chunk underflow](1123-fact-chunk-seek-underflow.md) | Fixed; RIFF/RIFX/W64 fact, fixed-header, padding, and large-chunk boundaries are covered | All |
 | P0 | [#1128: MP3 metadata over-read](1128-mp3-metadata-overread.md) | Fixed; exact field boundaries and callback faults pass | All |
 | P0 | [#1149: WASAPI callback deadlock](1149-wasapi-notification-deadlock.md) | Fixed with transactional control-worker lifecycle tests | Windows |
-| P1 | [#1152: exclusive capture duplication](1152-wasapi-exclusive-capture.md) | Not reproduced in 27 USB-endpoint runs; report remains open | Windows |
+| P1 | [#1152: exclusive capture duplication](1152-wasapi-exclusive-capture.md) | Not reproduced in 49 USB-endpoint runs; report remains open | Windows |
 | P1 | [#1153: spatialization glitches](1153-spatialization-gain-smoothing.md) | Related DSP defects reproduced | All; original report Windows |
 | P1 | [#1155: optional Opus UAF report](1155-libopus-uaf-report.md) | Alleged UAF unconfirmed; pinned matrix found/fixed separate callback bugs | Optional Opus |
 | P1 | [#1157: GCC LTO diagnostics](1157-gcc-lto-atomics.md) | Unresolved; Windows MinGW validation owner-declined | Primarily Windows/MinGW report |

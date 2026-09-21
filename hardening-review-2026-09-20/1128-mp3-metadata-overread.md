@@ -96,3 +96,14 @@ No public ABI change is expected. Invalid optional metadata may no longer
 affect length/delay detection, while valid audio should still decode. The issue
 was closed based on development-branch work, but the vulnerable reads remain
 in this exact release checkout and reproduce through its default decoder.
+
+## Implemented callback-allocation result
+
+The metadata bounds and callback fault matrix are landed. A separate refill
+guard prevents decode or callback pointer arithmetic when callback storage is
+missing. Final review correctly observed that the original synthetic
+non-null-capacity/null-pointer fixture was not proof of allocator failure.
+`fee518b` therefore adds counted refusing callbacks for both the initial
+allocation and a growth realloc while a previously allocated buffer remains
+live. No read callback is entered, the retained pointer/capacity are unchanged
+after growth failure, and final allocation/free/live counts balance exactly.

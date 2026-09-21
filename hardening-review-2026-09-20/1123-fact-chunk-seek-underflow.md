@@ -102,3 +102,24 @@ No public API or layout change is expected. Only structurally invalid files
 should change behavior. The issue was closed after a development-branch fix,
 but the unchecked subtraction remains in this release checkout. Steam Audio
 does not affect the parser and cannot mitigate a decoder-initialization stall.
+
+## Implemented result
+
+The fixed parser now rejects RIFF/RIFX fact payloads shorter than four bytes,
+W64 fact payloads shorter than eight bytes, W64 total chunk sizes below its
+24-byte header, and short AIFF COMM/SSND headers before reading or subtracting.
+`fee518b` completes the requested independent matrix: RIFX fact sizes 0-4,
+W64 sizes 0-8, valid trailing extensions (including a non-aligned W64 child),
+W64 totals 0-23, and AIFF fixed-header boundaries.
+
+The independent W64 fixture exposed a separate alignment defect. Wave64 pads
+to the *next* 8-byte boundary, so the correct calculation is:
+
+```c
+padding = (8 - (chunkSize % 8)) % 8;
+```
+
+The former `chunkSize % 8` happened to agree only for already aligned and
+half-aligned sizes. Correcting it makes both reading and writing conform to the
+container alignment rule. The full strict, sanitizer, optional-codec, Steam
+Audio, and exact MSVC 15/15 matrices pass after the change.

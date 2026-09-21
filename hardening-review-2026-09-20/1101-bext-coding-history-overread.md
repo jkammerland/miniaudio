@@ -113,3 +113,13 @@ The issue is closed upstream and the CVE record references a later fix, but
 this exact checkout still reproduces the over-read. GitHub closure is not patch
 ancestry. The primary record is CVE-2026-32837; the relevant upstream miniaudio
 commit is `1df46ae9a0eed5aa9f58b179d2cc4af5d23f8bde`.
+
+## Implemented nested-LIST result
+
+The BEXT termination/counting fix and semantic regressions are landed. Final
+review also found that nested LIST child sizes could influence metadata counts
+before the child payload and padding were proved to fit the parent LIST.
+`fee518b` validates the child ID/size headers, payload, and internal pad before
+counting, allocation, read, or seek. Known, unknown, and label children plus
+truncated ID/size and missing-pad cases use a reject-all allocator and require
+zero allocation attempts; a valid unknown INFO child still round-trips.

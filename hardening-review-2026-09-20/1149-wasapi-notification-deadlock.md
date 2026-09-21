@@ -5,7 +5,7 @@
 - **Priority:** P0 Windows lifecycle/correctness
 - **Original checkout:** affected in source
 - **Current implementation:** fixed by transactional control-worker and
-  teardown commits through `0ab5917`
+  teardown commits through `fee518b`
 - **Native validation:** MSVC lifecycle tests and 100/100 stress runs pass
 - **Platform:** Windows WASAPI
 - **Real-time concern:** OS callback performs blocking lifecycle work
@@ -143,3 +143,25 @@ Steam Audio DSP state should remain independent of device replacement. Stop
 and quiesce mixing before changing device/backend clients; retain or rebuild
 DSP state on a control thread according to the integration's own lifetime
 contract.
+
+## Implemented command-retirement result
+
+Notification deferral, reroute replacement, COM release affinity, and teardown
+quiescence are landed. Final review reopened the control command's exceptional
+path: the ring copied a stack-backed command before releasing its semaphore,
+so semaphore failure returned rejection while retaining the pointers; event
+wait failure could similarly return before worker retirement; failed quit
+could let generic context cleanup destroy synchronization under the worker.
+
+`fee518b` makes command acceptance transactional. While holding the ring lock,
+it releases the semaphore first; the consumer wakes but cannot inspect the
+ring until the successful command copy/count commit and unlock. Failure leaves
+the ring unchanged. Accepted release waits through the worker's final payload
+access even if the event wait reports an error, and release/quit retry failed
+publication so quit always joins before synchronization teardown.
+
+Native fault seams prove: one failed wake-token release leaves count/index
+unchanged; the retry publishes exactly once; an injected accepted-command wait
+error returns only after all three mock COM interfaces release exactly once on
+the worker; and a failed first quit publication retries and joins. The exact
+MSVC target passes directly and in 100/100 independent launches.

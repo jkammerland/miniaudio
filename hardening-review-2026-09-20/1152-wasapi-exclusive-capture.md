@@ -3,7 +3,8 @@
 ## Assessment
 
 - **Priority:** P1 Windows correctness
-- **Exact checkout:** packet-accounting path instrumented at `6a83e67`
+- **Exact checkout:** packet accounting introduced at `6a83e67`; final native
+  campaign validated `fee518b`
 - **Native reproduction:** not reproduced on the available USB condenser
   microphone; the upstream report remains unresolved
 - **Reported setup:** Windows 11, exclusive capture, Realtek and M-Audio,
@@ -57,6 +58,30 @@ duration defect still did not reproduce. Evidence and listenable WAVs are in
 This increases confidence in the tested USB endpoint but does not substitute
 for the reporter's Realtek/M-Audio hardware or a known acoustic/frame-index
 watermark reaching the microphone.
+
+### Exact `fee518b` plugged-microphone campaign
+
+The final implementation was rebuilt with MSVC and exercised against the same
+explicit USB endpoint ID. Twelve cases covered shared/exclusive,
+native/reported formats, 10/30 ms periods, true exclusive s24/mono internal
+format, and five-segment stop/start cycles. All 3,335 successful packet
+acquisitions had matching full-frame releases. Duration ratios were
+0.977349-1.000927. No acquisition remained outstanding and there was no cache
+violation, position regression, duplicate tuple, trace/audio drop, or counted
+read/callback allocation.
+
+All seven exclusive WAVs were nonzero (peaks 0.03018-0.04344); all five shared
+WAVs were silent. Together with the earlier campaigns, the record is now 49
+bounded cases, 47 packet-instrumented cases, and 13,816 exact packet/release
+pairs. The approximately 1.44x report still did not reproduce, so the source
+packet loop remains unchanged.
+
+Evidence and all listenable files are under
+`/tmp/miniaudio-native-win-fee518b-evidence/microphone/`; the top-level
+`REPORT.md`, `microphone/summary.csv`, and `microphone/verdict.json` describe
+the exact endpoint and each run. This is strong accounting evidence for one
+USB device, not proof for the reporter's hardware or a positive shared-mode
+acoustic route.
 
 The capture loop at `miniaudio.h:24725` drains WASAPI packets, caches partial
 frames, calls `ReleaseBuffer` around line 24761, and obtains subsequent packets

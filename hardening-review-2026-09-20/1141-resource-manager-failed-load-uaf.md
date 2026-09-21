@@ -138,3 +138,20 @@ need independent ownership until physical retirement.
 
 The issue was closed upstream as already fixed in development. That fix is not
 present in this checkout, as the fresh ASan reproduction demonstrates.
+
+## Implemented retirement result
+
+The immediate failed-load ownership fix and later publish-before-retire fix are
+landed. Final review then found two related bounded-queue defects: an execution
+order was reserved before a job had a slot, and a last-reference FREE job could
+be lost after public ownership was already surrendered. `fee518b` reserves the
+queue slot first and allocates the order only when publication can no longer
+fail. Retirement posts keep retryable ownership; manual-pump mode executes one
+queued job to make space, while threaded mode yields to its workers.
+
+Deterministic regressions cover initial and continuation page-post failure,
+`UINT32_MAX` order wrap, saturated last-reference unregister, saturated buffer
+uninit, and the exact post-publication acknowledgment needed before a single
+manual pump. Every path requires balanced decoder/VFS/allocation counts and
+zero live node/supply ownership. ASan/UBSan, TSan, C89/C++23, and the exact
+native Windows suite pass.
