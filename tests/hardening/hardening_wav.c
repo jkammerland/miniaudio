@@ -221,7 +221,7 @@ static int hardening_wav_validate_pcm(
 {
     ma_dr_wav wav;
     ma_int16 frames[4];
-    ma_uint64 length;
+    ma_uint64 length = 0;
     ma_uint64 framesRead;
 
     MA_ZERO_MEMORY(frames, sizeof(frames));
