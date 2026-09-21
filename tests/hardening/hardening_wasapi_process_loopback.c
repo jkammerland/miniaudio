@@ -1,6 +1,6 @@
 #include "../../miniaudio.h"
 
-static ma_result hardening_activation_wait(void* pHandler, DWORD timeoutInMilliseconds);
+static ma_result hardening_activation_wait(void* pHandler, unsigned long timeoutInMilliseconds);
 static ma_bool32 hardening_process_loopback_supported(ma_context* pContext);
 
 #define MA_WASAPI_COMPLETION_HANDLER_WAIT(pHandler, timeoutInMilliseconds) hardening_activation_wait((void*)(pHandler), (timeoutInMilliseconds))
@@ -217,7 +217,7 @@ static HRESULT WINAPI hardening_activate_audio_interface_async(
     return S_OK;
 }
 
-static ma_result hardening_activation_wait(void* pHandler, DWORD timeoutInMilliseconds)
+static ma_result hardening_activation_wait(void* pHandler, unsigned long timeoutInMilliseconds)
 {
     if (g_asyncMode == hardening_async_timeout) {
         return MA_TIMEOUT;
@@ -421,6 +421,7 @@ static int hardening_test_public_config_validation(void)
     MA_ZERO_OBJECT(&playback);
     MA_ZERO_OBJECT(&capture);
     config = ma_device_config_init(ma_device_type_loopback);
+    config.wasapi.loopbackProcessID = 123;
     capture.shareMode = ma_share_mode_exclusive;
     result = ma_device_init__wasapi(&device, &config, &playback, &capture);
     if (result != MA_INVALID_DEVICE_CONFIG) {
