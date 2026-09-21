@@ -68,6 +68,7 @@ static ma_device* g_pStopCallbackDevice;
 static ma_event* g_pCallbackEnteredEvent;
 static ma_event* g_pCallbackReleaseEvent;
 static ma_event* g_pSecondRemoveEvent;
+static ma_event* g_pRerouteCompletedEvent;
 static volatile ma_uint32 g_callbackHookEnabled;
 
 typedef struct
@@ -185,6 +186,9 @@ static void hardening_on_notification(const ma_device_notification* pNotificatio
         g_hooks.publicStoppedCount += 1;
     } else if (pNotification->type == ma_device_notification_type_rerouted) {
         g_hooks.publicReroutedCount += 1;
+        if (g_pRerouteCompletedEvent != NULL) {
+            ma_event_signal(g_pRerouteCompletedEvent);
+        }
     }
 }
 
@@ -293,6 +297,7 @@ static void hardening_hooks_reset(void)
     g_pCallbackEnteredEvent = NULL;
     g_pCallbackReleaseEvent = NULL;
     g_pSecondRemoveEvent = NULL;
+    g_pRerouteCompletedEvent = NULL;
     ma_atomic_store_32(&g_callbackHookEnabled, MA_FALSE);
 }
 
@@ -575,6 +580,121 @@ static int hardening_test_callback_publication_is_bounded_and_coalesced(void)
     return failed;
 }
 
+static int hardening_test_control_worker_dispatches_published_reroute(void)
+{
+    hardening_fixture fixture;
+    AudioObjectPropertyAddress address;
+    ma_event rerouteCompletedEvent;
+    ma_result result;
+    ma_bool32 trackingInitialized;
+    ma_bool32 startStopLockInitialized;
+    ma_bool32 rerouteEventInitialized;
+    int failed;
+
+    trackingInitialized = MA_FALSE;
+    startStopLockInitialized = MA_FALSE;
+    rerouteEventInitialized = MA_FALSE;
+    failed = 0;
+    hardening_fixture_init(&fixture, ma_device_type_playback);
+    fixture.context.coreaudio.AudioObjectAddPropertyListener = (ma_proc)hardening_add_listener;
+    fixture.context.coreaudio.AudioObjectRemovePropertyListener = (ma_proc)hardening_remove_listener;
+
+    result = ma_event_init(&fixture.device.coreaudio.stopEvent);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+    result = ma_mutex_init(&fixture.device.startStopLock);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    startStopLockInitialized = MA_TRUE;
+    result = ma_event_init(&rerouteCompletedEvent);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    rerouteEventInitialized = MA_TRUE;
+
+    ma_device__set_state(&fixture.device, ma_device_state_stopped);
+    fixture.device.coreaudio.isDefaultPlaybackDevice = MA_TRUE;
+
+    result = ma_context__init_device_tracking__coreaudio(&fixture.context);
+    if (result != MA_SUCCESS) {
+        printf("control worker dispatch tracking init failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+    trackingInitialized = MA_TRUE;
+
+    result = ma_device__track__coreaudio(&fixture.device);
+    if (result != MA_SUCCESS) {
+        printf("control worker dispatch device tracking failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    g_pRerouteCompletedEvent = &rerouteCompletedEvent;
+    address.mSelector = kAudioHardwarePropertyDefaultOutputDevice;
+    address.mScope = kAudioObjectPropertyScopeGlobal;
+    address.mElement = AUDIO_OBJECT_PROPERTY_ELEMENT;
+    ma_default_device_changed__coreaudio(kAudioObjectSystemObject, 1, &address, NULL);
+
+    /* The notification is the acknowledgement that the real worker consumed and applied the publication. */
+    result = ma_event_wait(&rerouteCompletedEvent);
+    if (result != MA_SUCCESS) {
+        printf("control worker dispatch wait failed: %d\n", result);
+        failed = 1;
+    }
+
+    ma_mutex_lock(&g_DeviceTrackingMutex_CoreAudio);
+    ma_mutex_unlock(&g_DeviceTrackingMutex_CoreAudio);
+
+    g_pRerouteCompletedEvent = NULL;
+
+    if (g_hooks.initCount != 1 || g_hooks.publicReroutedCount != 1 ||
+        fixture.device.coreaudio.audioUnitPlayback != (ma_ptr)&g_candidatePlaybackUnit ||
+        ma_atomic_load_32(&g_PendingDefaultDeviceChanges_CoreAudio) != 0) {
+        printf("control worker dispatch mismatch: init=%u rerouted=%u unit=%p pending=0x%08X\n",
+            g_hooks.initCount,
+            g_hooks.publicReroutedCount,
+            fixture.device.coreaudio.audioUnitPlayback,
+            ma_atomic_load_32(&g_PendingDefaultDeviceChanges_CoreAudio));
+        failed = 1;
+    }
+
+done:
+    g_pRerouteCompletedEvent = NULL;
+    if (trackingInitialized) {
+        /* Device teardown acquires the worker's tracking mutex, so this also acknowledges dispatch exit. */
+        ma_device__set_state(&fixture.device, ma_device_state_uninitialized);
+        ma_device_uninit__coreaudio(&fixture.device);
+        result = ma_context__uninit_device_tracking__coreaudio(&fixture.context);
+        if (result != MA_SUCCESS) {
+            printf("control worker dispatch tracking uninit failed: %d\n", result);
+            failed = 1;
+        }
+    } else {
+        ma_event_uninit(&fixture.device.coreaudio.stopEvent);
+    }
+
+    if (startStopLockInitialized) {
+        ma_mutex_uninit(&fixture.device.startStopLock);
+    }
+    ma_data_converter_uninit(&fixture.device.playback.converter, &fixture.context.allocationCallbacks);
+    if (rerouteEventInitialized) {
+        ma_event_uninit(&rerouteCompletedEvent);
+    }
+    if (fixture.allocator.liveAllocationCount != 0 || g_hooks.candidatePlaybackDisposeCount != (g_hooks.initCount != 0 ? 1U : 0U)) {
+        printf("control worker dispatch teardown mismatch: live=%lu candidate-dispose=%u init=%u\n",
+            (unsigned long)fixture.allocator.liveAllocationCount,
+            g_hooks.candidatePlaybackDisposeCount,
+            g_hooks.initCount);
+        failed = 1;
+    }
+    return failed;
+}
+
 static int hardening_test_control_worker_filters_explicit_endpoint(void)
 {
     hardening_fixture fixture;
@@ -842,6 +962,7 @@ int main(void)
     failed += hardening_test_tracking_worker_lifecycle();
     failed += hardening_test_callback_retirement_before_pipe_close();
     failed += hardening_test_callback_publication_is_bounded_and_coalesced();
+    failed += hardening_test_control_worker_dispatches_published_reroute();
 
     g_ppTrackedDevices_CoreAudio = NULL;
     g_TrackedDeviceCap_CoreAudio = 0;

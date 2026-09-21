@@ -827,6 +827,7 @@ if(MINIAUDIO_BUILD_TESTS)
     if(APPLE)
         add_miniaudio_test(miniaudio_hardening_coreaudio_lifecycle hardening/hardening_coreaudio_lifecycle.c)
         add_test(NAME miniaudio_hardening_coreaudio_lifecycle COMMAND miniaudio_hardening_coreaudio_lifecycle)
+        set_tests_properties(miniaudio_hardening_coreaudio_lifecycle PROPERTIES TIMEOUT 30)
     endif()
 endif()
 
