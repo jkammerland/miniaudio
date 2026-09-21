@@ -4,8 +4,8 @@ static ma_result hardening_activation_wait(void* pHandler, unsigned long timeout
 static ma_bool32 hardening_process_loopback_supported(ma_context* pContext);
 static void* hardening_completion_handler_alloc(size_t sizeInBytes);
 static int hardening_completion_handler_free(void* pMemory);
-static HANDLE hardening_completion_handler_create_event(void);
-static int hardening_completion_handler_close_event(HANDLE hEvent);
+static ma_handle hardening_completion_handler_create_event(void);
+static int hardening_completion_handler_close_event(ma_handle hEvent);
 
 #define MA_WASAPI_COMPLETION_HANDLER_WAIT(pHandler, timeoutInMilliseconds) hardening_activation_wait((void*)(pHandler), (timeoutInMilliseconds))
 #define MA_WASAPI_PROCESS_LOOPBACK_SUPPORTED(pContext) hardening_process_loopback_supported((pContext))
@@ -85,16 +85,16 @@ static int hardening_completion_handler_free(void* pMemory)
     return HeapFree(GetProcessHeap(), 0, pMemory);
 }
 
-static HANDLE hardening_completion_handler_create_event(void)
+static ma_handle hardening_completion_handler_create_event(void)
 {
-    HANDLE hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    ma_handle hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (hEvent != NULL) {
         g_handlerEventCreates += 1;
     }
     return hEvent;
 }
 
-static int hardening_completion_handler_close_event(HANDLE hEvent)
+static int hardening_completion_handler_close_event(ma_handle hEvent)
 {
     if (hEvent != NULL) {
         g_handlerEventCloses += 1;
