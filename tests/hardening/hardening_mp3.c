@@ -18,6 +18,9 @@ static const ma_uint8 g_mp3_1128[] = {
 typedef struct
 {
     size_t largestRequest;
+    ma_uint32 allocationCount;
+    ma_uint32 freeCount;
+    ma_uint32 liveAllocationCount;
 } mp3_allocator_state;
 
 typedef struct
@@ -37,24 +40,53 @@ static void* mp3_malloc(size_t size, void* pUserData)
     if (size > 1024 * 1024) {
         return NULL;
     }
-    return malloc(size);
+    {
+        void* pMemory = malloc(size);
+        if (pMemory != NULL) {
+            pState->allocationCount += 1;
+            pState->liveAllocationCount += 1;
+        }
+        return pMemory;
+    }
 }
 
 static void* mp3_realloc(void* pMemory, size_t size, void* pUserData)
 {
     mp3_allocator_state* pState = (mp3_allocator_state*)pUserData;
+    void* pNewMemory;
+    ma_bool32 wasNull = pMemory == NULL;
+
     if (size > pState->largestRequest) {
         pState->largestRequest = size;
     }
     if (size > 1024 * 1024) {
         return NULL;
     }
-    return realloc(pMemory, size);
+    if (size == 0) {
+        if (pMemory != NULL) {
+            pState->freeCount += 1;
+            pState->liveAllocationCount -= 1;
+            free(pMemory);
+        }
+        return NULL;
+    }
+
+    pNewMemory = realloc(pMemory, size);
+    if (pNewMemory != NULL && wasNull) {
+        pState->allocationCount += 1;
+        pState->liveAllocationCount += 1;
+    }
+    return pNewMemory;
 }
 
 static void mp3_free(void* pMemory, void* pUserData)
 {
-    (void)pUserData;
+    mp3_allocator_state* pState = (mp3_allocator_state*)pUserData;
+
+    if (pMemory != NULL) {
+        pState->freeCount += 1;
+        pState->liveAllocationCount -= 1;
+    }
     free(pMemory);
 }
 
@@ -136,12 +168,75 @@ static ma_result mp3_memory_vfs_on_tell(ma_vfs* pVFS, ma_vfs_file file, ma_int64
 
 static int mp3_test_truncated_metadata(void)
 {
+    mp3_allocator_state state;
+    ma_decoder_config config;
     ma_decoder decoder;
-    ma_result result = ma_decoder_init_memory(g_mp3_1128, sizeof(g_mp3_1128), NULL, &decoder);
-    if (result == MA_SUCCESS) {
-        ma_decoder_uninit(&decoder);
+    ma_format format;
+    ma_uint32 channels;
+    ma_uint32 sampleRate;
+    ma_uint64 framesRead;
+    float frames[64];
+    ma_result result;
+    int failed;
+
+    failed = 0;
+    MA_ZERO_OBJECT(&state);
+    config = ma_decoder_config_init_default();
+    config.encodingFormat = ma_encoding_format_mp3;
+    config.allocationCallbacks.pUserData = &state;
+    config.allocationCallbacks.onMalloc = mp3_malloc;
+    config.allocationCallbacks.onRealloc = mp3_realloc;
+    config.allocationCallbacks.onFree = mp3_free;
+
+    result = ma_decoder_init_memory(g_mp3_1128, sizeof(g_mp3_1128), &config, &decoder);
+    if (result != MA_SUCCESS) {
+        printf("issue 1128 truncated metadata returned %d instead of ignoring the incomplete optional tag\n", result);
+        if (state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
+            printf("issue 1128 failed initialization leaked allocations: allocated=%u freed=%u live=%u\n",
+                state.allocationCount,
+                state.freeCount,
+                state.liveAllocationCount);
+        }
+        return 1;
     }
-    return 0;
+
+    result = ma_decoder_get_data_format(&decoder, &format, &channels, &sampleRate, NULL, 0);
+    if (result != MA_SUCCESS || format != ma_format_f32 || channels != 1 || sampleRate != 11025) {
+        printf("issue 1128 selected unexpected decoder format: result=%d format=%d channels=%u rate=%u\n",
+            result,
+            format,
+            channels,
+            sampleRate);
+        failed = 1;
+    }
+
+    framesRead = 0;
+    result = ma_decoder_read_pcm_frames(&decoder, frames, 64, &framesRead);
+    if (result != MA_SUCCESS || framesRead != 64) {
+        printf("issue 1128 bounded MP3 decode returned %d with %u:%08u frames\n",
+            result,
+            (ma_uint32)(framesRead >> 32),
+            (ma_uint32)framesRead);
+        failed = 1;
+    }
+
+    result = ma_decoder_uninit(&decoder);
+    if (result != MA_SUCCESS) {
+        printf("issue 1128 decoder uninit returned %d\n", result);
+        failed = 1;
+    }
+    if (state.allocationCount == 0 || state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
+        printf("issue 1128 allocation lifetime was allocated=%u freed=%u live=%u\n",
+            state.allocationCount,
+            state.freeCount,
+            state.liveAllocationCount);
+        failed = 1;
+    }
+    if (state.largestRequest > 1024 * 1024) {
+        printf("issue 1128 requested an oversized allocation of %lu bytes\n", (unsigned long)state.largestRequest);
+        failed = 1;
+    }
+    return failed;
 }
 
 static int mp3_test_frame_count(void)
@@ -221,6 +316,13 @@ static int mp3_test_full_decode_allocation(void)
     }
     if (state.largestRequest > 1024 * 1024) {
         printf("hostile MP3 length requested %lu bytes\n", (unsigned long)state.largestRequest);
+        return 1;
+    }
+    if (state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
+        printf("hostile MP3 full decode leaked allocations: allocated=%u freed=%u live=%u\n",
+            state.allocationCount,
+            state.freeCount,
+            state.liveAllocationCount);
         return 1;
     }
     return 0;
@@ -305,6 +407,13 @@ done:
     }
     if (resourceManagerInitialized) {
         ma_resource_manager_uninit(&resourceManager);
+    }
+    if (state.liveAllocationCount != 0 || state.allocationCount != state.freeCount) {
+        printf("resource manager hostile MP3 leaked allocations: allocated=%u freed=%u live=%u\n",
+            state.allocationCount,
+            state.freeCount,
+            state.liveAllocationCount);
+        failed = 1;
     }
 
     return failed;
