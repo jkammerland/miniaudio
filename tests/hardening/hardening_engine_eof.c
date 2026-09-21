@@ -30,6 +30,18 @@ typedef struct
     ma_bool32 soundInitialized;
 } engine_eof_fixture;
 
+typedef struct
+{
+    ma_data_source_base base;
+    float frames[8];
+    ma_uint64 length;
+    ma_uint64 cursor;
+    ma_uint64 maxFramesPerRead;
+    ma_bool32 returnAtEndWithData;
+    ma_uint32 readCount;
+    ma_uint32 partialAtEndCount;
+} engine_eof_custom_source;
+
 static void engine_eof_end_callback(void* pUserData, ma_sound* pSound)
 {
     engine_eof_end_state* pState = (engine_eof_end_state*)pUserData;
@@ -483,6 +495,287 @@ static int engine_eof_test_loop_transition(ma_format format)
     return failed;
 }
 
+static int engine_eof_test_zero_and_one_frame(ma_format format, ma_uint32 sourceFrames)
+{
+    engine_eof_fixture fixture;
+    float output[4];
+    ma_result result;
+    ma_uint32 i;
+    int failed = 0;
+
+    result = engine_eof_fixture_init(&fixture, format, sourceFrames, 22050, 22050, 0, MA_FALSE);
+    if (result != MA_SUCCESS) {
+        printf("zero/one-frame setup failed for format=%d frames=%u: %d\n", format, sourceFrames, result);
+        engine_eof_fixture_uninit(&fixture);
+        return 1;
+    }
+
+    failed += engine_eof_read(&fixture, output, ma_countof(output), "zero/one-frame render");
+    for (i = 0; i < ma_countof(output); i += 1) {
+        float expected = (sourceFrames == 1 && i == 0) ? engine_eof_pattern_value(0) : 0;
+        if (fabs((double)output[i] - (double)expected) > 0.00001) {
+            printf("zero/one-frame mismatch format=%d source=%u frame=%u: %f != %f\n",
+                format, sourceFrames, i, output[i], expected);
+            failed = 1;
+            break;
+        }
+    }
+    failed += engine_eof_read(&fixture, output, 1, "zero/one-frame notification step");
+    failed += engine_eof_read(&fixture, output, 1, "zero/one-frame repeated post-drain");
+    failed += engine_eof_check_end_state(&fixture, 1, "zero/one-frame final state");
+    engine_eof_fixture_uninit(&fixture);
+    return failed;
+}
+
+static int engine_eof_test_stop_start(ma_format format)
+{
+    engine_eof_fixture fixture;
+    float output[4];
+    ma_uint32 i;
+    ma_uint64 cursorBeforeStop;
+    ma_result result;
+    int failed = 0;
+
+    result = engine_eof_fixture_init(&fixture, format, 5, 22050, 22050, 0, MA_FALSE);
+    if (result != MA_SUCCESS) {
+        printf("stop/start setup failed for format=%d: %d\n", format, result);
+        engine_eof_fixture_uninit(&fixture);
+        return 1;
+    }
+
+    failed += engine_eof_read(&fixture, output, 2, "stop/start prefix");
+    for (i = 0; i < 2; i += 1) {
+        if (fabs((double)output[i] - (double)engine_eof_pattern_value(i)) > 0.00001) {
+            printf("stop/start prefix mismatch format=%d frame=%u\n", format, i);
+            failed = 1;
+        }
+    }
+    cursorBeforeStop = fixture.buffer.ref.cursor;
+    result = ma_sound_stop(&fixture.sound);
+    if (result != MA_SUCCESS) {
+        printf("stop/start stop failed for format=%d: %d\n", format, result);
+        failed = 1;
+    }
+    failed += engine_eof_read(&fixture, output, 2, "stop/start stopped render");
+    if (output[0] != 0 || output[1] != 0 || fixture.buffer.ref.cursor != cursorBeforeStop || fixture.endState.count != 0) {
+        printf("stop/start advanced while stopped for format=%d: output=%f,%f cursor=%u:%08u end=%u\n",
+            format, output[0], output[1], (ma_uint32)(fixture.buffer.ref.cursor >> 32),
+            (ma_uint32)fixture.buffer.ref.cursor, fixture.endState.count);
+        failed = 1;
+    }
+    result = ma_sound_start(&fixture.sound);
+    if (result != MA_SUCCESS) {
+        printf("stop/start restart failed for format=%d: %d\n", format, result);
+        failed = 1;
+    }
+    failed += engine_eof_read(&fixture, output, 3, "stop/start suffix");
+    for (i = 0; i < 3; i += 1) {
+        if (fabs((double)output[i] - (double)engine_eof_pattern_value(2 + i)) > 0.00001) {
+            printf("stop/start suffix mismatch format=%d frame=%u: %f\n", format, 2 + i, output[i]);
+            failed = 1;
+        }
+    }
+    failed += engine_eof_read(&fixture, output, 1, "stop/start EOF detection");
+    failed += engine_eof_read(&fixture, output, 1, "stop/start notification step");
+    failed += engine_eof_check_end_state(&fixture, 1, "stop/start final state");
+    engine_eof_fixture_uninit(&fixture);
+    return failed;
+}
+
+static int engine_eof_test_seek_near_end(ma_format format)
+{
+    engine_eof_fixture fixture;
+    float output[3];
+    ma_result result;
+    int failed = 0;
+
+    result = engine_eof_fixture_init(&fixture, format, 5, 22050, 22050, 0, MA_FALSE);
+    if (result != MA_SUCCESS) {
+        printf("near-EOF seek setup failed for format=%d: %d\n", format, result);
+        engine_eof_fixture_uninit(&fixture);
+        return 1;
+    }
+    result = ma_sound_seek_to_pcm_frame(&fixture.sound, 4);
+    if (result != MA_SUCCESS) {
+        printf("near-EOF seek failed for format=%d: %d\n", format, result);
+        failed = 1;
+    }
+    failed += engine_eof_read(&fixture, output, ma_countof(output), "near-EOF seek render");
+    if (fabs((double)output[0] - (double)engine_eof_pattern_value(4)) > 0.00001 || output[1] != 0 || output[2] != 0) {
+        printf("near-EOF seek output mismatch format=%d: %f,%f,%f\n", format, output[0], output[1], output[2]);
+        failed = 1;
+    }
+    failed += engine_eof_read(&fixture, output, 1, "near-EOF seek notification step");
+    failed += engine_eof_read(&fixture, output, 1, "near-EOF seek repeated post-drain");
+    failed += engine_eof_check_end_state(&fixture, 1, "near-EOF seek final state");
+    engine_eof_fixture_uninit(&fixture);
+    return failed;
+}
+
+static ma_result engine_eof_custom_read(ma_data_source* pDataSource, void* pFramesOut, ma_uint64 frameCount, ma_uint64* pFramesRead)
+{
+    engine_eof_custom_source* pSource = (engine_eof_custom_source*)pDataSource;
+    ma_uint64 framesRemaining;
+
+    pSource->readCount += 1;
+    if (pFramesRead != NULL) {
+        *pFramesRead = 0;
+    }
+    if (pSource->cursor >= pSource->length) {
+        return MA_AT_END;
+    }
+
+    framesRemaining = pSource->length - pSource->cursor;
+    if (frameCount > framesRemaining) {
+        frameCount = framesRemaining;
+    }
+    if (pSource->maxFramesPerRead > 0 && frameCount > pSource->maxFramesPerRead) {
+        frameCount = pSource->maxFramesPerRead;
+    }
+    if (pFramesOut != NULL && frameCount > 0) {
+        MA_COPY_MEMORY(pFramesOut, pSource->frames + pSource->cursor, (size_t)frameCount * sizeof(float));
+    }
+    pSource->cursor += frameCount;
+    if (pFramesRead != NULL) {
+        *pFramesRead = frameCount;
+    }
+    if (pSource->returnAtEndWithData && pSource->cursor == pSource->length) {
+        pSource->partialAtEndCount += 1;
+        return MA_AT_END;
+    }
+    return MA_SUCCESS;
+}
+
+static ma_result engine_eof_custom_seek(ma_data_source* pDataSource, ma_uint64 frameIndex)
+{
+    engine_eof_custom_source* pSource = (engine_eof_custom_source*)pDataSource;
+    if (frameIndex > pSource->length) {
+        return MA_BAD_SEEK;
+    }
+    pSource->cursor = frameIndex;
+    return MA_SUCCESS;
+}
+
+static ma_result engine_eof_custom_get_format(ma_data_source* pDataSource, ma_format* pFormat, ma_uint32* pChannels, ma_uint32* pSampleRate, ma_channel* pChannelMap, size_t channelMapCap)
+{
+    (void)pDataSource;
+    if (pFormat != NULL) { *pFormat = ma_format_f32; }
+    if (pChannels != NULL) { *pChannels = 1; }
+    if (pSampleRate != NULL) { *pSampleRate = 22050; }
+    if (pChannelMap != NULL && channelMapCap > 0) { pChannelMap[0] = MA_CHANNEL_MONO; }
+    return MA_SUCCESS;
+}
+
+static ma_result engine_eof_custom_get_cursor(ma_data_source* pDataSource, ma_uint64* pCursor)
+{
+    engine_eof_custom_source* pSource = (engine_eof_custom_source*)pDataSource;
+    *pCursor = pSource->cursor;
+    return MA_SUCCESS;
+}
+
+static ma_result engine_eof_custom_get_length(ma_data_source* pDataSource, ma_uint64* pLength)
+{
+    engine_eof_custom_source* pSource = (engine_eof_custom_source*)pDataSource;
+    *pLength = pSource->length;
+    return MA_SUCCESS;
+}
+
+static ma_data_source_vtable g_engine_eof_custom_vtable =
+{
+    engine_eof_custom_read,
+    engine_eof_custom_seek,
+    engine_eof_custom_get_format,
+    engine_eof_custom_get_cursor,
+    engine_eof_custom_get_length,
+    NULL,
+    0
+};
+
+static int engine_eof_test_custom_partial_status(ma_uint64 sourceLength, ma_uint64 maxFramesPerRead, ma_bool32 returnAtEndWithData, ma_uint32 expectedReadCount, const char* pLabel)
+{
+    engine_eof_custom_source source;
+    ma_data_source_config sourceConfig;
+    ma_engine_config engineConfig;
+    ma_engine engine;
+    ma_sound_config soundConfig;
+    ma_sound sound;
+    engine_eof_end_state endState;
+    float output[8];
+    ma_uint64 framesRead;
+    ma_uint32 i;
+    ma_result result;
+    int failed = 0;
+
+    MA_ZERO_OBJECT(&source);
+    MA_ZERO_OBJECT(&endState);
+    source.length = sourceLength;
+    source.maxFramesPerRead = maxFramesPerRead;
+    source.returnAtEndWithData = returnAtEndWithData;
+    for (i = 0; i < source.length; i += 1) {
+        source.frames[i] = engine_eof_pattern_value(i);
+    }
+    sourceConfig = ma_data_source_config_init();
+    sourceConfig.vtable = &g_engine_eof_custom_vtable;
+    result = ma_data_source_init(&sourceConfig, &source.base);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+
+    engineConfig = ma_engine_config_init();
+    engineConfig.noDevice = MA_TRUE;
+    engineConfig.channels = 1;
+    engineConfig.sampleRate = 22050;
+    result = ma_engine_init(&engineConfig, &engine);
+    if (result != MA_SUCCESS) {
+        ma_data_source_uninit(&source.base);
+        return 1;
+    }
+    soundConfig = ma_sound_config_init_2(&engine);
+    soundConfig.pDataSource = (ma_data_source*)&source;
+    soundConfig.flags = MA_SOUND_FLAG_NO_SPATIALIZATION | MA_SOUND_FLAG_NO_PITCH;
+    soundConfig.endCallback = engine_eof_end_callback;
+    soundConfig.pEndCallbackUserData = &endState;
+    result = ma_sound_init_ex(&engine, &soundConfig, &sound);
+    if (result != MA_SUCCESS) {
+        ma_engine_uninit(&engine);
+        ma_data_source_uninit(&source.base);
+        return 1;
+    }
+
+    ma_sound_start(&sound);
+    framesRead = 0;
+    result = ma_engine_read_pcm_frames(&engine, output, ma_countof(output), &framesRead);
+    if (result != MA_SUCCESS || framesRead != ma_countof(output)) {
+        printf("%s render failed: result=%d frames=%u:%08u\n", pLabel, result,
+            (ma_uint32)(framesRead >> 32), (ma_uint32)framesRead);
+        failed = 1;
+    }
+    for (i = 0; i < ma_countof(output); i += 1) {
+        float expected = i < source.length ? engine_eof_pattern_value(i) : 0;
+        if (fabs((double)output[i] - (double)expected) > 0.00001) {
+            printf("%s output mismatch at %u: %f != %f\n", pLabel, i, output[i], expected);
+            failed = 1;
+            break;
+        }
+    }
+    framesRead = 0;
+    ma_engine_read_pcm_frames(&engine, output, 1, &framesRead);
+    ma_engine_read_pcm_frames(&engine, output, 1, &framesRead);
+    if (source.cursor != source.length || source.readCount != expectedReadCount ||
+        source.partialAtEndCount != (returnAtEndWithData ? 1U : 0U) ||
+        endState.count != 1 || endState.firedWhilePlaying) {
+        printf("%s status mismatch: cursor=%u:%08u reads=%u partial-at-end=%u end=%u while-playing=%u\n",
+            pLabel, (ma_uint32)(source.cursor >> 32), (ma_uint32)source.cursor, source.readCount,
+            source.partialAtEndCount, endState.count, endState.firedWhilePlaying);
+        failed = 1;
+    }
+
+    ma_sound_uninit(&sound);
+    ma_engine_uninit(&engine);
+    ma_data_source_uninit(&source.base);
+    return failed;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -504,5 +797,15 @@ int main(void)
     failed += engine_eof_test_resampling_tail(ma_format_f32);
     failed += engine_eof_test_loop_transition(ma_format_s16);
     failed += engine_eof_test_loop_transition(ma_format_f32);
+    failed += engine_eof_test_zero_and_one_frame(ma_format_s16, 1);
+    failed += engine_eof_test_zero_and_one_frame(ma_format_f32, 1);
+    failed += engine_eof_test_stop_start(ma_format_s16);
+    failed += engine_eof_test_stop_start(ma_format_f32);
+    failed += engine_eof_test_seek_near_end(ma_format_s16);
+    failed += engine_eof_test_seek_near_end(ma_format_f32);
+    failed += engine_eof_test_custom_partial_status(0, 0, MA_FALSE, 1, "custom zero-frame source");
+    failed += engine_eof_test_custom_partial_status(5, 0, MA_FALSE, 3, "custom full-data then EOF");
+    failed += engine_eof_test_custom_partial_status(5, 2, MA_FALSE, 5, "custom short-success reads");
+    failed += engine_eof_test_custom_partial_status(5, 2, MA_TRUE, 4, "custom partial-data MA_AT_END");
     return failed != 0;
 }
