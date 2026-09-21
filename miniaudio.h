@@ -96439,6 +96439,9 @@ static ma_uint32 ma_dr_mp3_decode_next_frame_ex__callbacks(ma_dr_mp3* pMP3, ma_d
                 pMP3->pData = pNewData;
                 pMP3->dataCapacity = newDataCap;
             }
+            if (pMP3->pData == NULL) {
+                return 0;
+            }
             bytesRead = ma_dr_mp3__on_read_clamped(pMP3, pMP3->pData + pMP3->dataSize, (pMP3->dataCapacity - pMP3->dataSize));
             if (bytesRead == 0) {
                 if (pMP3->dataSize == 0) {

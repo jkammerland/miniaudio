@@ -38,6 +38,24 @@ typedef struct
     size_t cursor;
 } mp3_callback_stream;
 
+typedef struct
+{
+    ma_uint32 readCount;
+    ma_uint32 nullDestinationCount;
+} mp3_invalid_callback_state;
+
+static size_t mp3_invalid_buffer_read(void* pUserData, void* pBufferOut, size_t bytesToRead)
+{
+    mp3_invalid_callback_state* pState = (mp3_invalid_callback_state*)pUserData;
+
+    (void)bytesToRead;
+    pState->readCount += 1;
+    if (pBufferOut == NULL) {
+        pState->nullDestinationCount += 1;
+    }
+    return 0;
+}
+
 static void* mp3_malloc(size_t size, void* pUserData)
 {
     mp3_allocator_state* pState = (mp3_allocator_state*)pUserData;
@@ -877,6 +895,28 @@ done:
     return failed;
 }
 
+static int mp3_test_callback_buffer_invariant(void)
+{
+    ma_dr_mp3 mp3;
+    mp3_invalid_callback_state state;
+    ma_uint32 framesRead;
+
+    MA_ZERO_OBJECT(&mp3);
+    MA_ZERO_OBJECT(&state);
+    mp3.onRead = mp3_invalid_buffer_read;
+    mp3.pUserData = &state;
+    mp3.dataCapacity = MA_DR_MP3_DATA_CHUNK_SIZE;
+
+    framesRead = ma_dr_mp3_decode_next_frame_ex__callbacks(&mp3, NULL, NULL, NULL);
+    if (framesRead != 0 || state.readCount != 0 || state.nullDestinationCount != 0) {
+        printf("MP3 callback buffer invariant mismatch: frames=%u reads=%u null-destinations=%u\n",
+            framesRead, state.readCount, state.nullDestinationCount);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -888,5 +928,6 @@ int main(void)
     failed += mp3_test_frame_count();
     failed += mp3_test_full_decode_allocation();
     failed += mp3_test_resource_manager_allocation();
+    failed += mp3_test_callback_buffer_invariant();
     return failed != 0;
 }
