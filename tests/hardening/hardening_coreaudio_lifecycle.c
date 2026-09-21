@@ -17,7 +17,7 @@ typedef struct
 {
     size_t allocationCallCount;
     size_t failAllocationCall;
-    size_t liveAllocationCount;
+    volatile ma_uint32 liveAllocationCount;
     ma_uint32 oldBufferFreeCount;
     ma_uint32 candidateBufferFreeCount;
 } hardening_allocator;
@@ -98,7 +98,7 @@ static void* hardening_malloc(size_t size, void* pUserData)
 
     pAllocation = malloc(size);
     if (pAllocation != NULL) {
-        pAllocator->liveAllocationCount += 1;
+        ma_atomic_fetch_add_32(&pAllocator->liveAllocationCount, 1);
     }
     return pAllocation;
 }
@@ -116,13 +116,13 @@ static void* hardening_realloc(void* pMemory, size_t size, void* pUserData)
     if (pMemory == NULL) {
         pAllocation = malloc(size);
         if (pAllocation != NULL) {
-            pAllocator->liveAllocationCount += 1;
+            ma_atomic_fetch_add_32(&pAllocator->liveAllocationCount, 1);
         }
         return pAllocation;
     }
     if (size == 0) {
         free(pMemory);
-        pAllocator->liveAllocationCount -= 1;
+        ma_atomic_fetch_sub_32(&pAllocator->liveAllocationCount, 1);
         return NULL;
     }
 
@@ -145,7 +145,7 @@ static void hardening_free(void* pMemory, void* pUserData)
     }
 
     free(pMemory);
-    pAllocator->liveAllocationCount -= 1;
+    ma_atomic_fetch_sub_32(&pAllocator->liveAllocationCount, 1);
 }
 
 static OSStatus hardening_stop(AudioUnit audioUnit)
@@ -685,9 +685,9 @@ done:
     if (rerouteEventInitialized) {
         ma_event_uninit(&rerouteCompletedEvent);
     }
-    if (fixture.allocator.liveAllocationCount != 0 || g_hooks.candidatePlaybackDisposeCount != (g_hooks.initCount != 0 ? 1U : 0U)) {
+    if (ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0 || g_hooks.candidatePlaybackDisposeCount != (g_hooks.initCount != 0 ? 1U : 0U)) {
         printf("control worker dispatch teardown mismatch: live=%lu candidate-dispose=%u init=%u\n",
-            (unsigned long)fixture.allocator.liveAllocationCount,
+            (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount),
             g_hooks.candidatePlaybackDisposeCount,
             g_hooks.initCount);
         failed = 1;
@@ -742,8 +742,8 @@ static int hardening_test_control_worker_filters_explicit_endpoint(void)
     ma_device_uninit__coreaudio(&fixture.device);
     ma_mutex_uninit(&fixture.device.startStopLock);
     ma_data_converter_uninit(&fixture.device.playback.converter, &fixture.context.allocationCallbacks);
-    if (fixture.allocator.liveAllocationCount != 0) {
-        printf("control worker test leaked %lu allocations\n", (unsigned long)fixture.allocator.liveAllocationCount);
+    if (ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0) {
+        printf("control worker test leaked %lu allocations\n", (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount));
         failed = 1;
     }
     return failed;
@@ -791,8 +791,8 @@ static int hardening_test_duplex_playback_failure_is_not_tracked(void)
         printf("notification reached failed duplex device: init count=%u\n", g_hooks.initCount);
         failed = 1;
     }
-    if (fixture.allocator.liveAllocationCount != 0) {
-        printf("duplex failure leaked %lu allocations\n", (unsigned long)fixture.allocator.liveAllocationCount);
+    if (ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0) {
+        printf("duplex failure leaked %lu allocations\n", (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount));
         failed = 1;
     }
 
@@ -894,8 +894,8 @@ static int hardening_test_post_init_failure_is_empty_and_destroyable(void)
     }
 
     ma_data_converter_uninit(&fixture.device.capture.converter, &fixture.context.allocationCallbacks);
-    if (fixture.allocator.liveAllocationCount != 0) {
-        printf("post-init failure leaked %lu allocations\n", (unsigned long)fixture.allocator.liveAllocationCount);
+    if (ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0) {
+        printf("post-init failure leaked %lu allocations\n", (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount));
         failed = 1;
     }
     return failed;
@@ -945,10 +945,10 @@ static int hardening_test_success_publishes_complete_candidate(void)
     ma_device_uninit__coreaudio(&fixture.device);
     ma_data_converter_uninit(&fixture.device.capture.converter, &fixture.context.allocationCallbacks);
     if (g_hooks.candidateCaptureDisposeCount != 1 || fixture.allocator.candidateBufferFreeCount != 1 ||
-        fixture.allocator.liveAllocationCount != 0 || g_hooks.unexpectedDisposeCount != 0) {
+        ma_atomic_load_32(&fixture.allocator.liveAllocationCount) != 0 || g_hooks.unexpectedDisposeCount != 0) {
         printf("successful reroute teardown mismatch: dispose=%u free=%u live=%lu unexpected=%u\n",
             g_hooks.candidateCaptureDisposeCount, fixture.allocator.candidateBufferFreeCount,
-            (unsigned long)fixture.allocator.liveAllocationCount, g_hooks.unexpectedDisposeCount);
+            (unsigned long)ma_atomic_load_32(&fixture.allocator.liveAllocationCount), g_hooks.unexpectedDisposeCount);
         failed = 1;
     }
     return failed;
