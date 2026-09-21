@@ -118,6 +118,26 @@ static void hardening_wav_write_u32le(ma_uint8* pData, ma_uint32 value)
     pData[3] = (ma_uint8)(value >> 24);
 }
 
+static void hardening_wav_write_u16le(ma_uint8* pData, ma_uint16 value)
+{
+    pData[0] = (ma_uint8)(value >> 0);
+    pData[1] = (ma_uint8)(value >> 8);
+}
+
+static void hardening_wav_write_u16be(ma_uint8* pData, ma_uint16 value)
+{
+    pData[0] = (ma_uint8)(value >> 8);
+    pData[1] = (ma_uint8)(value >> 0);
+}
+
+static void hardening_wav_write_u32be(ma_uint8* pData, ma_uint32 value)
+{
+    pData[0] = (ma_uint8)(value >> 24);
+    pData[1] = (ma_uint8)(value >> 16);
+    pData[2] = (ma_uint8)(value >> 8);
+    pData[3] = (ma_uint8)(value >> 0);
+}
+
 static size_t hardening_wav_make_fmt(ma_uint8* pData, ma_uint32 fmtSize, ma_uint16 extendedSize)
 {
     size_t dataOffset = 20 + fmtSize + (fmtSize & 1);
@@ -191,6 +211,320 @@ static int hardening_wav_test_file(const ma_uint8* pData, size_t dataSize, const
     return 0;
 }
 
+static int hardening_wav_validate_pcm(
+    const void* pData,
+    size_t dataSize,
+    ma_dr_wav_container expectedContainer,
+    const ma_int16* pExpectedFrames,
+    ma_uint64 expectedFrameCount,
+    const char* pName)
+{
+    ma_dr_wav wav;
+    ma_int16 frames[4];
+    ma_uint64 length;
+    ma_uint64 framesRead;
+
+    MA_ZERO_MEMORY(frames, sizeof(frames));
+    if (!ma_dr_wav_init_memory(&wav, pData, dataSize, NULL)) {
+        printf("%s failed to initialize\n", pName);
+        return 1;
+    }
+    if (wav.container != expectedContainer || wav.translatedFormatTag != MA_DR_WAVE_FORMAT_PCM ||
+        wav.channels != 1 || wav.sampleRate != 8000 || wav.bitsPerSample != 16 ||
+        ma_dr_wav_get_length_in_pcm_frames(&wav, &length) != MA_SUCCESS || length != expectedFrameCount) {
+        printf("%s format mismatch: container=%d tag=%u channels=%u rate=%u bits=%u length=%u:%08u\n",
+            pName, wav.container, wav.translatedFormatTag, wav.channels, wav.sampleRate, wav.bitsPerSample,
+            (ma_uint32)(length >> 32), (ma_uint32)length);
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+    framesRead = ma_dr_wav_read_pcm_frames_s16(&wav, expectedFrameCount, frames);
+    if (framesRead != expectedFrameCount || memcmp(frames, pExpectedFrames, (size_t)expectedFrameCount * sizeof(frames[0])) != 0 ||
+        ma_dr_wav_read_pcm_frames_s16(&wav, 1, frames) != 0) {
+        printf("%s PCM round trip mismatch: frames=%u:%08u first=%d second=%d\n",
+            pName, (ma_uint32)(framesRead >> 32), (ma_uint32)framesRead, frames[0], frames[1]);
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+
+    ma_dr_wav_uninit(&wav);
+    return 0;
+}
+
+static int hardening_wav_test_writer_container(ma_dr_wav_container container, const char* pName)
+{
+    const ma_int16 expectedFrames[2] = {0x1234, -0x2345};
+    ma_dr_wav_data_format format;
+    ma_dr_wav wav;
+    void* pData = NULL;
+    size_t dataSize = 0;
+    int failed;
+
+    format.container = container;
+    format.format = MA_DR_WAVE_FORMAT_PCM;
+    format.channels = 1;
+    format.sampleRate = 8000;
+    format.bitsPerSample = 16;
+    if (!ma_dr_wav_init_memory_write(&wav, &pData, &dataSize, &format, NULL)) {
+        printf("%s writer failed to initialize\n", pName);
+        return 1;
+    }
+    if (ma_dr_wav_write_pcm_frames(&wav, 2, expectedFrames) != 2 || ma_dr_wav_uninit(&wav) != MA_SUCCESS) {
+        printf("%s writer failed to finalize\n", pName);
+        ma_dr_wav_free(pData, NULL);
+        return 1;
+    }
+
+    failed = hardening_wav_validate_pcm(pData, dataSize, container, expectedFrames, 2, pName);
+    ma_dr_wav_free(pData, NULL);
+    return failed;
+}
+
+static size_t hardening_wav_make_rifx_pcm(ma_uint8* pData)
+{
+    MA_ZERO_MEMORY(pData, 48);
+    MA_COPY_MEMORY(pData + 0, "RIFX", 4);
+    hardening_wav_write_u32be(pData + 4, 40);
+    MA_COPY_MEMORY(pData + 8, "WAVEfmt ", 8);
+    hardening_wav_write_u32be(pData + 16, 16);
+    hardening_wav_write_u16be(pData + 20, MA_DR_WAVE_FORMAT_PCM);
+    hardening_wav_write_u16be(pData + 22, 1);
+    hardening_wav_write_u32be(pData + 24, 8000);
+    hardening_wav_write_u32be(pData + 28, 16000);
+    hardening_wav_write_u16be(pData + 32, 2);
+    hardening_wav_write_u16be(pData + 34, 16);
+    MA_COPY_MEMORY(pData + 36, "data", 4);
+    hardening_wav_write_u32be(pData + 40, 4);
+    hardening_wav_write_u16be(pData + 44, 0x1234);
+    hardening_wav_write_u16be(pData + 46, (ma_uint16)-0x2345);
+    return 48;
+}
+
+static size_t hardening_wav_make_aiff_pcm(ma_uint8* pData)
+{
+    static const ma_uint8 sampleRate8000[10] = {0x40, 0x0B, 0xFA, 0, 0, 0, 0, 0, 0, 0};
+
+    MA_ZERO_MEMORY(pData, 58);
+    MA_COPY_MEMORY(pData + 0, "FORM", 4);
+    hardening_wav_write_u32be(pData + 4, 50);
+    MA_COPY_MEMORY(pData + 8, "AIFFCOMM", 8);
+    hardening_wav_write_u32be(pData + 16, 18);
+    hardening_wav_write_u16be(pData + 20, 1);
+    hardening_wav_write_u32be(pData + 22, 2);
+    hardening_wav_write_u16be(pData + 26, 16);
+    MA_COPY_MEMORY(pData + 28, sampleRate8000, sizeof(sampleRate8000));
+    MA_COPY_MEMORY(pData + 38, "SSND", 4);
+    hardening_wav_write_u32be(pData + 42, 12);
+    hardening_wav_write_u32be(pData + 46, 0);
+    hardening_wav_write_u32be(pData + 50, 0);
+    hardening_wav_write_u16be(pData + 54, 0x1234);
+    hardening_wav_write_u16be(pData + 56, (ma_uint16)-0x2345);
+    return 58;
+}
+
+static size_t hardening_wav_make_ima_adpcm(ma_uint8* pData, ma_uint32 factSize)
+{
+    size_t factOffset = 40;
+    size_t dataOffset = factOffset + 8 + factSize + (factSize & 1);
+    size_t totalSize = dataOffset + 16;
+
+    MA_ZERO_MEMORY(pData, 128);
+    MA_COPY_MEMORY(pData + 0, "RIFF", 4);
+    hardening_wav_write_u32le(pData + 4, (ma_uint32)(totalSize - 8));
+    MA_COPY_MEMORY(pData + 8, "WAVEfmt ", 8);
+    hardening_wav_write_u32le(pData + 16, 20);
+    hardening_wav_write_u16le(pData + 20, MA_DR_WAVE_FORMAT_DVI_ADPCM);
+    hardening_wav_write_u16le(pData + 22, 1);
+    hardening_wav_write_u32le(pData + 24, 8000);
+    hardening_wav_write_u32le(pData + 28, 7111);
+    hardening_wav_write_u16le(pData + 32, 8);
+    hardening_wav_write_u16le(pData + 34, 4);
+    hardening_wav_write_u16le(pData + 36, 2);
+    hardening_wav_write_u16le(pData + 38, 9);
+    MA_COPY_MEMORY(pData + factOffset, "fact", 4);
+    hardening_wav_write_u32le(pData + factOffset + 4, factSize);
+    if (factSize >= 4) {
+        hardening_wav_write_u32le(pData + factOffset + 8, 9);
+    }
+    MA_COPY_MEMORY(pData + dataOffset, "data", 4);
+    hardening_wav_write_u32le(pData + dataOffset + 4, 8);
+    /* Predictor, step index, reserved byte and four zero nibbles decode to nine zero frames. */
+    return totalSize;
+}
+
+static size_t hardening_wav_make_ms_adpcm(ma_uint8* pData)
+{
+    static const ma_int16 coefficients[14] = {
+        256, 0, 512, -256, 0, 0, 192, 64, 240, 0, 460, -208, 392, -232
+    };
+    size_t i;
+    size_t factOffset = 70;
+    size_t dataOffset = 82;
+    size_t totalSize = 98;
+
+    MA_ZERO_MEMORY(pData, 128);
+    MA_COPY_MEMORY(pData + 0, "RIFF", 4);
+    hardening_wav_write_u32le(pData + 4, (ma_uint32)(totalSize - 8));
+    MA_COPY_MEMORY(pData + 8, "WAVEfmt ", 8);
+    hardening_wav_write_u32le(pData + 16, 50);
+    hardening_wav_write_u16le(pData + 20, MA_DR_WAVE_FORMAT_ADPCM);
+    hardening_wav_write_u16le(pData + 22, 1);
+    hardening_wav_write_u32le(pData + 24, 8000);
+    hardening_wav_write_u32le(pData + 28, 16000);
+    hardening_wav_write_u16le(pData + 32, 8);
+    hardening_wav_write_u16le(pData + 34, 4);
+    hardening_wav_write_u16le(pData + 36, 32);
+    hardening_wav_write_u16le(pData + 38, 4);
+    hardening_wav_write_u16le(pData + 40, 7);
+    for (i = 0; i < ma_countof(coefficients); i += 1) {
+        hardening_wav_write_u16le(pData + 42 + i * 2, (ma_uint16)coefficients[i]);
+    }
+    MA_COPY_MEMORY(pData + factOffset, "fact", 4);
+    hardening_wav_write_u32le(pData + factOffset + 4, 4);
+    hardening_wav_write_u32le(pData + factOffset + 8, 4);
+    MA_COPY_MEMORY(pData + dataOffset, "data", 4);
+    hardening_wav_write_u32le(pData + dataOffset + 4, 8);
+    pData[dataOffset + 8] = 0; /* Predictor index. */
+    hardening_wav_write_u16le(pData + dataOffset + 9, 16);
+    /* Two initial samples and the final two encoded nibbles remain zero. */
+    return totalSize;
+}
+
+static int hardening_wav_validate_adpcm(const ma_uint8* pData, size_t dataSize, ma_uint16 expectedTag, ma_uint64 expectedFrameCount, const char* pName)
+{
+    ma_dr_wav wav;
+    ma_int16 frames[16];
+    ma_uint64 framesRead;
+    ma_uint64 i;
+
+    MA_ZERO_MEMORY(frames, sizeof(frames));
+    if (!ma_dr_wav_init_memory(&wav, pData, dataSize, NULL)) {
+        printf("%s failed to initialize\n", pName);
+        return 1;
+    }
+    framesRead = ma_dr_wav_read_pcm_frames_s16(&wav, expectedFrameCount, frames);
+    if (wav.translatedFormatTag != expectedTag || wav.totalPCMFrameCount != expectedFrameCount || framesRead != expectedFrameCount) {
+        printf("%s format/count mismatch: tag=%u length=%u:%08u read=%u:%08u\n",
+            pName, wav.translatedFormatTag, (ma_uint32)(wav.totalPCMFrameCount >> 32),
+            (ma_uint32)wav.totalPCMFrameCount, (ma_uint32)(framesRead >> 32), (ma_uint32)framesRead);
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+    for (i = 0; i < framesRead; i += 1) {
+        if (frames[i] != 0) {
+            printf("%s decoded nonzero frame %u:%08u: %d\n", pName, (ma_uint32)(i >> 32), (ma_uint32)i, frames[i]);
+            ma_dr_wav_uninit(&wav);
+            return 1;
+        }
+    }
+    ma_dr_wav_uninit(&wav);
+    return 0;
+}
+
+typedef struct
+{
+    const ma_uint8* pData;
+    size_t dataSize;
+    size_t cursor;
+    ma_uint32 readCount;
+    ma_uint32 seekCount;
+    ma_uint32 failSeekCall;
+} hardening_wav_raw_stream;
+
+static size_t hardening_wav_raw_read(void* pUserData, void* pBufferOut, size_t bytesToRead)
+{
+    hardening_wav_raw_stream* pStream = (hardening_wav_raw_stream*)pUserData;
+    size_t bytesRemaining = pStream->dataSize - pStream->cursor;
+
+    pStream->readCount += 1;
+    if (bytesToRead > bytesRemaining) {
+        bytesToRead = bytesRemaining;
+    }
+    if (bytesToRead > 0) {
+        MA_COPY_MEMORY(pBufferOut, pStream->pData + pStream->cursor, bytesToRead);
+        pStream->cursor += bytesToRead;
+    }
+    return bytesToRead;
+}
+
+static ma_bool32 hardening_wav_raw_seek(void* pUserData, int offset, ma_dr_wav_seek_origin origin)
+{
+    hardening_wav_raw_stream* pStream = (hardening_wav_raw_stream*)pUserData;
+    ma_int64 base;
+    ma_int64 target;
+
+    pStream->seekCount += 1;
+    if (pStream->seekCount == pStream->failSeekCall) {
+        return MA_FALSE;
+    }
+    base = origin == MA_DR_WAV_SEEK_SET ? 0 : (origin == MA_DR_WAV_SEEK_CUR ? (ma_int64)pStream->cursor : (ma_int64)pStream->dataSize);
+    target = base + offset;
+    if (target < 0 || (ma_uint64)target > pStream->dataSize) {
+        return MA_FALSE;
+    }
+    pStream->cursor = (size_t)target;
+    return MA_TRUE;
+}
+
+static ma_bool32 hardening_wav_raw_tell(void* pUserData, ma_int64* pCursor)
+{
+    hardening_wav_raw_stream* pStream = (hardening_wav_raw_stream*)pUserData;
+    *pCursor = (ma_int64)pStream->cursor;
+    return MA_TRUE;
+}
+
+static int hardening_wav_test_compatibility_matrix(void)
+{
+    const ma_int16 expectedFrames[2] = {0x1234, -0x2345};
+    ma_uint8 data[128];
+    ma_uint32 factSize;
+    int failed = 0;
+
+    failed += hardening_wav_test_writer_container(ma_dr_wav_container_riff, "RIFF PCM");
+    failed += hardening_wav_test_writer_container(ma_dr_wav_container_w64, "W64 PCM");
+    failed += hardening_wav_test_writer_container(ma_dr_wav_container_rf64, "RF64 PCM");
+    failed += hardening_wav_validate_pcm(data, hardening_wav_make_rifx_pcm(data), ma_dr_wav_container_rifx, expectedFrames, 2, "RIFX PCM");
+    failed += hardening_wav_validate_pcm(data, hardening_wav_make_aiff_pcm(data), ma_dr_wav_container_aiff, expectedFrames, 2, "AIFF PCM");
+
+    failed += hardening_wav_validate_adpcm(data, hardening_wav_make_ima_adpcm(data, 4), MA_DR_WAVE_FORMAT_DVI_ADPCM, 9, "IMA ADPCM");
+    failed += hardening_wav_validate_adpcm(data, hardening_wav_make_ima_adpcm(data, 8), MA_DR_WAVE_FORMAT_DVI_ADPCM, 9, "IMA ADPCM extended fact");
+    failed += hardening_wav_validate_adpcm(data, hardening_wav_make_ms_adpcm(data), MA_DR_WAVE_FORMAT_ADPCM, 4, "MS ADPCM");
+    for (factSize = 0; factSize < 4; factSize += 1) {
+        ma_dr_wav wav;
+        size_t dataSize = hardening_wav_make_ima_adpcm(data, factSize);
+        if (ma_dr_wav_init_memory(&wav, data, dataSize, NULL)) {
+            printf("IMA ADPCM fact size %u unexpectedly initialized\n", factSize);
+            ma_dr_wav_uninit(&wav);
+            failed = 1;
+        }
+    }
+
+    return failed;
+}
+
+static int hardening_wav_test_failed_seek(void)
+{
+    ma_uint8 data[48];
+    hardening_wav_raw_stream stream;
+    ma_dr_wav wav;
+
+    hardening_wav_make_rifx_pcm(data);
+    MA_ZERO_OBJECT(&stream);
+    stream.pData = data;
+    stream.dataSize = sizeof(data);
+    stream.failSeekCall = 1;
+    if (ma_dr_wav_init(&wav, hardening_wav_raw_read, hardening_wav_raw_seek, hardening_wav_raw_tell, &stream, NULL)) {
+        printf("valid RIFX unexpectedly initialized after injected seek failure\n");
+        ma_dr_wav_uninit(&wav);
+        return 1;
+    }
+    if (stream.seekCount != 1 || stream.readCount == 0 || stream.readCount > 8) {
+        printf("RIFX failed-seek path was not bounded: reads=%u seeks=%u\n", stream.readCount, stream.seekCount);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     int failed = 0;
@@ -198,6 +532,8 @@ int main(void)
     failed += hardening_wav_test_bounded_callbacks(g_wav_1151, sizeof(g_wav_1151), MA_FALSE, "issue 1151");
     failed += hardening_wav_test_bounded_callbacks(g_wav_1123, sizeof(g_wav_1123), MA_FALSE, "issue 1123");
     failed += hardening_wav_test_fmt_boundaries();
+    failed += hardening_wav_test_compatibility_matrix();
+    failed += hardening_wav_test_failed_seek();
 
     /* These calls are reached only when the callback-budget assertions prove
        the malformed parser paths make bounded progress. */
