@@ -70535,6 +70535,18 @@ MA_API ma_result ma_noise_read_pcm_frames(ma_noise* pNoise, void* pFramesOut, ma
 #ifndef MA_RESOURCE_MANAGER_FENCE_RELEASE
 #define MA_RESOURCE_MANAGER_FENCE_RELEASE(pFence) ma_fence_release((pFence))
 #endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_RESULT_PUBLISHED_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_RESULT_PUBLISHED_HOOK(pDataBuffer) ((void)0)
+#endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_RESULT_PUBLISHED_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_RESULT_PUBLISHED_HOOK(pDataBufferNode) ((void)0)
+#endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_HOOK(pDataBuffer) ((void)0)
+#endif
+#ifndef MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK(pDataBufferNode) ((void)0)
+#endif
 
 MA_API ma_resource_manager_pipeline_notifications ma_resource_manager_pipeline_notifications_init(void)
 {
@@ -72146,6 +72158,11 @@ static ma_result ma_resource_manager_data_buffer_node_acquire(ma_resource_manage
         }
     }
 
+    /* A successful lookup or insertion must always return the corresponding node. */
+    if (pDataBufferNode == NULL) {
+        return MA_INVALID_OPERATION;
+    }
+
     /*
     If we're loading synchronously, we'll need to load everything now. When loading asynchronously,
     a job will have been posted inside the BST critical section so that an uninitialization can be
@@ -72318,7 +72335,10 @@ stage2:
     above because we want to keep that as small as possible for multi-threaded efficiency.
     */
     if (refCount == 0) {
-        if (ma_resource_manager_data_buffer_node_result(pDataBufferNode) == MA_BUSY) {
+        ma_result nodeResult = ma_resource_manager_data_buffer_node_result(pDataBufferNode);
+        ma_bool32 hasPendingJobs = ma_atomic_load_32(&pDataBufferNode->executionPointer) != ma_atomic_load_32(&pDataBufferNode->executionCounter);
+
+        if (nodeResult == MA_BUSY || hasPendingJobs) {
             /* The sound is still loading. We need to delay the freeing of the node to a safe time. */
             ma_job job;
 
@@ -72329,6 +72349,8 @@ stage2:
             job.order = ma_resource_manager_data_buffer_node_next_execution_order(pDataBufferNode);
             job.data.resourceManager.freeDataBufferNode.pResourceManager = pResourceManager;
             job.data.resourceManager.freeDataBufferNode.pDataBufferNode  = pDataBufferNode;
+
+            MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK(pDataBufferNode);
 
             result = ma_resource_manager_post_job(pResourceManager, &job);
             if (result != MA_SUCCESS) {
@@ -72564,7 +72586,16 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
             /* If we need to wait for initialization to complete we can just process the job in place. */
             if (waitForInit) {
                 result = ma_job_process(&job);
-                jobFencesAcquired = MA_FALSE;   /* Processed here or re-posted; the job owns both fence acquisitions. */
+
+                /*
+                Success means the job either retired or was re-posted and therefore owns the
+                second fence acquisition. An error can also be terminal, in which case advancing
+                the execution pointer proves the job already released its fences. If neither is
+                true, an inline re-post failed and ownership remains with this caller.
+                */
+                if (result == MA_SUCCESS || ma_atomic_load_32(&pDataBuffer->executionPointer) != job.order) {
+                    jobFencesAcquired = MA_FALSE;
+                }
 
                 if (result == MA_SUCCESS) {
                     ma_resource_manager_inline_notification_wait(&initNotification);
@@ -72592,6 +72623,10 @@ static ma_result ma_resource_manager_data_buffer_init_ex_internal(ma_resource_ma
                 if (jobFencesAcquired) {
                     ma_resource_manager_pipeline_notifications_release_all_fences(&notifications);
                     jobFencesAcquired = MA_FALSE;
+
+                    if (waitForInit && notifications.done.pNotification != NULL) {
+                        ma_async_notification_signal(notifications.done.pNotification);
+                    }
                 }
                 if (waitForInit == MA_FALSE) {
                     ma_resource_manager_pipeline_notifications_signal_all_notifications(&notifications);
@@ -72703,7 +72738,8 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
     }
 
     previousResult = ma_resource_manager_data_buffer_result(pDataBuffer);
-    if (previousResult == MA_SUCCESS) {
+    if (previousResult == MA_SUCCESS &&
+        ma_atomic_load_32(&pDataBuffer->executionPointer) == ma_atomic_load_32(&pDataBuffer->executionCounter)) {
         /* The data buffer can be deleted synchronously. */
         return ma_resource_manager_data_buffer_uninit_internal(pDataBuffer);
     } else {
@@ -72714,6 +72750,8 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
         */
         ma_resource_manager_inline_notification notification;
         ma_job job;
+
+        MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_HOOK(pDataBuffer);
 
         result = ma_resource_manager_inline_notification_init(pDataBuffer->pResourceManager, &notification);
         if (result != MA_SUCCESS) {
@@ -74334,6 +74372,9 @@ done:
     */
     ma_atomic_compare_and_swap_i32(&pDataBufferNode->result, MA_BUSY, result);
 
+    /* A status observer may request last-reference retirement at this exact boundary. */
+    MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_RESULT_PUBLISHED_HOOK(pDataBufferNode);
+
     /*
     Retire this job before publishing either initialization or terminal completion. A waiter may
     release the last node reference as soon as either notification is observed.
@@ -74457,6 +74498,9 @@ done:
     /* Make sure we set the result of node in case some error occurred. */
     ma_atomic_compare_and_swap_i32(&pDataBufferNode->result, MA_BUSY, result);
 
+    /* A status observer may request last-reference retirement at this exact boundary. */
+    MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_RESULT_PUBLISHED_HOOK(pDataBufferNode);
+
     /*
     Retire the page job before publishing terminal completion. A terminal notification permits the
     last owner to free the node immediately.
@@ -74561,6 +74605,9 @@ done:
 
     /* Capture the last object-dependent decision before publishing completion. */
     shouldSignalInit = ma_resource_manager_data_buffer_has_connector(pDataBuffer) == MA_FALSE && result != MA_SUCCESS;
+
+    /* A status observer may request owner teardown at this exact boundary. */
+    MA_RESOURCE_MANAGER_DATA_BUFFER_RESULT_PUBLISHED_HOOK(pDataBuffer);
 
     /* A completion waiter may uninitialize or reuse the caller-owned buffer immediately. */
     ma_atomic_fetch_add_32(&pDataBuffer->executionPointer, 1);

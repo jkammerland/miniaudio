@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void hardening_data_buffer_result_published_hook(void* pDataBuffer);
+static void hardening_data_buffer_node_result_published_hook(void* pDataBufferNode);
+static void hardening_data_buffer_async_uninit_hook(void* pDataBuffer);
+static void hardening_data_buffer_node_async_free_hook(void* pDataBufferNode);
+
 typedef struct
 {
     ma_uint32 notificationInitCallCount;
@@ -139,8 +144,62 @@ static void hardening_resource_manager_fault_reset(void)
 #define MA_RESOURCE_MANAGER_INLINE_NOTIFICATION_EVENT_WAIT(pNotificationEvent) hardening_inline_notification_event_wait((pNotificationEvent))
 #define MA_RESOURCE_MANAGER_FENCE_ACQUIRE(pFence) hardening_resource_manager_fence_acquire((pFence))
 #define MA_RESOURCE_MANAGER_FENCE_RELEASE(pFence) hardening_resource_manager_fence_release((pFence))
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_RESULT_PUBLISHED_HOOK(pDataBuffer) hardening_data_buffer_result_published_hook((pDataBuffer))
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_RESULT_PUBLISHED_HOOK(pDataBufferNode) hardening_data_buffer_node_result_published_hook((pDataBufferNode))
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_ASYNC_UNINIT_HOOK(pDataBuffer) hardening_data_buffer_async_uninit_hook((pDataBuffer))
+#define MA_RESOURCE_MANAGER_DATA_BUFFER_NODE_ASYNC_FREE_HOOK(pDataBufferNode) hardening_data_buffer_node_async_free_hook((pDataBufferNode))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
+
+typedef struct
+{
+    void* pDataBuffer;
+    void* pDataBufferNode;
+    ma_event* pResultPublishedEvent;
+    ma_event* pContinueEvent;
+    ma_event* pAsyncRetirementEvent;
+    volatile ma_uint32 enabled;
+    volatile ma_uint32 asyncBufferRetirementCount;
+    volatile ma_uint32 asyncNodeRetirementCount;
+} hardening_retirement_barrier;
+
+static hardening_retirement_barrier g_hardeningRetirementBarrier;
+
+static void hardening_data_buffer_result_published_hook(void* pDataBuffer)
+{
+    if (ma_atomic_load_32(&g_hardeningRetirementBarrier.enabled) != MA_FALSE &&
+        pDataBuffer == g_hardeningRetirementBarrier.pDataBuffer) {
+        ma_event_signal(g_hardeningRetirementBarrier.pResultPublishedEvent);
+        ma_event_wait(g_hardeningRetirementBarrier.pContinueEvent);
+    }
+}
+
+static void hardening_data_buffer_node_result_published_hook(void* pDataBufferNode)
+{
+    if (ma_atomic_load_32(&g_hardeningRetirementBarrier.enabled) != MA_FALSE &&
+        pDataBufferNode == g_hardeningRetirementBarrier.pDataBufferNode) {
+        ma_event_signal(g_hardeningRetirementBarrier.pResultPublishedEvent);
+        ma_event_wait(g_hardeningRetirementBarrier.pContinueEvent);
+    }
+}
+
+static void hardening_data_buffer_async_uninit_hook(void* pDataBuffer)
+{
+    if (ma_atomic_load_32(&g_hardeningRetirementBarrier.enabled) != MA_FALSE &&
+        pDataBuffer == g_hardeningRetirementBarrier.pDataBuffer) {
+        ma_atomic_fetch_add_32(&g_hardeningRetirementBarrier.asyncBufferRetirementCount, 1);
+        ma_event_signal(g_hardeningRetirementBarrier.pAsyncRetirementEvent);
+    }
+}
+
+static void hardening_data_buffer_node_async_free_hook(void* pDataBufferNode)
+{
+    if (ma_atomic_load_32(&g_hardeningRetirementBarrier.enabled) != MA_FALSE &&
+        pDataBufferNode == g_hardeningRetirementBarrier.pDataBufferNode) {
+        ma_atomic_fetch_add_32(&g_hardeningRetirementBarrier.asyncNodeRetirementCount, 1);
+        ma_event_signal(g_hardeningRetirementBarrier.pAsyncRetirementEvent);
+    }
+}
 
 typedef struct
 {
@@ -190,6 +249,42 @@ typedef struct
     ma_async_notification_callbacks callbacks;
     ma_uint32 signalCount;
 } hardening_counting_notification;
+
+typedef struct
+{
+    ma_job job;
+    ma_result result;
+} hardening_job_thread_data;
+
+typedef struct
+{
+    ma_resource_manager_data_buffer* pDataBuffer;
+    ma_result result;
+    volatile ma_uint32 complete;
+} hardening_buffer_uninit_thread_data;
+
+static ma_thread_result MA_THREADCALL hardening_job_thread_entry(void* pUserData)
+{
+    hardening_job_thread_data* pThreadData = (hardening_job_thread_data*)pUserData;
+    pThreadData->result = ma_job_process(&pThreadData->job);
+    return (ma_thread_result)0;
+}
+
+static ma_thread_result MA_THREADCALL hardening_process_next_job_thread_entry(void* pUserData)
+{
+    hardening_job_thread_data* pThreadData = (hardening_job_thread_data*)pUserData;
+    ma_resource_manager* pResourceManager = (ma_resource_manager*)pThreadData->job.data.custom.data0;
+    pThreadData->result = ma_resource_manager_process_next_job(pResourceManager);
+    return (ma_thread_result)0;
+}
+
+static ma_thread_result MA_THREADCALL hardening_buffer_uninit_thread_entry(void* pUserData)
+{
+    hardening_buffer_uninit_thread_data* pThreadData = (hardening_buffer_uninit_thread_data*)pUserData;
+    pThreadData->result = ma_resource_manager_data_buffer_uninit(pThreadData->pDataBuffer);
+    ma_atomic_store_32(&pThreadData->complete, MA_TRUE);
+    return (ma_thread_result)0;
+}
 
 static void hardening_counting_notification_on_signal(ma_async_notification* pNotification)
 {
@@ -1443,6 +1538,314 @@ static int resource_manager_test_data_buffer_node_notifications_after_retirement
     return failed;
 }
 
+static int resource_manager_test_data_buffer_result_polling_defers_uninit(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_job_thread_data jobThreadData;
+    hardening_buffer_uninit_thread_data uninitThreadData;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_thread jobThread;
+    ma_thread uninitThread;
+    ma_event resultPublishedEvent;
+    ma_event continueEvent;
+    ma_event asyncRetirementEvent;
+    float externalFrames[2];
+    ma_result result;
+    int failed;
+
+    failed = 0;
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("buffer result-poll fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    externalFrames[0] = 0;
+    externalFrames[1] = 0;
+    result = ma_resource_manager_register_decoded_data(&fixture.resourceManager, "buffer-result-poll", externalFrames, 2, ma_format_f32, 1, 48000);
+    if (result == MA_SUCCESS) {
+        result = ma_resource_manager_data_buffer_init(&fixture.resourceManager, "buffer-result-poll", 0, NULL, &dataBuffer);
+    }
+    if (result != MA_SUCCESS) {
+        printf("buffer result-poll setup failed: %d\n", result);
+        hardening_resource_manager_fixture_uninit(&fixture, "buffer result-poll");
+        return 1;
+    }
+
+    if (ma_event_init(&resultPublishedEvent) != MA_SUCCESS ||
+        ma_event_init(&continueEvent) != MA_SUCCESS ||
+        ma_event_init(&asyncRetirementEvent) != MA_SUCCESS) {
+        printf("buffer result-poll barrier init failed\n");
+        ma_resource_manager_data_buffer_uninit(&dataBuffer);
+        ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-result-poll");
+        hardening_resource_manager_fixture_uninit(&fixture, "buffer result-poll");
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(&jobThreadData);
+    MA_ZERO_OBJECT(&uninitThreadData);
+    MA_ZERO_OBJECT(&g_hardeningRetirementBarrier);
+    g_hardeningRetirementBarrier.pDataBuffer = &dataBuffer;
+    g_hardeningRetirementBarrier.pResultPublishedEvent = &resultPublishedEvent;
+    g_hardeningRetirementBarrier.pContinueEvent = &continueEvent;
+    g_hardeningRetirementBarrier.pAsyncRetirementEvent = &asyncRetirementEvent;
+    ma_atomic_store_32(&g_hardeningRetirementBarrier.enabled, MA_TRUE);
+
+    dataBuffer.result = MA_BUSY;
+    dataBuffer.executionPointer = 0;
+    dataBuffer.executionCounter = 1;
+    jobThreadData.job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER);
+    jobThreadData.job.order = 0;
+    jobThreadData.job.data.resourceManager.loadDataBuffer.pDataBuffer = &dataBuffer;
+
+    result = ma_thread_create(&jobThread, ma_thread_priority_normal, 0, hardening_job_thread_entry, &jobThreadData, NULL);
+    if (result != MA_SUCCESS) {
+        printf("buffer result-poll worker creation failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+    ma_event_wait(&resultPublishedEvent);
+
+    if (ma_resource_manager_data_buffer_result(&dataBuffer) != MA_SUCCESS || dataBuffer.executionPointer != 0) {
+        printf("buffer result-poll barrier missed publication window\n");
+        failed = 1;
+    }
+
+    uninitThreadData.pDataBuffer = &dataBuffer;
+    result = ma_thread_create(&uninitThread, ma_thread_priority_normal, 0, hardening_buffer_uninit_thread_entry, &uninitThreadData, NULL);
+    if (result != MA_SUCCESS) {
+        printf("buffer result-poll uninit thread creation failed: %d\n", result);
+        ma_event_signal(&continueEvent);
+        ma_thread_wait(&jobThread);
+        failed = 1;
+        goto done;
+    }
+    ma_event_wait(&asyncRetirementEvent);
+
+    if (ma_atomic_load_32(&g_hardeningRetirementBarrier.asyncBufferRetirementCount) != 1 ||
+        ma_atomic_load_32(&uninitThreadData.complete) != MA_FALSE) {
+        printf("terminal buffer result did not retain the outstanding job\n");
+        failed = 1;
+    }
+
+    ma_event_signal(&continueEvent);
+    ma_thread_wait(&jobThread);
+    result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    ma_thread_wait(&uninitThread);
+    if (jobThreadData.result != MA_SUCCESS || result != MA_SUCCESS ||
+        uninitThreadData.result != MA_SUCCESS || ma_atomic_load_32(&uninitThreadData.complete) != MA_TRUE) {
+        printf("buffer result-poll retirement failed: load=%d free=%d uninit=%d complete=%u\n",
+            jobThreadData.result, result, uninitThreadData.result, ma_atomic_load_32(&uninitThreadData.complete));
+        failed = 1;
+    }
+
+done:
+    ma_atomic_store_32(&g_hardeningRetirementBarrier.enabled, MA_FALSE);
+    MA_ZERO_OBJECT(&g_hardeningRetirementBarrier);
+    ma_event_uninit(&asyncRetirementEvent);
+    ma_event_uninit(&continueEvent);
+    ma_event_uninit(&resultPublishedEvent);
+    if (ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-result-poll") != MA_SUCCESS) {
+        printf("buffer result-poll unregister failed\n");
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("buffer result-poll leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "buffer result-poll");
+    return failed;
+}
+
+static int resource_manager_test_node_result_polling_defers_last_release(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_job_thread_data jobThreadData;
+    ma_resource_manager_data_buffer_node* pNode;
+    ma_thread jobThread;
+    ma_event resultPublishedEvent;
+    ma_event continueEvent;
+    ma_event asyncRetirementEvent;
+    ma_uint32 flags;
+    ma_result result;
+    int failed;
+
+    failed = 0;
+    result = hardening_resource_manager_fixture_init(&fixture, MA_NOT_IMPLEMENTED, 0, MA_AT_END, 8);
+    if (result != MA_SUCCESS) {
+        printf("node result-poll fixture init failed: %d\n", result);
+        return 1;
+    }
+    if (ma_event_init(&resultPublishedEvent) != MA_SUCCESS ||
+        ma_event_init(&continueEvent) != MA_SUCCESS ||
+        ma_event_init(&asyncRetirementEvent) != MA_SUCCESS) {
+        printf("node result-poll barrier init failed\n");
+        hardening_resource_manager_fixture_uninit(&fixture, "node result-poll");
+        return 1;
+    }
+
+    flags = MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC |
+            MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE |
+            MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_UNKNOWN_LENGTH;
+    result = ma_resource_manager_register_file(&fixture.resourceManager, "node-result-poll.custom", flags);
+    if (result != MA_SUCCESS) {
+        printf("node result-poll registration failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    pNode = fixture.resourceManager.pRootDataBufferNode;
+    if (result != MA_SUCCESS || pNode == NULL || pNode->executionPointer != 1 || pNode->executionCounter != 2) {
+        printf("node result-poll load setup failed: result=%d node=%p\n", result, (void*)pNode);
+        failed = 1;
+        goto done;
+    }
+
+    MA_ZERO_OBJECT(&jobThreadData);
+    MA_ZERO_OBJECT(&g_hardeningRetirementBarrier);
+    g_hardeningRetirementBarrier.pDataBufferNode = pNode;
+    g_hardeningRetirementBarrier.pResultPublishedEvent = &resultPublishedEvent;
+    g_hardeningRetirementBarrier.pContinueEvent = &continueEvent;
+    g_hardeningRetirementBarrier.pAsyncRetirementEvent = &asyncRetirementEvent;
+    ma_atomic_store_32(&g_hardeningRetirementBarrier.enabled, MA_TRUE);
+    jobThreadData.job.data.custom.data0 = (ma_uintptr)&fixture.resourceManager;
+
+    result = ma_thread_create(&jobThread, ma_thread_priority_normal, 0, hardening_process_next_job_thread_entry, &jobThreadData, NULL);
+    if (result != MA_SUCCESS) {
+        printf("node result-poll page worker creation failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+    ma_event_wait(&resultPublishedEvent);
+
+    if (ma_resource_manager_data_buffer_node_result(pNode) != MA_SUCCESS || pNode->executionPointer != 1) {
+        printf("node result-poll barrier missed publication window\n");
+        failed = 1;
+    }
+
+    result = ma_resource_manager_unregister_file(&fixture.resourceManager, "node-result-poll.custom");
+    if (result != MA_SUCCESS || fixture.resourceManager.pRootDataBufferNode != NULL ||
+        ma_atomic_load_32(&g_hardeningRetirementBarrier.asyncNodeRetirementCount) != 1) {
+        printf("terminal node result did not defer last release: result=%d root=%p deferred=%u\n",
+            result, (void*)fixture.resourceManager.pRootDataBufferNode,
+            ma_atomic_load_32(&g_hardeningRetirementBarrier.asyncNodeRetirementCount));
+        failed = 1;
+    }
+
+    ma_event_signal(&continueEvent);
+    ma_thread_wait(&jobThread);
+    result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    if (jobThreadData.result != MA_SUCCESS || result != MA_SUCCESS) {
+        printf("node result-poll retirement failed: page=%d free=%d\n", jobThreadData.result, result);
+        failed = 1;
+    }
+
+done:
+    ma_atomic_store_32(&g_hardeningRetirementBarrier.enabled, MA_FALSE);
+    MA_ZERO_OBJECT(&g_hardeningRetirementBarrier);
+    ma_event_uninit(&asyncRetirementEvent);
+    ma_event_uninit(&continueEvent);
+    ma_event_uninit(&resultPublishedEvent);
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("node result-poll leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "node result-poll");
+    return failed;
+}
+
+static int resource_manager_test_wait_init_requeue_failure_releases_fences(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_counting_notification initNotification;
+    hardening_counting_notification doneNotification;
+    ma_resource_manager_pipeline_notifications notifications;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_fence initFence;
+    ma_fence doneFence;
+    ma_uint32 flags;
+    ma_result result;
+    int failed;
+
+    failed = 0;
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2);
+    if (result != MA_SUCCESS) {
+        printf("wait-init requeue fixture init failed: %d\n", result);
+        return 1;
+    }
+    if (ma_fence_init(&initFence) != MA_SUCCESS || ma_fence_init(&doneFence) != MA_SUCCESS) {
+        printf("wait-init requeue fence init failed\n");
+        hardening_resource_manager_fixture_uninit(&fixture, "wait-init requeue");
+        return 1;
+    }
+
+    result = ma_resource_manager_register_file(
+        &fixture.resourceManager,
+        "wait-init-requeue.custom",
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC);
+    if (result != MA_SUCCESS) {
+        printf("wait-init requeue could not fill queue: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    hardening_counting_notification_init(&initNotification);
+    hardening_counting_notification_init(&doneNotification);
+    notifications = ma_resource_manager_pipeline_notifications_init();
+    notifications.init.pNotification = (ma_async_notification*)&initNotification;
+    notifications.init.pFence = &initFence;
+    notifications.done.pNotification = (ma_async_notification*)&doneNotification;
+    notifications.done.pFence = &doneFence;
+    flags = MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC | MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT;
+    hardening_resource_manager_fault_reset();
+    result = ma_resource_manager_data_buffer_init(
+        &fixture.resourceManager,
+        "wait-init-requeue.custom",
+        flags,
+        &notifications,
+        &dataBuffer);
+
+    if (result != MA_OUT_OF_MEMORY || dataBuffer.pResourceManager != NULL || dataBuffer.pNode != NULL) {
+        printf("wait-init requeue returned %d with initialized state\n", result);
+        failed = 1;
+    }
+    if (initFence.counter != 0 || doneFence.counter != 0 ||
+        initNotification.signalCount != 1 || doneNotification.signalCount != 1) {
+        printf("wait-init requeue leaked completion ownership: fences=%u/%u notifications=%u/%u\n",
+            initFence.counter, doneFence.counter, initNotification.signalCount, doneNotification.signalCount);
+        failed = 1;
+    }
+    if (g_hardeningResourceManagerFaultState.fenceAcquireCallCount != 4 ||
+        g_hardeningResourceManagerFaultState.fenceReleaseCallCount != 4) {
+        printf("wait-init requeue fence accounting was acquire=%u release=%u\n",
+            g_hardeningResourceManagerFaultState.fenceAcquireCallCount,
+            g_hardeningResourceManagerFaultState.fenceReleaseCallCount);
+        failed = 1;
+    }
+
+    result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    if (result != MA_NOT_IMPLEMENTED) {
+        printf("wait-init requeue retained-node load returned %d\n", result);
+        failed = 1;
+    }
+    result = ma_resource_manager_unregister_file(&fixture.resourceManager, "wait-init-requeue.custom");
+    if (result != MA_SUCCESS) {
+        printf("wait-init requeue retained-node cleanup failed: %d\n", result);
+        failed = 1;
+    }
+
+done:
+    ma_fence_uninit(&doneFence);
+    ma_fence_uninit(&initFence);
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("wait-init requeue leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "wait-init requeue");
+    return failed;
+}
+
 static int resource_manager_test_decoder_length_failure_cleanup(void)
 {
     hardening_resource_manager_fixture fixture;
@@ -1782,6 +2185,9 @@ int main(void)
     failed += resource_manager_test_data_stream_notification_after_retirement();
     failed += resource_manager_test_data_buffer_notifications_after_retirement();
     failed += resource_manager_test_data_buffer_node_notifications_after_retirement();
+    failed += resource_manager_test_data_buffer_result_polling_defers_uninit();
+    failed += resource_manager_test_node_result_polling_defers_last_release();
+    failed += resource_manager_test_wait_init_requeue_failure_releases_fences();
     failed += resource_manager_test_decoder_length_failure_cleanup();
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_FALSE, "flat-mid-decode-failure.custom");
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_TRUE, "paged-mid-decode-failure.custom");
