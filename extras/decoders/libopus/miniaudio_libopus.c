@@ -160,9 +160,15 @@ MA_API ma_result ma_libopus_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_te
 
         /* We can now initialize the Opus decoder. This must be done after we've set up the callbacks. */
         libopusCallbacks.read  = ma_libopus_of_callback__read;
-        libopusCallbacks.seek  = ma_libopus_of_callback__seek;
         libopusCallbacks.close = NULL;
-        libopusCallbacks.tell  = ma_libopus_of_callback__tell;
+        if (onTell != NULL) {
+            libopusCallbacks.seek = ma_libopus_of_callback__seek;
+            libopusCallbacks.tell = ma_libopus_of_callback__tell;
+        } else {
+            /* opusfile requires seek and tell to be supplied as a pair. */
+            libopusCallbacks.seek = NULL;
+            libopusCallbacks.tell = NULL;
+        }
 
         pOpus->of = op_open_callbacks(pOpus, &libopusCallbacks, NULL, 0, &libopusResult);
         if (pOpus->of == NULL) {

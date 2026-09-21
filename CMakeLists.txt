@@ -22,6 +22,10 @@ option(MINIAUDIO_FORCE_C89                     "Force compilation as C89"       
 option(MINIAUDIO_NO_EXTRA_NODES                "Do not build extra node graph nodes" OFF)
 option(MINIAUDIO_NO_LIBVORBIS                  "Disable miniaudio_libvorbis"         OFF)
 option(MINIAUDIO_NO_LIBOPUS                    "Disable miniaudio_libopus"           OFF)
+option(MINIAUDIO_FETCH_LIBVORBIS               "Fetch hash-pinned libogg/libvorbis development dependencies" OFF)
+option(MINIAUDIO_FETCH_LIBOPUS                  "Fetch hash-pinned libogg/libopus/opusfile development dependencies" OFF)
+option(MINIAUDIO_REQUIRE_LIBVORBIS              "Fail configuration when the optional libvorbis wrapper cannot be built" OFF)
+option(MINIAUDIO_REQUIRE_LIBOPUS                "Fail configuration when the optional libopus wrapper cannot be built" OFF)
 option(MINIAUDIO_NO_WASAPI                     "Disable the WASAPI backend"          OFF)
 option(MINIAUDIO_NO_DSOUND                     "Disable the DirectSound backend"     OFF)
 option(MINIAUDIO_NO_WINMM                      "Disable the WinMM backend"           OFF)
@@ -283,6 +287,14 @@ endif()
 
 
 # External Libraries
+if(MINIAUDIO_FETCH_LIBVORBIS OR MINIAUDIO_FETCH_LIBOPUS)
+    if(CMAKE_VERSION VERSION_LESS 3.16)
+        message(FATAL_ERROR "Pinned optional decoder dependencies require CMake 3.16 or newer.")
+    endif()
+    include(cmake/miniaudio_optional_decoders.cmake)
+    miniaudio_fetch_optional_decoder_dependencies()
+endif()
+
 function(add_libogg_subdirectory)
     if(NOT TARGET ogg)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/ogg/CMakeLists.txt)
@@ -401,6 +413,18 @@ if(NOT MINIAUDIO_NO_LIBOPUS)
         message(STATUS "libopusfile already found.")
         set(HAS_LIBOPUS TRUE)
     endif()
+endif()
+
+if(MINIAUDIO_REQUIRE_LIBVORBIS AND NOT HAS_LIBVORBIS)
+    message(FATAL_ERROR
+        "MINIAUDIO_REQUIRE_LIBVORBIS is enabled, but libvorbisfile was not found. "
+        "Install it or enable MINIAUDIO_FETCH_LIBVORBIS.")
+endif()
+
+if(MINIAUDIO_REQUIRE_LIBOPUS AND NOT HAS_LIBOPUS)
+    message(FATAL_ERROR
+        "MINIAUDIO_REQUIRE_LIBOPUS is enabled, but opusfile was not found. "
+        "Install it or enable MINIAUDIO_FETCH_LIBOPUS.")
 endif()
 
 
@@ -769,6 +793,20 @@ if(MINIAUDIO_BUILD_TESTS)
 
     add_miniaudio_test(miniaudio_hardening_device_post_init hardening/hardening_device_post_init.c)
     add_test(NAME miniaudio_hardening_device_post_init COMMAND miniaudio_hardening_device_post_init)
+
+    if(HAS_LIBOPUS)
+        add_miniaudio_test(miniaudio_hardening_libopus hardening/hardening_libopus.c)
+        target_link_libraries(miniaudio_hardening_libopus PRIVATE libopus_interface)
+        add_test(NAME miniaudio_hardening_libopus COMMAND miniaudio_hardening_libopus ${CMAKE_CURRENT_SOURCE_DIR}/data/48000-stereo.opus)
+        set_tests_properties(miniaudio_hardening_libopus PROPERTIES TIMEOUT 30)
+    endif()
+
+    if(HAS_LIBVORBIS)
+        add_miniaudio_test(miniaudio_hardening_libvorbis hardening/hardening_libvorbis.c)
+        target_link_libraries(miniaudio_hardening_libvorbis PRIVATE libvorbis_interface)
+        add_test(NAME miniaudio_hardening_libvorbis COMMAND miniaudio_hardening_libvorbis ${CMAKE_CURRENT_SOURCE_DIR}/data/48000-stereo.ogg)
+        set_tests_properties(miniaudio_hardening_libvorbis PROPERTIES TIMEOUT 30)
+    endif()
 
     if(HAS_STEAMAUDIO)
         add_miniaudio_test(miniaudio_hardening_steamaudio hardening/hardening_steamaudio.c)

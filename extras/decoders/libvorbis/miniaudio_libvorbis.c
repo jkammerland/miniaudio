@@ -182,9 +182,15 @@ MA_API ma_result ma_libvorbis_init(ma_read_proc onRead, ma_seek_proc onSeek, ma_
 
         /* We can now initialize the vorbis decoder. This must be done after we've set up the callbacks. */
         libvorbisCallbacks.read_func  = ma_libvorbis_vf_callback__read;
-        libvorbisCallbacks.seek_func  = ma_libvorbis_vf_callback__seek;
         libvorbisCallbacks.close_func = NULL;
-        libvorbisCallbacks.tell_func  = ma_libvorbis_vf_callback__tell;
+        if (onTell != NULL) {
+            libvorbisCallbacks.seek_func = ma_libvorbis_vf_callback__seek;
+            libvorbisCallbacks.tell_func = ma_libvorbis_vf_callback__tell;
+        } else {
+            /* libvorbis requires seek and tell to be supplied as a pair. */
+            libvorbisCallbacks.seek_func = NULL;
+            libvorbisCallbacks.tell_func = NULL;
+        }
 
         libvorbisResult = ov_open_callbacks(pVorbis, (OggVorbis_File*)pVorbis->vf, NULL, 0, libvorbisCallbacks);
         if (libvorbisResult < 0) {
