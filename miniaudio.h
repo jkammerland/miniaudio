@@ -74244,6 +74244,12 @@ done:
     */
     ma_atomic_compare_and_swap_i32(&pDataBufferNode->result, MA_BUSY, result);
 
+    /*
+    Retire this job before publishing either initialization or terminal completion. A waiter may
+    release the last node reference as soon as either notification is observed.
+    */
+    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
+
     /* At this point initialization is complete and we can signal the notification if any. */
     if (pJob->data.resourceManager.loadDataBufferNode.pInitNotification != NULL) {
         ma_async_notification_signal(pJob->data.resourceManager.loadDataBufferNode.pInitNotification);
@@ -74261,9 +74267,6 @@ done:
             ma_fence_release(pJob->data.resourceManager.loadDataBufferNode.pDoneFence);
         }
     }
-
-    /* Increment the node's execution pointer so that the next jobs can be processed. This is how we keep decoding of pages in-order. */
-    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
 
     /* A busy result should be considered successful from the point of view of the job system. */
     if (result == MA_BUSY) {
@@ -74290,7 +74293,10 @@ static ma_result ma_job_process__resource_manager__free_data_buffer_node(ma_job*
         return ma_resource_manager_post_job(pResourceManager, pJob);    /* Out of order. */
     }
 
-    /* The event needs to be signalled last. */
+    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
+    ma_resource_manager_data_buffer_node_free(pResourceManager, pDataBufferNode);
+
+    /* The event needs to be signalled last, after the node has been physically retired. */
     if (pJob->data.resourceManager.freeDataBufferNode.pDoneNotification != NULL) {
         ma_async_notification_signal(pJob->data.resourceManager.freeDataBufferNode.pDoneNotification);
     }
@@ -74298,10 +74304,6 @@ static ma_result ma_job_process__resource_manager__free_data_buffer_node(ma_job*
     if (pJob->data.resourceManager.freeDataBufferNode.pDoneFence != NULL) {
         ma_fence_release(pJob->data.resourceManager.freeDataBufferNode.pDoneFence);
     }
-
-    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
-
-    ma_resource_manager_data_buffer_node_free(pResourceManager, pDataBufferNode);
 
     return MA_SUCCESS;
 }
@@ -74365,6 +74367,12 @@ done:
     /* Make sure we set the result of node in case some error occurred. */
     ma_atomic_compare_and_swap_i32(&pDataBufferNode->result, MA_BUSY, result);
 
+    /*
+    Retire the page job before publishing terminal completion. A terminal notification permits the
+    last owner to free the node immediately.
+    */
+    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
+
     /* Signal the notification after setting the result in case the notification callback wants to inspect the result code. */
     if (result != MA_BUSY) {
         if (pJob->data.resourceManager.pageDataBufferNode.pDoneNotification != NULL) {
@@ -74376,7 +74384,6 @@ done:
         }
     }
 
-    ma_atomic_fetch_add_32(&pDataBufferNode->executionPointer, 1);
     return result;
 }
 
@@ -74388,6 +74395,7 @@ static ma_result ma_job_process__resource_manager__load_data_buffer(ma_job* pJob
     ma_resource_manager_data_buffer* pDataBuffer;
     ma_resource_manager_data_supply_type dataSupplyType = ma_resource_manager_data_supply_type_unknown;
     ma_bool32 isConnectorInitialized = MA_FALSE;
+    ma_bool32 shouldSignalInit = MA_FALSE;
 
     /*
     All we're doing here is checking if the node has finished loading. If not, we just re-post the job
@@ -74461,7 +74469,13 @@ done:
     /* Only move away from a busy code so that we don't trash any existing error codes. */
     ma_atomic_compare_and_swap_i32(&pDataBuffer->result, MA_BUSY, result);
 
-    /* Only signal the other threads after the result has been set just for cleanliness sake. */
+    /* Capture the last object-dependent decision before publishing completion. */
+    shouldSignalInit = ma_resource_manager_data_buffer_has_connector(pDataBuffer) == MA_FALSE && result != MA_SUCCESS;
+
+    /* A completion waiter may uninitialize or reuse the caller-owned buffer immediately. */
+    ma_atomic_fetch_add_32(&pDataBuffer->executionPointer, 1);
+
+    /* Only signal the other threads after the result has been set and the job has retired. */
     if (pJob->data.resourceManager.loadDataBuffer.pDoneNotification != NULL) {
         ma_async_notification_signal(pJob->data.resourceManager.loadDataBuffer.pDoneNotification);
     }
@@ -74473,7 +74487,7 @@ done:
     If at this point the data buffer has not had it's connector initialized, it means the
     notification event was never signalled which means we need to signal it here.
     */
-    if (ma_resource_manager_data_buffer_has_connector(pDataBuffer) == MA_FALSE && result != MA_SUCCESS) {
+    if (shouldSignalInit) {
         if (pJob->data.resourceManager.loadDataBuffer.pInitNotification != NULL) {
             ma_async_notification_signal(pJob->data.resourceManager.loadDataBuffer.pInitNotification);
         }
@@ -74482,7 +74496,6 @@ done:
         }
     }
 
-    ma_atomic_fetch_add_32(&pDataBuffer->executionPointer, 1);
     return result;
 }
 
@@ -74504,6 +74517,9 @@ static ma_result ma_job_process__resource_manager__free_data_buffer(ma_job* pJob
 
     ma_resource_manager_data_buffer_uninit_internal(pDataBuffer);
 
+    /* The caller may reuse the buffer as soon as the completion notification is observed. */
+    ma_atomic_fetch_add_32(&pDataBuffer->executionPointer, 1);
+
     /* The event needs to be signalled last. */
     if (pJob->data.resourceManager.freeDataBuffer.pDoneNotification != NULL) {
         ma_async_notification_signal(pJob->data.resourceManager.freeDataBuffer.pDoneNotification);
@@ -74513,7 +74529,6 @@ static ma_result ma_job_process__resource_manager__free_data_buffer(ma_job* pJob
         ma_fence_release(pJob->data.resourceManager.freeDataBuffer.pDoneFence);
     }
 
-    ma_atomic_fetch_add_32(&pDataBuffer->executionPointer, 1);
     return MA_SUCCESS;
 }
 

@@ -22,6 +22,11 @@ typedef struct
     ma_uint32 failFenceAcquireCall;
     ma_result fenceAcquireFailureResult;
     ma_resource_manager_data_stream* pRetirementDataStream;
+    ma_uint32 expectedDataStreamExecutionPointer;
+    ma_resource_manager_data_buffer* pRetirementDataBuffer;
+    ma_uint32 expectedDataBufferExecutionPointer;
+    ma_resource_manager_data_buffer_node* pRetirementDataBufferNode;
+    ma_uint32 expectedDataBufferNodeExecutionPointer;
     void (* notificationEventOnSignal)(ma_async_notification* pNotification);
     ma_uint32 notificationBeforeRetirementCount;
 } hardening_resource_manager_fault_state;
@@ -39,7 +44,15 @@ static void hardening_retirement_notification_on_signal(ma_async_notification* p
     ma_resource_manager_data_stream* pDataStream;
 
     pDataStream = g_hardeningResourceManagerFaultState.pRetirementDataStream;
-    if (pDataStream != NULL && pDataStream->executionPointer != pDataStream->executionCounter) {
+    if (pDataStream != NULL && pDataStream->executionPointer != g_hardeningResourceManagerFaultState.expectedDataStreamExecutionPointer) {
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount += 1;
+    }
+    if (g_hardeningResourceManagerFaultState.pRetirementDataBuffer != NULL &&
+        g_hardeningResourceManagerFaultState.pRetirementDataBuffer->executionPointer != g_hardeningResourceManagerFaultState.expectedDataBufferExecutionPointer) {
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount += 1;
+    }
+    if (g_hardeningResourceManagerFaultState.pRetirementDataBufferNode != NULL &&
+        g_hardeningResourceManagerFaultState.pRetirementDataBufferNode->executionPointer != g_hardeningResourceManagerFaultState.expectedDataBufferNodeExecutionPointer) {
         g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount += 1;
     }
     g_hardeningResourceManagerFaultState.notificationEventOnSignal(pNotification);
@@ -59,7 +72,9 @@ static ma_result hardening_inline_notification_event_init(ma_async_notification_
     result = ma_async_notification_event_init(pNotificationEvent);
     if (result == MA_SUCCESS) {
         g_hardeningResourceManagerFaultState.notificationInitSuccessCount += 1;
-        if (g_hardeningResourceManagerFaultState.pRetirementDataStream != NULL) {
+        if (g_hardeningResourceManagerFaultState.pRetirementDataStream != NULL ||
+            g_hardeningResourceManagerFaultState.pRetirementDataBuffer != NULL ||
+            g_hardeningResourceManagerFaultState.pRetirementDataBufferNode != NULL) {
             g_hardeningResourceManagerFaultState.notificationEventOnSignal = pNotificationEvent->cb.onSignal;
             pNotificationEvent->cb.onSignal = hardening_retirement_notification_on_signal;
         }
@@ -1220,6 +1235,7 @@ static int resource_manager_test_data_stream_notification_after_retirement(void)
     }
     hardening_resource_manager_fault_reset();
     g_hardeningResourceManagerFaultState.pRetirementDataStream = &dataStream;
+    g_hardeningResourceManagerFaultState.expectedDataStreamExecutionPointer = 1;
     result = ma_resource_manager_data_stream_init(&fixture.resourceManager, "stream-retirement.custom", 0, NULL, &dataStream);
     g_hardeningResourceManagerFaultState.pRetirementDataStream = NULL;
 
@@ -1239,6 +1255,191 @@ static int resource_manager_test_data_stream_notification_after_retirement(void)
         failed = 1;
     }
     failed += hardening_resource_manager_fixture_uninit(&fixture, "data stream retirement");
+    return failed;
+}
+
+static int resource_manager_test_data_buffer_notifications_after_retirement(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_buffer dataBuffer;
+    ma_async_notification_event notification;
+    ma_job job;
+    float externalFrames[2];
+    ma_result result;
+    int failed = 0;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 8);
+    if (result != MA_SUCCESS) {
+        printf("data buffer retirement fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    externalFrames[0] = 0;
+    externalFrames[1] = 0;
+    result = ma_resource_manager_register_decoded_data(&fixture.resourceManager, "buffer-retirement", externalFrames, 2, ma_format_f32, 1, 48000);
+    if (result == MA_SUCCESS) {
+        result = ma_resource_manager_data_buffer_init(&fixture.resourceManager, "buffer-retirement", 0, NULL, &dataBuffer);
+    }
+    if (result != MA_SUCCESS) {
+        printf("data buffer retirement setup failed: %d\n", result);
+        ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-retirement");
+        hardening_resource_manager_fixture_uninit(&fixture, "data buffer retirement");
+        return 1;
+    }
+
+    dataBuffer.result = MA_BUSY;
+    dataBuffer.executionPointer = 0;
+    dataBuffer.executionCounter = 1;
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.pRetirementDataBuffer = &dataBuffer;
+    g_hardeningResourceManagerFaultState.expectedDataBufferExecutionPointer = 1;
+    result = hardening_inline_notification_event_init(&notification);
+    if (result == MA_SUCCESS) {
+        job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER);
+        job.order = 0;
+        job.data.resourceManager.loadDataBuffer.pDataBuffer = &dataBuffer;
+        job.data.resourceManager.loadDataBuffer.pDoneNotification = (ma_async_notification*)&notification;
+        result = ma_job_process(&job);
+    }
+    g_hardeningResourceManagerFaultState.pRetirementDataBuffer = NULL;
+    if (result == MA_SUCCESS) {
+        hardening_inline_notification_event_uninit(&notification);
+    }
+    if (result != MA_SUCCESS || dataBuffer.executionPointer != 1 ||
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount != 0) {
+        printf("data buffer load retirement was result=%d pointer=%u early-notifications=%u\n",
+            result,
+            dataBuffer.executionPointer,
+            g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount);
+        failed = 1;
+    }
+
+    dataBuffer.result = MA_UNAVAILABLE;
+    dataBuffer.executionPointer = 0;
+    dataBuffer.executionCounter = 1;
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.pRetirementDataBuffer = &dataBuffer;
+    g_hardeningResourceManagerFaultState.expectedDataBufferExecutionPointer = 1;
+    result = hardening_inline_notification_event_init(&notification);
+    if (result == MA_SUCCESS) {
+        job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER);
+        job.order = 0;
+        job.data.resourceManager.freeDataBuffer.pDataBuffer = &dataBuffer;
+        job.data.resourceManager.freeDataBuffer.pDoneNotification = (ma_async_notification*)&notification;
+        result = ma_job_process(&job);
+    }
+    g_hardeningResourceManagerFaultState.pRetirementDataBuffer = NULL;
+    if (result == MA_SUCCESS) {
+        hardening_inline_notification_event_uninit(&notification);
+    }
+    if (result != MA_SUCCESS || dataBuffer.executionPointer != 1 ||
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount != 0) {
+        printf("data buffer free retirement was result=%d pointer=%u early-notifications=%u\n",
+            result,
+            dataBuffer.executionPointer,
+            g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount);
+        failed = 1;
+    }
+
+    if (ma_resource_manager_unregister_data(&fixture.resourceManager, "buffer-retirement") != MA_SUCCESS) {
+        printf("data buffer retirement unregister failed\n");
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("data buffer retirement leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data buffer retirement");
+    return failed;
+}
+
+static int resource_manager_test_data_buffer_node_notifications_after_retirement(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_resource_manager_data_buffer_node* pNode;
+    ma_async_notification_event notification;
+    ma_job job;
+    char* pFilePathCopy;
+    ma_result result;
+    int failed = 0;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_NOT_IMPLEMENTED, 0, MA_AT_END, 8);
+    if (result != MA_SUCCESS) {
+        printf("data buffer node retirement fixture init failed: %d\n", result);
+        return 1;
+    }
+
+    pNode = (ma_resource_manager_data_buffer_node*)ma_malloc(sizeof(*pNode), &fixture.resourceManager.config.allocationCallbacks);
+    pFilePathCopy = ma_copy_string("node-retirement.custom", &fixture.resourceManager.config.allocationCallbacks);
+    if (pNode == NULL || pFilePathCopy == NULL) {
+        printf("data buffer node retirement setup allocation failed\n");
+        ma_free(pFilePathCopy, &fixture.resourceManager.config.allocationCallbacks);
+        ma_free(pNode, &fixture.resourceManager.config.allocationCallbacks);
+        hardening_resource_manager_fixture_uninit(&fixture, "data buffer node retirement");
+        return 1;
+    }
+
+    MA_ZERO_OBJECT(pNode);
+    pNode->refCount = 1;
+    pNode->result = MA_BUSY;
+    pNode->isDataOwnedByResourceManager = MA_TRUE;
+    pNode->data.type = ma_resource_manager_data_supply_type_unknown;
+    pNode->executionCounter = 1;
+
+    hardening_resource_manager_fault_reset();
+    g_hardeningResourceManagerFaultState.pRetirementDataBufferNode = pNode;
+    g_hardeningResourceManagerFaultState.expectedDataBufferNodeExecutionPointer = 1;
+    result = hardening_inline_notification_event_init(&notification);
+    if (result == MA_SUCCESS) {
+        job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_LOAD_DATA_BUFFER_NODE);
+        job.order = 0;
+        job.data.resourceManager.loadDataBufferNode.pResourceManager = &fixture.resourceManager;
+        job.data.resourceManager.loadDataBufferNode.pDataBufferNode = pNode;
+        job.data.resourceManager.loadDataBufferNode.pFilePath = pFilePathCopy;
+        job.data.resourceManager.loadDataBufferNode.flags = MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE | MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_UNKNOWN_LENGTH;
+        job.data.resourceManager.loadDataBufferNode.pInitNotification = (ma_async_notification*)&notification;
+        job.data.resourceManager.loadDataBufferNode.pDoneNotification = (ma_async_notification*)&notification;
+        result = ma_job_process(&job);
+    }
+    if (result != MA_SUCCESS || pNode->executionPointer != 1 || pNode->executionCounter != 2 ||
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount != 0) {
+        printf("data buffer node load retirement was result=%d pointer=%u counter=%u early-notifications=%u\n",
+            result,
+            pNode->executionPointer,
+            pNode->executionCounter,
+            g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount);
+        failed = 1;
+    }
+
+    g_hardeningResourceManagerFaultState.expectedDataBufferNodeExecutionPointer = 2;
+    result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    g_hardeningResourceManagerFaultState.pRetirementDataBufferNode = NULL;
+    hardening_inline_notification_event_uninit(&notification);
+    if (result != MA_SUCCESS || pNode->executionPointer != 2 || ma_resource_manager_data_buffer_node_result(pNode) != MA_SUCCESS ||
+        g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount != 0) {
+        printf("data buffer node page retirement was result=%d state=%d pointer=%u early-notifications=%u\n",
+            result,
+            ma_resource_manager_data_buffer_node_result(pNode),
+            pNode->executionPointer,
+            g_hardeningResourceManagerFaultState.notificationBeforeRetirementCount);
+        failed = 1;
+    }
+
+    ma_resource_manager_data_buffer_node_free(&fixture.resourceManager, pNode);
+    if (fixture.backendState.initCount != 1 || fixture.backendState.uninitCount != 1 ||
+        fixture.vfs.openCount != 1 || fixture.vfs.closeCount != 1) {
+        printf("data buffer node retirement lifetime was decoder=%u/%u VFS=%u/%u\n",
+            fixture.backendState.initCount,
+            fixture.backendState.uninitCount,
+            fixture.vfs.openCount,
+            fixture.vfs.closeCount);
+        failed = 1;
+    }
+    if (fixture.allocations.liveAllocationCount != fixture.baselineLiveAllocationCount) {
+        printf("data buffer node retirement leaked tracked allocations\n");
+        failed = 1;
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "data buffer node retirement");
     return failed;
 }
 
@@ -1579,6 +1780,8 @@ int main(void)
     failed += resource_manager_test_data_stream_load_failure(MA_NOT_IMPLEMENTED, MA_FALSE, MA_NOT_IMPLEMENTED, "data stream length failure");
     failed += resource_manager_test_data_stream_load_failure(MA_SUCCESS, MA_TRUE, MA_OUT_OF_MEMORY, "data stream page allocation failure");
     failed += resource_manager_test_data_stream_notification_after_retirement();
+    failed += resource_manager_test_data_buffer_notifications_after_retirement();
+    failed += resource_manager_test_data_buffer_node_notifications_after_retirement();
     failed += resource_manager_test_decoder_length_failure_cleanup();
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_FALSE, "flat-mid-decode-failure.custom");
     failed += resource_manager_test_mid_decode_failure_cleanup(MA_TRUE, "paged-mid-decode-failure.custom");
