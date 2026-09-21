@@ -24,6 +24,8 @@ typedef struct
 {
     ma_uint32 allocations;
     ma_uint32 frees;
+    ma_bool32 retired;
+    ma_uint32 callbacksAfterRetire;
 } hardening_allocator_state;
 
 typedef struct
@@ -44,6 +46,8 @@ static hardening_async_mode g_asyncMode;
 static ma_bool32 g_processLoopbackSupported;
 static ma_uint32 g_activationCalls;
 static ma_bool32 g_sawVirtualDevice;
+static ma_bool32 g_sawCaptureInterface;
+static ma_bool32 g_sawRenderInterface;
 static ma_bool32 g_sawAudioClientIID;
 static ma_bool32 g_sawActivationBlob;
 static ma_uint32 g_targetProcessID;
@@ -56,6 +60,9 @@ static void* hardening_malloc(size_t sz, void* pUserData)
 {
     hardening_allocator_state* pState = (hardening_allocator_state*)pUserData;
     void* p = malloc(sz);
+    if (pState->retired) {
+        pState->callbacksAfterRetire += 1;
+    }
     if (p != NULL) {
         pState->allocations += 1;
     }
@@ -66,6 +73,10 @@ static void* hardening_realloc(void* p, size_t sz, void* pUserData)
 {
     hardening_allocator_state* pState = (hardening_allocator_state*)pUserData;
     void* pNew;
+
+    if (pState->retired) {
+        pState->callbacksAfterRetire += 1;
+    }
 
     if (p == NULL) {
         pNew = realloc(NULL, sz);
@@ -81,6 +92,9 @@ static void* hardening_realloc(void* p, size_t sz, void* pUserData)
 static void hardening_free(void* p, void* pUserData)
 {
     hardening_allocator_state* pState = (hardening_allocator_state*)pUserData;
+    if (pState->retired) {
+        pState->callbacksAfterRetire += 1;
+    }
     if (p != NULL) {
         pState->frees += 1;
         free(p);
@@ -185,6 +199,8 @@ static HRESULT WINAPI hardening_activate_audio_interface_async(
 
     g_activationCalls += 1;
     g_sawVirtualDevice = ma_wcscmp(pDeviceInterfacePath, MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK) == 0;
+    g_sawCaptureInterface = ma_wcscmp(pDeviceInterfacePath, MA_WASAPI_AUDIO_CAPTURE_INTERFACE_STRING) == 0;
+    g_sawRenderInterface = ma_wcscmp(pDeviceInterfacePath, MA_WASAPI_AUDIO_RENDER_INTERFACE_STRING) == 0;
     g_sawAudioClientIID = ma_is_guid_equal(pIID, &MA_IID_IAudioClient);
 
     if (pActivationParams != NULL && pActivationParams->vt == MA_VT_BLOB &&
@@ -242,6 +258,8 @@ static void hardening_reset(hardening_allocator_state* pAllocatorState, ma_conte
     g_processLoopbackSupported = MA_TRUE;
     g_activationCalls = 0;
     g_sawVirtualDevice = MA_FALSE;
+    g_sawCaptureInterface = MA_FALSE;
+    g_sawRenderInterface = MA_FALSE;
     g_sawAudioClientIID = MA_FALSE;
     g_sawActivationBlob = MA_FALSE;
     g_targetProcessID = 0;
@@ -304,6 +322,38 @@ static int hardening_test_include_exclude(void)
         printf("exclude handler leak: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
         failed = 1;
     }
+
+    return failed;
+}
+
+static int hardening_test_default_interface_strings(void)
+{
+    hardening_allocator_state allocatorState;
+    ma_context context;
+    ma_IAudioClient* pAudioClient;
+    ma_WASAPIDeviceInterface* pDeviceInterface;
+    ma_result result;
+    int failed = 0;
+
+    hardening_reset(&allocatorState, &context);
+    pAudioClient = NULL;
+    pDeviceInterface = NULL;
+    result = ma_context_get_IAudioClient_Async__wasapi(&context, ma_device_type_capture, NULL, NULL, &pAudioClient, (ma_IUnknown**)&pDeviceInterface);
+    if (result != MA_SUCCESS || !g_sawCaptureInterface || g_sawRenderInterface) {
+        printf("default capture interface string failed: result=%d capture=%d render=%d\n", result, g_sawCaptureInterface, g_sawRenderInterface);
+        failed = 1;
+    }
+    failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
+
+    hardening_reset(&allocatorState, &context);
+    pAudioClient = NULL;
+    pDeviceInterface = NULL;
+    result = ma_context_get_IAudioClient_Async__wasapi(&context, ma_device_type_playback, NULL, NULL, &pAudioClient, (ma_IUnknown**)&pDeviceInterface);
+    if (result != MA_SUCCESS || g_sawCaptureInterface || !g_sawRenderInterface) {
+        printf("default render interface string failed: result=%d capture=%d render=%d\n", result, g_sawCaptureInterface, g_sawRenderInterface);
+        failed = 1;
+    }
+    failed += hardening_release_outputs(pAudioClient, pDeviceInterface);
 
     return failed;
 }
@@ -389,18 +439,20 @@ static int hardening_test_late_completion(void)
     g_asyncMode = hardening_async_timeout;
     result = ma_context_get_IAudioClient__wasapi(&context, ma_device_type_loopback, NULL, 77, MA_FALSE, &pAudioClient, &pDeviceInterface);
     if (result != MA_TIMEOUT || pAudioClient != NULL || pDeviceInterface != NULL || g_pendingHandler == NULL ||
-        allocatorState.allocations != 1 || allocatorState.frees != 0) {
+        allocatorState.allocations != 0 || allocatorState.frees != 0) {
         printf("timeout ownership failed: result=%d pending=%p alloc=%u free=%u\n",
             result, (void*)g_pendingHandler, allocatorState.allocations, allocatorState.frees);
         return 1;
     }
 
+    /* The completion handler must not retain this context-scoped allocator after timeout. */
+    allocatorState.retired = MA_TRUE;
     ma_completion_handler_ActivateCompleted(g_pendingHandler, (ma_IActivateAudioInterfaceAsyncOperation*)&g_asyncOperation);
     ma_completion_handler_Release(g_pendingHandler);
     g_pendingHandler = NULL;
 
-    if (allocatorState.allocations != allocatorState.frees) {
-        printf("late completion leak: alloc=%u free=%u\n", allocatorState.allocations, allocatorState.frees);
+    if (allocatorState.allocations != allocatorState.frees || allocatorState.callbacksAfterRetire != 0) {
+        printf("late completion used retired allocator: alloc=%u free=%u late=%u\n", allocatorState.allocations, allocatorState.frees, allocatorState.callbacksAfterRetire);
         return 1;
     }
 
@@ -430,6 +482,16 @@ static int hardening_test_public_config_validation(void)
     }
 
     MA_ZERO_OBJECT(&device);
+    config = ma_device_config_init(ma_device_type_loopback);
+    config.wasapi.loopbackProcessID = 123;
+    config.capture.shareMode = ma_share_mode_exclusive;
+    result = ma_device_init(NULL, &config, &device);
+    if (result != MA_INVALID_DEVICE_CONFIG) {
+        printf("automatic context masked exclusive process-loopback error: result=%d\n", result);
+        failed = 1;
+    }
+
+    MA_ZERO_OBJECT(&device);
     MA_ZERO_OBJECT(&capture);
     MA_ZERO_OBJECT(&deviceID);
     config = ma_device_config_init(ma_device_type_loopback);
@@ -441,7 +503,57 @@ static int hardening_test_public_config_validation(void)
         failed = 1;
     }
 
+
+    MA_ZERO_OBJECT(&device);
+    config = ma_device_config_init(ma_device_type_loopback);
+    config.wasapi.loopbackProcessID = 123;
+    config.capture.pDeviceID = &deviceID;
+    result = ma_device_init(NULL, &config, &device);
+    if (result != MA_INVALID_DEVICE_CONFIG) {
+        printf("automatic context masked endpoint-specific process-loopback error: result=%d\n", result);
+        failed = 1;
+    }
+
     return failed;
+}
+
+static int hardening_test_virtual_device_metadata(void)
+{
+    ma_context context;
+    ma_device device;
+    ma_device_info info;
+    char name[64];
+    ma_result result;
+
+    MA_ZERO_OBJECT(&context);
+    MA_ZERO_OBJECT(&device);
+    context.backend = ma_backend_wasapi;
+    context.callbacks.onDeviceGetInfo = ma_device_get_info__wasapi;
+    device.pContext = &context;
+    device.type = ma_device_type_loopback;
+    device.wasapi.loopbackProcessID = 123;
+    MA_COPY_MEMORY(device.capture.id.wasapi, MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, (ma_wcslen(MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK) + 1) * sizeof(wchar_t));
+    device.capture.pID = &device.capture.id;
+    device.capture.internalFormat = ma_format_f32;
+    device.capture.internalChannels = 2;
+    device.capture.internalSampleRate = 48000;
+
+    result = ma_device_get_info(&device, ma_device_type_capture, &info);
+    if (result != MA_SUCCESS || strcmp(info.name, "Process Loopback") != 0 || info.isDefault ||
+        ma_wcscmp(info.id.wasapi, MA_VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK) != 0 ||
+        info.nativeDataFormatCount != 1 || info.nativeDataFormats[0].format != ma_format_f32 ||
+        info.nativeDataFormats[0].channels != 2 || info.nativeDataFormats[0].sampleRate != 48000) {
+        printf("virtual process-loopback metadata mismatch: result=%d name=%s formats=%u\n", result, info.name, info.nativeDataFormatCount);
+        return 1;
+    }
+
+    result = ma_device_get_name(&device, ma_device_type_capture, name, sizeof(name), NULL);
+    if (result != MA_SUCCESS || strcmp(name, "Process Loopback") != 0) {
+        printf("virtual process-loopback name mismatch: result=%d name=%s\n", result, name);
+        return 1;
+    }
+
+    return 0;
 }
 
 int main(void)
@@ -449,10 +561,12 @@ int main(void)
     int failed = 0;
 
     failed += hardening_test_include_exclude();
+    failed += hardening_test_default_interface_strings();
     failed += hardening_test_rejected_contracts();
     failed += hardening_test_failure_cleanup();
     failed += hardening_test_late_completion();
     failed += hardening_test_public_config_validation();
+    failed += hardening_test_virtual_device_metadata();
 
     if (failed != 0) {
         printf("WASAPI process-loopback hardening failures: %d\n", failed);

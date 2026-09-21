@@ -17,6 +17,26 @@ typedef struct
     post_init_allocator allocator;
 } post_init_fixture;
 
+static ma_uint32 g_backendInitCount;
+static ma_uint32 g_backendUninitCount;
+
+static ma_result post_init_backend_init_invalid_descriptor(ma_device* pDevice, const ma_device_config* pConfig, ma_device_descriptor* pPlayback, ma_device_descriptor* pCapture)
+{
+    (void)pDevice;
+    (void)pConfig;
+    (void)pPlayback;
+    (void)pCapture;
+    g_backendInitCount += 1;
+    return MA_SUCCESS;
+}
+
+static ma_result post_init_backend_uninit(ma_device* pDevice)
+{
+    (void)pDevice;
+    g_backendUninitCount += 1;
+    return MA_SUCCESS;
+}
+
 static void* post_init_malloc(size_t size, void* pUserData)
 {
     post_init_allocator* pAllocator = (post_init_allocator*)pUserData;
@@ -217,11 +237,37 @@ static int post_init_test_success(void)
     return failed;
 }
 
+static int post_init_test_backend_rollback_before_worker(void)
+{
+    ma_context context;
+    ma_device device;
+    ma_device_config config;
+    ma_result result;
+
+    MA_ZERO_OBJECT(&context);
+    MA_ZERO_OBJECT(&device);
+    g_backendInitCount = 0;
+    g_backendUninitCount = 0;
+    context.callbacks.onDeviceInit = post_init_backend_init_invalid_descriptor;
+    context.callbacks.onDeviceUninit = post_init_backend_uninit;
+    config = ma_device_config_init(ma_device_type_playback);
+
+    result = ma_device_init(&context, &config, &device);
+    if (result != MA_INVALID_ARGS || g_backendInitCount != 1 || g_backendUninitCount != 1 || device.pContext != NULL) {
+        printf("pre-worker rollback mismatch: result=%d init=%u uninit=%u context=%p\n",
+            result, g_backendInitCount, g_backendUninitCount, (void*)device.pContext);
+        return 1;
+    }
+
+    return 0;
+}
+
 int main(void)
 {
     int failed = 0;
     failed += post_init_test_failure(1, "converter allocation failure");
     failed += post_init_test_failure(2, "cache allocation failure");
     failed += post_init_test_success();
+    failed += post_init_test_backend_rollback_before_worker();
     return failed != 0;
 }

@@ -9,6 +9,9 @@ static ma_result hardening_wasapi_reinit_init_internal(ma_context* pContext, ma_
 static ma_int32 hardening_wasapi_reinit_set_event_handle(void* pAudioClient, void* hEvent);
 static ma_int32 hardening_wasapi_reinit_get_buffer_size(void* pAudioClient, ma_uint32* pBufferSize);
 static ma_result hardening_wasapi_reinit_release_audio_client(ma_context* pContext, void* pAudioClient, void* pRenderClient, void* pCaptureClient, ma_event* pEvent);
+static void hardening_wasapi_notification_release_hook(void* pClient, void* pState, unsigned int newRefCount);
+static ma_result hardening_wasapi_initial_device_init_internal(ma_context* pContext, ma_device_type deviceType, const void* pDeviceID, void* pData);
+static void* hardening_wasapi_create_device_event(void* pAttributes, int manualReset, int initialState, const void* pName);
 
 #define MA_WASAPI_DEVICE_STOP_INTERNAL(pDevice)                 hardening_wasapi_stop((pDevice))
 #define MA_WASAPI_DEVICE_START_INTERNAL(pDevice)                hardening_wasapi_start((pDevice))
@@ -19,6 +22,9 @@ static ma_result hardening_wasapi_reinit_release_audio_client(ma_context* pConte
 #define MA_WASAPI_REINIT_SET_EVENT_HANDLE(pAudioClient, hEvent) ((HRESULT)hardening_wasapi_reinit_set_event_handle((void*)(pAudioClient), (void*)(hEvent)))
 #define MA_WASAPI_REINIT_GET_BUFFER_SIZE(pAudioClient, pBufferSize) ((HRESULT)hardening_wasapi_reinit_get_buffer_size((void*)(pAudioClient), (pBufferSize)))
 #define MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pContext, pAudioClient, pRenderClient, pCaptureClient, pEvent) hardening_wasapi_reinit_release_audio_client((pContext), (void*)(pAudioClient), (void*)(pRenderClient), (void*)(pCaptureClient), (pEvent))
+#define MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pClient, pState, newRefCount) hardening_wasapi_notification_release_hook((void*)(pClient), (void*)(pState), (unsigned int)(newRefCount))
+#define MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData) hardening_wasapi_initial_device_init_internal((pContext), (deviceType), (const void*)(pDeviceID), (void*)(pData))
+#define MA_WASAPI_CREATE_DEVICE_EVENT(pAttributes, manualReset, initialState, pName) ((HANDLE)hardening_wasapi_create_device_event((void*)(pAttributes), (int)(manualReset), (int)(initialState), (const void*)(pName)))
 #define MINIAUDIO_IMPLEMENTATION
 #include "../../miniaudio.h"
 
@@ -85,6 +91,21 @@ static ma_uint8 g_oldAudioClientMarker;
 static ma_uint8 g_oldRenderClientMarker;
 static ma_uint8 g_candidateAudioClientMarker;
 static ma_uint8 g_candidateRenderClientMarker;
+static ma_event* g_pReleaseRetirementEnteredEvent;
+static ma_event* g_pReleaseRetirementContinueEvent;
+static volatile ma_uint32 g_releaseRetirementHookEnabled;
+
+static void hardening_wasapi_notification_release_hook(void* pClient, void* pState, unsigned int newRefCount)
+{
+    (void)pClient;
+    (void)pState;
+    (void)newRefCount;
+
+    if (ma_atomic_load_32(&g_releaseRetirementHookEnabled) != MA_FALSE) {
+        ma_event_signal(g_pReleaseRetirementEnteredEvent);
+        ma_event_wait(g_pReleaseRetirementContinueEvent);
+    }
+}
 
 static ma_result hardening_wasapi_reinit_init_internal(ma_context* pContext, ma_device_type deviceType, const void* pDeviceID, void* pData)
 {
@@ -1041,23 +1062,31 @@ typedef struct
 {
     ma_IAudioClient iface;
     volatile ma_uint32 releaseCount;
+    volatile ma_uint32 releaseThreadID;
 } hardening_audio_client;
 
 typedef struct
 {
     ma_IAudioRenderClient iface;
     volatile ma_uint32 releaseCount;
+    volatile ma_uint32 releaseThreadID;
 } hardening_render_client;
 
 typedef struct
 {
     ma_IAudioCaptureClient iface;
     volatile ma_uint32 releaseCount;
+    volatile ma_uint32 releaseThreadID;
 } hardening_capture_client;
+
+static ma_IAudioClient* g_pInitialAudioClient;
+static ma_IAudioRenderClient* g_pInitialRenderClient;
+static ma_IAudioCaptureClient* g_pInitialCaptureClient;
 
 static ULONG STDMETHODCALLTYPE hardening_audio_client_release(ma_IAudioClient* pThis)
 {
     hardening_audio_client* pClient = (hardening_audio_client*)pThis;
+    ma_atomic_store_32(&pClient->releaseThreadID, (ma_uint32)GetCurrentThreadId());
     ma_atomic_fetch_add_32(&pClient->releaseCount, 1);
     return 0;
 }
@@ -1065,6 +1094,7 @@ static ULONG STDMETHODCALLTYPE hardening_audio_client_release(ma_IAudioClient* p
 static ULONG STDMETHODCALLTYPE hardening_render_client_release(ma_IAudioRenderClient* pThis)
 {
     hardening_render_client* pClient = (hardening_render_client*)pThis;
+    ma_atomic_store_32(&pClient->releaseThreadID, (ma_uint32)GetCurrentThreadId());
     ma_atomic_fetch_add_32(&pClient->releaseCount, 1);
     return 0;
 }
@@ -1072,8 +1102,39 @@ static ULONG STDMETHODCALLTYPE hardening_render_client_release(ma_IAudioRenderCl
 static ULONG STDMETHODCALLTYPE hardening_capture_client_release(ma_IAudioCaptureClient* pThis)
 {
     hardening_capture_client* pClient = (hardening_capture_client*)pThis;
+    ma_atomic_store_32(&pClient->releaseThreadID, (ma_uint32)GetCurrentThreadId());
     ma_atomic_fetch_add_32(&pClient->releaseCount, 1);
     return 0;
+}
+
+static ma_result hardening_wasapi_initial_device_init_internal(ma_context* pContext, ma_device_type deviceType, const void* pDeviceID, void* pData)
+{
+    ma_device_init_internal_data__wasapi* pInternalData = (ma_device_init_internal_data__wasapi*)pData;
+
+    (void)pContext;
+    (void)pDeviceID;
+    MA_ZERO_OBJECT(pInternalData);
+    pInternalData->pAudioClient = g_pInitialAudioClient;
+    pInternalData->pRenderClient = (deviceType == ma_device_type_playback) ? g_pInitialRenderClient : NULL;
+    pInternalData->pCaptureClient = (deviceType != ma_device_type_playback) ? g_pInitialCaptureClient : NULL;
+    pInternalData->formatOut = ma_format_f32;
+    pInternalData->channelsOut = 2;
+    pInternalData->sampleRateOut = 48000;
+    ma_channel_map_init_standard(ma_standard_channel_map_default, pInternalData->channelMapOut, MA_MAX_CHANNELS, 2);
+    pInternalData->periodSizeInFramesOut = 64;
+    pInternalData->periodsOut = 2;
+    ma_strcpy_s(pInternalData->deviceName, sizeof(pInternalData->deviceName), "initial candidate");
+    return MA_SUCCESS;
+}
+
+static void* hardening_wasapi_create_device_event(void* pAttributes, int manualReset, int initialState, const void* pName)
+{
+    (void)pAttributes;
+    (void)manualReset;
+    (void)initialState;
+    (void)pName;
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return NULL;
 }
 
 static int hardening_test_command_worker_release(void)
@@ -1087,6 +1148,7 @@ static int hardening_test_command_worker_release(void)
     hardening_capture_client captureClient;
     ma_context_command__wasapi quitCommand;
     ma_result result;
+    ma_uint32 callerThreadID;
     int failed = 0;
     ma_bool32 threadCreated = MA_FALSE;
 
@@ -1106,6 +1168,7 @@ static int hardening_test_command_worker_release(void)
     audioClient.iface.lpVtbl = &audioVTable;
     renderClient.iface.lpVtbl = &renderVTable;
     captureClient.iface.lpVtbl = &captureVTable;
+    callerThreadID = (ma_uint32)GetCurrentThreadId();
 
     result = ma_thread_create(&context.wasapi.commandThread, ma_thread_priority_normal, 0, ma_context_command_thread__wasapi, &context, NULL);
     if (result != MA_SUCCESS) {
@@ -1116,10 +1179,14 @@ static int hardening_test_command_worker_release(void)
 
     result = ma_device_release_audio_client__wasapi(&context, &audioClient.iface, &renderClient.iface, &captureClient.iface, NULL);
     if (result != MA_SUCCESS || ma_atomic_load_32(&audioClient.releaseCount) != 1 ||
-        ma_atomic_load_32(&renderClient.releaseCount) != 1 || ma_atomic_load_32(&captureClient.releaseCount) != 1) {
-        printf("command worker release: result=%d counts=%u/%u/%u\n", result,
+        ma_atomic_load_32(&renderClient.releaseCount) != 1 || ma_atomic_load_32(&captureClient.releaseCount) != 1 ||
+        ma_atomic_load_32(&audioClient.releaseThreadID) == callerThreadID ||
+        ma_atomic_load_32(&audioClient.releaseThreadID) != ma_atomic_load_32(&renderClient.releaseThreadID) ||
+        ma_atomic_load_32(&audioClient.releaseThreadID) != ma_atomic_load_32(&captureClient.releaseThreadID)) {
+        printf("command worker release: result=%d counts=%u/%u/%u threads=%u/%u/%u caller=%u\n", result,
             ma_atomic_load_32(&audioClient.releaseCount), ma_atomic_load_32(&renderClient.releaseCount),
-            ma_atomic_load_32(&captureClient.releaseCount));
+            ma_atomic_load_32(&captureClient.releaseCount), ma_atomic_load_32(&audioClient.releaseThreadID),
+            ma_atomic_load_32(&renderClient.releaseThreadID), ma_atomic_load_32(&captureClient.releaseThreadID), callerThreadID);
         failed = 1;
     }
 
@@ -1141,11 +1208,94 @@ done:
     return failed;
 }
 
+static int hardening_test_initial_failure_releases_on_command_worker(void)
+{
+    ma_context context;
+    ma_device device;
+    ma_device_config config;
+    ma_device_descriptor playbackDescriptor;
+    ma_device_descriptor captureDescriptor;
+    ma_IAudioClientVtbl audioVTable;
+    ma_IAudioCaptureClientVtbl captureVTable;
+    hardening_audio_client audioClient;
+    hardening_capture_client captureClient;
+    ma_context_command__wasapi quitCommand;
+    ma_result result;
+    ma_uint32 callerThreadID;
+    int failed = 0;
+    ma_bool32 threadCreated = MA_FALSE;
+    ma_bool32 startEventInitialized = MA_FALSE;
+
+    result = hardening_command_queue_init(&context);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+    context.backend = ma_backend_wasapi;
+    MA_ZERO_OBJECT(&device);
+    MA_ZERO_OBJECT(&playbackDescriptor);
+    MA_ZERO_OBJECT(&captureDescriptor);
+    MA_ZERO_OBJECT(&audioVTable);
+    MA_ZERO_OBJECT(&captureVTable);
+    MA_ZERO_OBJECT(&audioClient);
+    MA_ZERO_OBJECT(&captureClient);
+    audioVTable.Release = hardening_audio_client_release;
+    captureVTable.Release = hardening_capture_client_release;
+    audioClient.iface.lpVtbl = &audioVTable;
+    captureClient.iface.lpVtbl = &captureVTable;
+    g_pInitialAudioClient = &audioClient.iface;
+    g_pInitialRenderClient = NULL;
+    g_pInitialCaptureClient = &captureClient.iface;
+    device.pContext = &context;
+    config = ma_device_config_init(ma_device_type_capture);
+    captureDescriptor.shareMode = ma_share_mode_shared;
+    callerThreadID = (ma_uint32)GetCurrentThreadId();
+
+    result = ma_event_init(&device.startEvent);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    startEventInitialized = MA_TRUE;
+    result = ma_thread_create(&context.wasapi.commandThread, ma_thread_priority_normal, 0, ma_context_command_thread__wasapi, &context, NULL);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    threadCreated = MA_TRUE;
+
+    result = ma_device_init__wasapi(&device, &config, &playbackDescriptor, &captureDescriptor);
+    if (result != MA_OUT_OF_MEMORY || device.wasapi.pAudioClientCapture != NULL || device.wasapi.pCaptureClient != NULL ||
+        ma_atomic_load_32(&audioClient.releaseCount) != 1 || ma_atomic_load_32(&captureClient.releaseCount) != 1 ||
+        ma_atomic_load_32(&audioClient.releaseThreadID) == callerThreadID ||
+        ma_atomic_load_32(&audioClient.releaseThreadID) != ma_atomic_load_32(&captureClient.releaseThreadID)) {
+        printf("initial failure release mismatch: result=%d counts=%u/%u threads=%u/%u caller=%u\n", result,
+            ma_atomic_load_32(&audioClient.releaseCount), ma_atomic_load_32(&captureClient.releaseCount),
+            ma_atomic_load_32(&audioClient.releaseThreadID), ma_atomic_load_32(&captureClient.releaseThreadID), callerThreadID);
+        failed = 1;
+    }
+
+done:
+    g_pInitialAudioClient = NULL;
+    g_pInitialRenderClient = NULL;
+    g_pInitialCaptureClient = NULL;
+    if (threadCreated) {
+        quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
+        ma_context_post_command__wasapi(&context, &quitCommand);
+        ma_thread_wait(&context.wasapi.commandThread);
+    }
+    if (startEventInitialized) {
+        ma_event_uninit(&device.startEvent);
+    }
+    hardening_command_queue_uninit(&context);
+    return failed;
+}
+
 typedef struct
 {
     ma_IMMDeviceEnumerator iface;
     ma_IMMDeviceEnumeratorVtbl vtable;
     ma_event unregisterEnteredEvent;
+    ma_event releaseRetirementEnteredEvent;
     ma_event allowCallbackReleaseEvent;
     volatile ma_uint32 unregisterCount;
     volatile ma_uint32 releaseCount;
@@ -1178,7 +1328,6 @@ static ma_thread_result MA_THREADCALL hardening_delayed_callback_release_thread(
 {
     hardening_uninit_barrier* pBarrier = (hardening_uninit_barrier*)pUserData;
 
-    ma_event_wait(&pBarrier->pEnumerator->allowCallbackReleaseEvent);
     ma_IMMNotificationClient_Release(&pBarrier->pDevice->wasapi.notificationClient);
     return (ma_thread_result)0;
 }
@@ -1215,6 +1364,7 @@ static int hardening_test_unregister_quiescence(void)
     ma_bool32 quiesceEventInitialized = MA_FALSE;
     ma_bool32 operationLockInitialized = MA_FALSE;
     ma_bool32 unregisterEventInitialized = MA_FALSE;
+    ma_bool32 releaseRetirementEventInitialized = MA_FALSE;
     ma_bool32 releaseEventInitialized = MA_FALSE;
 
     result = hardening_command_queue_init(&context);
@@ -1270,6 +1420,9 @@ static int hardening_test_unregister_quiescence(void)
     result = ma_event_init(&enumerator.unregisterEnteredEvent);
     if (result != MA_SUCCESS) { failed = 1; goto done; }
     unregisterEventInitialized = MA_TRUE;
+    result = ma_event_init(&enumerator.releaseRetirementEnteredEvent);
+    if (result != MA_SUCCESS) { failed = 1; goto done; }
+    releaseRetirementEventInitialized = MA_TRUE;
     result = ma_event_init(&enumerator.allowCallbackReleaseEvent);
     if (result != MA_SUCCESS) { failed = 1; goto done; }
     releaseEventInitialized = MA_TRUE;
@@ -1298,12 +1451,16 @@ static int hardening_test_unregister_quiescence(void)
 
     barrier.pDevice = &device;
     barrier.pEnumerator = &enumerator;
+    g_pReleaseRetirementEnteredEvent = &enumerator.releaseRetirementEnteredEvent;
+    g_pReleaseRetirementContinueEvent = &enumerator.allowCallbackReleaseEvent;
+    ma_atomic_store_32(&g_releaseRetirementHookEnabled, MA_TRUE);
     result = ma_thread_create(&callbackReleaseThread, ma_thread_priority_normal, 0, hardening_delayed_callback_release_thread, &barrier, NULL);
     if (result != MA_SUCCESS) {
         failed = 1;
         goto done;
     }
     callbackThreadCreated = MA_TRUE;
+    ma_event_wait(&enumerator.releaseRetirementEnteredEvent);
     result = ma_thread_create(&uninitThread, ma_thread_priority_normal, 0, hardening_device_uninit_thread, &barrier, NULL);
     if (result != MA_SUCCESS) {
         failed = 1;
@@ -1323,6 +1480,7 @@ static int hardening_test_unregister_quiescence(void)
     ma_event_signal(&enumerator.allowCallbackReleaseEvent);
     ma_thread_wait(&callbackReleaseThread);
     callbackThreadCreated = MA_FALSE;
+    ma_atomic_store_32(&g_releaseRetirementHookEnabled, MA_FALSE);
     ma_thread_wait(&uninitThread);
     uninitThreadCreated = MA_FALSE;
     notificationThreadCreated = MA_FALSE;
@@ -1346,6 +1504,9 @@ static int hardening_test_unregister_quiescence(void)
     }
 
 done:
+    ma_atomic_store_32(&g_releaseRetirementHookEnabled, MA_FALSE);
+    g_pReleaseRetirementEnteredEvent = NULL;
+    g_pReleaseRetirementContinueEvent = NULL;
     if (uninitThreadCreated) {
         ma_event_signal(&enumerator.allowCallbackReleaseEvent);
         if (callbackThreadCreated) {
@@ -1380,6 +1541,7 @@ done:
     if (pState != NULL) { ma_free(pState, NULL); }
     if (rerouteLockInitialized) { ma_mutex_uninit(&device.wasapi.rerouteLock); }
     if (releaseEventInitialized) { ma_event_uninit(&enumerator.allowCallbackReleaseEvent); }
+    if (releaseRetirementEventInitialized) { ma_event_uninit(&enumerator.releaseRetirementEnteredEvent); }
     if (unregisterEventInitialized) { ma_event_uninit(&enumerator.unregisterEnteredEvent); }
     if (commandThreadCreated) {
         quitCommand = ma_context_init_command__wasapi(MA_CONTEXT_COMMAND_QUIT__WASAPI);
@@ -1409,6 +1571,7 @@ int main(void)
     failed += hardening_test_public_state_serialization();
     failed += hardening_test_full_command_ring();
     failed += hardening_test_command_worker_release();
+    failed += hardening_test_initial_failure_releases_on_command_worker();
     failed += hardening_test_unregister_quiescence();
 
     return failed != 0;

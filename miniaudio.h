@@ -22254,6 +22254,10 @@ typedef BOOL   (WINAPI * MA_PFN_AvRevertMmThreadCharacteristics)(HANDLE AvrtHand
 #define MA_WASAPI_ACTIVATION_TIMEOUT_MILLISECONDS 30000
 #endif
 
+/* StringFromIID() would add an unconditional Ole32 import to ordinary desktop builds. */
+#define MA_WASAPI_AUDIO_RENDER_INTERFACE_STRING  L"{E6327CAD-DCEC-4949-AE8A-991E976A79D2}"
+#define MA_WASAPI_AUDIO_CAPTURE_INTERFACE_STRING L"{2EEF81BE-33FA-4800-9670-1CD474972C3F}"
+
 typedef struct ma_completion_handler ma_completion_handler;
 
 typedef struct
@@ -22271,7 +22275,6 @@ struct ma_completion_handler
     ma_completion_handler_vtbl* lpVtbl;
     MA_ATOMIC(4, ma_uint32) counter;
     HANDLE hEvent;
-    ma_allocation_callbacks allocationCallbacks;
 };
 
 static HRESULT STDMETHODCALLTYPE ma_completion_handler_QueryInterface(ma_completion_handler* pThis, const IID* const riid, void** ppObject)
@@ -22300,11 +22303,10 @@ static ULONG STDMETHODCALLTYPE ma_completion_handler_Release(ma_completion_handl
 {
     ma_uint32 newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
     if (newRefCount == 0) {
-        ma_allocation_callbacks allocationCallbacks = pThis->allocationCallbacks;
         if (pThis->hEvent != NULL) {
             CloseHandle(pThis->hEvent);
         }
-        ma_free(pThis, &allocationCallbacks);
+        HeapFree(GetProcessHeap(), 0, pThis);
         return 0;
     }
 
@@ -22334,18 +22336,18 @@ static ma_result ma_completion_handler_create(ma_context* pContext, ma_completio
     MA_ASSERT(ppHandler != NULL);
 
     *ppHandler = NULL;
-    pHandler = (ma_completion_handler*)ma_calloc(sizeof(*pHandler), &pContext->allocationCallbacks);
+    /* Windows can retain this object after a bounded wait times out and the context is gone. */
+    pHandler = (ma_completion_handler*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pHandler));
     if (pHandler == NULL) {
         return MA_OUT_OF_MEMORY;
     }
 
     pHandler->lpVtbl = &g_maCompletionHandlerVtblInstance;
     pHandler->counter = 1;
-    ma_allocation_callbacks_init_copy(&pHandler->allocationCallbacks, &pContext->allocationCallbacks);
     pHandler->hEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (pHandler->hEvent == NULL) {
         ma_result result = ma_result_from_GetLastError(GetLastError());
-        ma_free(pHandler, &pContext->allocationCallbacks);
+        HeapFree(GetProcessHeap(), 0, pHandler);
         return result;
     }
 
@@ -22383,6 +22385,7 @@ typedef struct
     ma_mutex operationLock;
     volatile ma_uint32 pendingOperations;
     volatile ma_uint32 acceptingNotifications;
+    volatile ma_uint32 releaseRetirementState;
     volatile ma_uint32 requestedStarted;
     volatile ma_uint32 suppressStartedNotification;
     volatile ma_uint32 suppressStoppedNotification;
@@ -22393,6 +22396,12 @@ typedef struct
 #define MA_WASAPI_NOTIFICATION_OP_CAPTURE  0x00000002
 #define MA_WASAPI_NOTIFICATION_OP_STATE    0x00000004
 #define MA_WASAPI_NOTIFICATION_OP_QUIT     0x80000000
+#define MA_WASAPI_NOTIFICATION_RELEASE_RETIRING 0x80000000
+#define MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK 0x7FFFFFFF
+
+#ifndef MA_WASAPI_NOTIFICATION_RELEASE_HOOK
+#define MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pClient, pState, newRefCount) ((void)0)
+#endif
 
 static ma_device_notification_state__wasapi* ma_device_notification_state_from_device__wasapi(ma_device* pDevice)
 {
@@ -22448,11 +22457,23 @@ static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_AddRef(ma_IMMNotificatio
 
 static ULONG STDMETHODCALLTYPE ma_IMMNotificationClient_Release(ma_IMMNotificationClient* pThis)
 {
-    ma_uint32 newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
     ma_device_notification_state__wasapi* pState = ma_device_notification_state_from_client__wasapi(pThis);
+    ma_uint32 newRefCount;
 
-    if (newRefCount == 1 && pState != NULL && ma_atomic_load_32(&pState->acceptingNotifications) == MA_FALSE) {
-        ma_event_signal(&pState->quiesceEvent);
+    /* Keep the sidecar alive through every access made after the COM reference is surrendered. */
+    if (pState != NULL) {
+        ma_atomic_fetch_add_32(&pState->releaseRetirementState, 1);
+    }
+
+    newRefCount = ma_atomic_fetch_sub_32(&pThis->counter, 1) - 1;
+    MA_WASAPI_NOTIFICATION_RELEASE_HOOK(pThis, pState, newRefCount);
+
+    if (pState != NULL) {
+        ma_uint32 oldRetirementState = ma_atomic_fetch_sub_32(&pState->releaseRetirementState, 1);
+        if ((oldRetirementState & MA_WASAPI_NOTIFICATION_RELEASE_RETIRING) != 0 &&
+            (oldRetirementState & MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK) == 1 && ma_atomic_load_32(&pThis->counter) <= 1) {
+            ma_event_signal(&pState->quiesceEvent);
+        }
     }
 
     if (newRefCount == 0) {
@@ -22788,6 +22809,10 @@ static ma_result ma_device_release_audio_client__wasapi(ma_context* pContext, ma
 
     return MA_SUCCESS;
 }
+
+#ifndef MA_WASAPI_RELEASE_AUDIO_CLIENT
+#define MA_WASAPI_RELEASE_AUDIO_CLIENT(pContext, pAudioClient, pRenderClient, pCaptureClient, pEvent) ma_device_release_audio_client__wasapi((pContext), (pAudioClient), (pRenderClient), (pCaptureClient), (pEvent))
+#endif
 
 
 static void ma_add_native_data_format_to_device_info_from_WAVEFORMATEX(const MA_WAVEFORMATEX* pWF, ma_share_mode shareMode, ma_device_info* pInfo)
@@ -23240,13 +23265,11 @@ static ma_result ma_context_get_IAudioClient_Async__wasapi(ma_context* pContext,
 {
     ma_IActivateAudioInterfaceAsyncOperation *pAsyncOp = NULL;
     ma_completion_handler* pCompletionHandler = NULL;
-    IID iid;
-    WCHAR* iidStr = NULL;
+    const WCHAR* iidStr;
     HRESULT hr;
     ma_result result;
     HRESULT activateResult = E_FAIL;
     ma_IUnknown* pActivatedInterface = NULL;
-    ma_bool32 freeIIDString = MA_FALSE;
 
     MA_ASSERT(pContext != NULL);
     MA_ASSERT(ppAudioClient != NULL);
@@ -23261,39 +23284,22 @@ static ma_result ma_context_get_IAudioClient_Async__wasapi(ma_context* pContext,
     }
 
     if (pDeviceID != NULL) {
-        iidStr = (WCHAR*)pDeviceID->wasapi;
+        iidStr = pDeviceID->wasapi;
     } else {
         if (deviceType == ma_device_type_capture) {
-            iid = MA_IID_DEVINTERFACE_AUDIO_CAPTURE;
+            iidStr = MA_WASAPI_AUDIO_CAPTURE_INTERFACE_STRING;
         } else {
-            iid = MA_IID_DEVINTERFACE_AUDIO_RENDER;
+            iidStr = MA_WASAPI_AUDIO_RENDER_INTERFACE_STRING;
         }
-
-    #if defined(__cplusplus)
-        hr = StringFromIID(iid, &iidStr);
-    #else
-        hr = StringFromIID(&iid, &iidStr);
-    #endif
-        if (FAILED(hr)) {
-            ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to convert device IID to string for ActivateAudioInterfaceAsync(). Out of memory.\n");
-            return ma_result_from_HRESULT(hr);
-        }
-        freeIIDString = MA_TRUE;
     }
 
     result = ma_completion_handler_create(pContext, &pCompletionHandler);
     if (result != MA_SUCCESS) {
-        if (freeIIDString) {
-            ma_CoTaskMemFree(pContext, iidStr);
-        }
         ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to create event for waiting for ActivateAudioInterfaceAsync().\n");
         return result;
     }
 
     hr = ((MA_PFN_ActivateAudioInterfaceAsync)pContext->wasapi.ActivateAudioInterfaceAsync)(iidStr, &MA_IID_IAudioClient, pActivationParams, (ma_IActivateAudioInterfaceCompletionHandler*)pCompletionHandler, (ma_IActivateAudioInterfaceAsyncOperation**)&pAsyncOp);
-    if (freeIIDString) {
-        ma_CoTaskMemFree(pContext, iidStr);
-    }
     if (FAILED(hr)) {
         if (pAsyncOp != NULL) {
             ma_IActivateAudioInterfaceAsyncOperation_Release(pAsyncOp);
@@ -23598,7 +23604,7 @@ static ma_result ma_context_get_device_info__wasapi(ma_context* pContext, ma_dev
         ma_strncpy_s(pDeviceInfo->name, sizeof(pDeviceInfo->name), MA_DEFAULT_CAPTURE_DEVICE_NAME, (size_t)-1);
     }
 
-    result = ma_context_get_IAudioClient_UWP__wasapi(pContext, deviceType, pDeviceID, NULL, &pAudioClient, NULL);
+    result = ma_context_get_IAudioClient_Async__wasapi(pContext, deviceType, pDeviceID, NULL, &pAudioClient, NULL);
     if (result != MA_SUCCESS) {
         return result;
     }
@@ -23610,6 +23616,44 @@ static ma_result ma_context_get_device_info__wasapi(ma_context* pContext, ma_dev
     ma_IAudioClient_Release(pAudioClient);
     return result;
 #endif
+}
+
+static ma_result ma_device_get_info__wasapi(ma_device* pDevice, ma_device_type type, ma_device_info* pDeviceInfo)
+{
+    ma_device_type contextDeviceType;
+    const ma_device_id* pDeviceID;
+
+    MA_ASSERT(pDevice != NULL);
+    MA_ASSERT(pDeviceInfo != NULL);
+
+    if (pDevice->type == ma_device_type_loopback && pDevice->wasapi.loopbackProcessID != 0 && type == ma_device_type_capture) {
+        MA_ZERO_OBJECT(pDeviceInfo);
+        MA_COPY_MEMORY(&pDeviceInfo->id, &pDevice->capture.id, sizeof(pDeviceInfo->id));
+        ma_strncpy_s(pDeviceInfo->name, sizeof(pDeviceInfo->name), "Process Loopback", (size_t)-1);
+        pDeviceInfo->isDefault = MA_FALSE;
+
+        if (pDevice->capture.internalFormat != ma_format_unknown && pDevice->capture.internalChannels != 0 && pDevice->capture.internalSampleRate != 0) {
+            pDeviceInfo->nativeDataFormatCount = 1;
+            pDeviceInfo->nativeDataFormats[0].format = pDevice->capture.internalFormat;
+            pDeviceInfo->nativeDataFormats[0].channels = pDevice->capture.internalChannels;
+            pDeviceInfo->nativeDataFormats[0].sampleRate = pDevice->capture.internalSampleRate;
+            pDeviceInfo->nativeDataFormats[0].flags = 0; /* Process loopback is shared-mode only. */
+        }
+
+        return MA_SUCCESS;
+    }
+
+    contextDeviceType = type;
+    if (type == ma_device_type_playback) {
+        pDeviceID = pDevice->playback.pID;
+    } else {
+        pDeviceID = pDevice->capture.pID;
+        if (pDevice->type == ma_device_type_loopback && pDeviceID == NULL) {
+            contextDeviceType = ma_device_type_playback;
+        }
+    }
+
+    return ma_context_get_device_info__wasapi(pDevice->pContext, contextDeviceType, pDeviceID, pDeviceInfo);
 }
 
 static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
@@ -23626,8 +23670,10 @@ static ma_result ma_device_uninit__wasapi(ma_device* pDevice)
         if (pNotificationState != NULL) {
             /* Stop publication first, then unregister/quiesce before joining the control worker. */
             ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
+            ma_atomic_fetch_or_32(&pNotificationState->releaseRetirementState, MA_WASAPI_NOTIFICATION_RELEASE_RETIRING);
             ma_IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(pNotificationState->pDeviceEnumerator, &pDevice->wasapi.notificationClient);
-            if (ma_atomic_load_32(&pDevice->wasapi.notificationClient.counter) > 1) {
+            if (ma_atomic_load_32(&pDevice->wasapi.notificationClient.counter) > 1 ||
+                (ma_atomic_load_32(&pNotificationState->releaseRetirementState) & MA_WASAPI_NOTIFICATION_RELEASE_COUNT_MASK) != 0) {
                 ma_event_wait(&pNotificationState->quiesceEvent);
             }
             ma_atomic_fetch_or_32(&pNotificationState->pendingOperations, MA_WASAPI_NOTIFICATION_OP_QUIT);
@@ -24219,18 +24265,13 @@ done:
 #endif
 
     if (result != MA_SUCCESS) {
-        if (pData->pRenderClient) {
-            ma_IAudioRenderClient_Release((ma_IAudioRenderClient*)pData->pRenderClient);
-            pData->pRenderClient = NULL;
+        ma_result releaseResult = MA_WASAPI_RELEASE_AUDIO_CLIENT(pContext, pData->pAudioClient, pData->pRenderClient, pData->pCaptureClient, NULL);
+        if (releaseResult != MA_SUCCESS) {
+            ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to release an initial audio client on its service thread: %d.\n", releaseResult);
         }
-        if (pData->pCaptureClient) {
-            ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pData->pCaptureClient);
-            pData->pCaptureClient = NULL;
-        }
-        if (pData->pAudioClient) {
-            ma_IAudioClient_Release((ma_IAudioClient*)pData->pAudioClient);
-            pData->pAudioClient = NULL;
-        }
+        pData->pRenderClient = NULL;
+        pData->pCaptureClient = NULL;
+        pData->pAudioClient = NULL;
 
         if (errorMsg != NULL && errorMsg[0] != '\0') {
             ma_log_postf(ma_context_get_log(pContext), MA_LOG_LEVEL_ERROR, "%s\n", errorMsg);
@@ -24252,7 +24293,7 @@ done:
 #define MA_WASAPI_REINIT_GET_BUFFER_SIZE(pAudioClient, pBufferSize) ma_IAudioClient_GetBufferSize((pAudioClient), (pBufferSize))
 #endif
 #ifndef MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT
-#define MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pContext, pAudioClient, pRenderClient, pCaptureClient, pEvent) ma_device_release_audio_client__wasapi((pContext), (pAudioClient), (pRenderClient), (pCaptureClient), (pEvent))
+#define MA_WASAPI_REINIT_RELEASE_AUDIO_CLIENT(pContext, pAudioClient, pRenderClient, pCaptureClient, pEvent) MA_WASAPI_RELEASE_AUDIO_CLIENT((pContext), (pAudioClient), (pRenderClient), (pCaptureClient), (pEvent))
 #endif
 
 static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type deviceType)
@@ -24480,6 +24521,13 @@ static ma_result ma_device_reinit__wasapi(ma_device* pDevice, ma_device_type dev
     return MA_SUCCESS;
 }
 
+#ifndef MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL
+#define MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pContext, deviceType, pDeviceID, pData) ma_device_init_internal__wasapi((pContext), (deviceType), (pDeviceID), (pData))
+#endif
+#ifndef MA_WASAPI_CREATE_DEVICE_EVENT
+#define MA_WASAPI_CREATE_DEVICE_EVENT(pAttributes, manualReset, initialState, pName) CreateEventA((pAttributes), (manualReset), (initialState), (pName))
+#endif
+
 static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_config* pConfig, ma_device_descriptor* pDescriptorPlayback, ma_device_descriptor* pDescriptorCapture)
 {
     ma_result result = MA_SUCCESS;
@@ -24529,7 +24577,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         data.loopbackProcessID          = pConfig->wasapi.loopbackProcessID;
         data.loopbackProcessExclude     = pConfig->wasapi.loopbackProcessExclude;
 
-        result = ma_device_init_internal__wasapi(pDevice->pContext, (pConfig->deviceType == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture, pDescriptorCapture->pDeviceID, &data);
+        result = MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pDevice->pContext, (pConfig->deviceType == ma_device_type_loopback) ? ma_device_type_loopback : ma_device_type_capture, pDescriptorCapture->pDeviceID, &data);
         if (result != MA_SUCCESS) {
             return result;
         }
@@ -24545,18 +24593,13 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         The event for capture needs to be manual reset for the same reason as playback. We keep the initial state set to unsignaled,
         however, because we want to block until we actually have something for the first call to ma_device_read().
         */
-        pDevice->wasapi.hEventCapture = (ma_handle)CreateEventA(NULL, FALSE, FALSE, NULL);  /* Auto reset, unsignaled by default. */
+        pDevice->wasapi.hEventCapture = (ma_handle)MA_WASAPI_CREATE_DEVICE_EVENT(NULL, FALSE, FALSE, NULL);  /* Auto reset, unsignaled by default. */
         if (pDevice->wasapi.hEventCapture == NULL) {
             result = ma_result_from_GetLastError(GetLastError());
 
-            if (pDevice->wasapi.pCaptureClient != NULL) {
-                ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient);
-                pDevice->wasapi.pCaptureClient = NULL;
-            }
-            if (pDevice->wasapi.pAudioClientCapture != NULL) {
-                ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture);
-                pDevice->wasapi.pAudioClientCapture = NULL;
-            }
+            MA_WASAPI_RELEASE_AUDIO_CLIENT(pDevice->pContext, (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture, NULL, (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient, &pDevice->startEvent);
+            pDevice->wasapi.pCaptureClient = NULL;
+            pDevice->wasapi.pAudioClientCapture = NULL;
 
             ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to create event for capture.");
             return result;
@@ -24568,6 +24611,10 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
 
         /* We must always have a valid ID. */
         ma_strcpy_s_WCHAR(pDevice->capture.id.wasapi, sizeof(pDevice->capture.id.wasapi), data.id.wasapi);
+        ma_strcpy_s(pDevice->capture.name, sizeof(pDevice->capture.name), data.deviceName);
+        if (pConfig->deviceType == ma_device_type_loopback && pConfig->wasapi.loopbackProcessID != 0) {
+            pDevice->capture.pID = &pDevice->capture.id;
+        }
 
         /* The descriptor needs to be updated with actual values. */
         pDescriptorCapture->format             = data.formatOut;
@@ -24595,17 +24642,12 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         data.loopbackProcessID          = pConfig->wasapi.loopbackProcessID;
         data.loopbackProcessExclude     = pConfig->wasapi.loopbackProcessExclude;
 
-        result = ma_device_init_internal__wasapi(pDevice->pContext, ma_device_type_playback, pDescriptorPlayback->pDeviceID, &data);
+        result = MA_WASAPI_INITIAL_DEVICE_INIT_INTERNAL(pDevice->pContext, ma_device_type_playback, pDescriptorPlayback->pDeviceID, &data);
         if (result != MA_SUCCESS) {
             if (pConfig->deviceType == ma_device_type_duplex) {
-                if (pDevice->wasapi.pCaptureClient != NULL) {
-                    ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient);
-                    pDevice->wasapi.pCaptureClient = NULL;
-                }
-                if (pDevice->wasapi.pAudioClientCapture != NULL) {
-                    ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture);
-                    pDevice->wasapi.pAudioClientCapture = NULL;
-                }
+                MA_WASAPI_RELEASE_AUDIO_CLIENT(pDevice->pContext, (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture, NULL, (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient, &pDevice->startEvent);
+                pDevice->wasapi.pCaptureClient = NULL;
+                pDevice->wasapi.pAudioClientCapture = NULL;
 
                 CloseHandle((HANDLE)pDevice->wasapi.hEventCapture);
                 pDevice->wasapi.hEventCapture = NULL;
@@ -24627,32 +24669,22 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
         The playback event also needs to be initially set to a signaled state so that the first call to ma_device_write() is able
         to get passed WaitForMultipleObjects().
         */
-        pDevice->wasapi.hEventPlayback = (ma_handle)CreateEventA(NULL, FALSE, TRUE, NULL);  /* Auto reset, signaled by default. */
+        pDevice->wasapi.hEventPlayback = (ma_handle)MA_WASAPI_CREATE_DEVICE_EVENT(NULL, FALSE, TRUE, NULL);  /* Auto reset, signaled by default. */
         if (pDevice->wasapi.hEventPlayback == NULL) {
             result = ma_result_from_GetLastError(GetLastError());
 
             if (pConfig->deviceType == ma_device_type_duplex) {
-                if (pDevice->wasapi.pCaptureClient != NULL) {
-                    ma_IAudioCaptureClient_Release((ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient);
-                    pDevice->wasapi.pCaptureClient = NULL;
-                }
-                if (pDevice->wasapi.pAudioClientCapture != NULL) {
-                    ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture);
-                    pDevice->wasapi.pAudioClientCapture = NULL;
-                }
+                MA_WASAPI_RELEASE_AUDIO_CLIENT(pDevice->pContext, (ma_IAudioClient*)pDevice->wasapi.pAudioClientCapture, NULL, (ma_IAudioCaptureClient*)pDevice->wasapi.pCaptureClient, &pDevice->startEvent);
+                pDevice->wasapi.pCaptureClient = NULL;
+                pDevice->wasapi.pAudioClientCapture = NULL;
 
                 CloseHandle((HANDLE)pDevice->wasapi.hEventCapture);
                 pDevice->wasapi.hEventCapture = NULL;
             }
 
-            if (pDevice->wasapi.pRenderClient != NULL) {
-                ma_IAudioRenderClient_Release((ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient);
-                pDevice->wasapi.pRenderClient = NULL;
-            }
-            if (pDevice->wasapi.pAudioClientPlayback != NULL) {
-                ma_IAudioClient_Release((ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback);
-                pDevice->wasapi.pAudioClientPlayback = NULL;
-            }
+            MA_WASAPI_RELEASE_AUDIO_CLIENT(pDevice->pContext, (ma_IAudioClient*)pDevice->wasapi.pAudioClientPlayback, (ma_IAudioRenderClient*)pDevice->wasapi.pRenderClient, NULL, &pDevice->startEvent);
+            pDevice->wasapi.pRenderClient = NULL;
+            pDevice->wasapi.pAudioClientPlayback = NULL;
 
             ma_log_post(ma_device_get_log(pDevice), MA_LOG_LEVEL_ERROR, "[WASAPI] Failed to create event for playback.");
             return result;
@@ -24764,6 +24796,7 @@ static ma_result ma_device_init__wasapi(ma_device* pDevice, const ma_device_conf
 
     ma_atomic_store_32(&pNotificationState->pendingOperations, 0);
     ma_atomic_store_32(&pNotificationState->acceptingNotifications, MA_FALSE);
+    ma_atomic_store_32(&pNotificationState->releaseRetirementState, 0);
     ma_atomic_store_32(&pNotificationState->requestedStarted, MA_FALSE);
     ma_atomic_store_32(&pNotificationState->suppressStartedNotification, MA_FALSE);
     ma_atomic_store_32(&pNotificationState->suppressStoppedNotification, MA_FALSE);
@@ -25779,6 +25812,7 @@ static ma_result ma_context_init__wasapi(ma_context* pContext, const ma_context_
     pCallbacks->onDeviceWrite             = ma_device_write__wasapi;
     pCallbacks->onDeviceDataLoop          = NULL;
     pCallbacks->onDeviceDataLoopWakeup    = ma_device_data_loop_wakeup__wasapi;
+    pCallbacks->onDeviceGetInfo           = ma_device_get_info__wasapi;
 
     return MA_SUCCESS;
 }
@@ -44590,9 +44624,41 @@ MA_API ma_device_config ma_device_config_init(ma_device_type deviceType)
     return config;
 }
 
+static void ma_device_uninit_after_backend_init_failure(ma_device* pDevice, ma_bool32 postInitSucceeded)
+{
+    MA_ASSERT(pDevice != NULL);
+    MA_ASSERT(pDevice->pContext != NULL);
+
+    /* No audio worker exists yet, so unwind only the stages that have actually been published. */
+    ma_device__set_state(pDevice, ma_device_state_uninitialized);
+    if (pDevice->pContext->callbacks.onDeviceUninit != NULL) {
+        pDevice->pContext->callbacks.onDeviceUninit(pDevice);
+    }
+
+    ma_event_uninit(&pDevice->stopEvent);
+    ma_event_uninit(&pDevice->startEvent);
+    ma_event_uninit(&pDevice->wakeupEvent);
+    ma_mutex_uninit(&pDevice->startStopLock);
+
+    if (postInitSucceeded) {
+        if (pDevice->type == ma_device_type_capture || pDevice->type == ma_device_type_duplex || pDevice->type == ma_device_type_loopback) {
+            ma_data_converter_uninit(&pDevice->capture.converter, &pDevice->pContext->allocationCallbacks);
+        }
+        if (pDevice->type == ma_device_type_playback || pDevice->type == ma_device_type_duplex) {
+            ma_data_converter_uninit(&pDevice->playback.converter, &pDevice->pContext->allocationCallbacks);
+        }
+    }
+
+    ma_free(pDevice->playback.pInputCache, &pDevice->pContext->allocationCallbacks);
+    ma_free(pDevice->capture.pIntermediaryBuffer, &pDevice->pContext->allocationCallbacks);
+    ma_free(pDevice->playback.pIntermediaryBuffer, &pDevice->pContext->allocationCallbacks);
+    MA_ZERO_OBJECT(pDevice);
+}
+
 MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pConfig, ma_device* pDevice)
 {
     ma_result result;
+    ma_bool32 postInitSucceeded = MA_FALSE;
     ma_device_descriptor descriptorPlayback;
     ma_device_descriptor descriptorCapture;
 
@@ -44851,9 +44917,10 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
 
     result = ma_device_post_init(pDevice, pConfig->deviceType, &descriptorPlayback, &descriptorCapture);
     if (result != MA_SUCCESS) {
-        ma_device_uninit(pDevice);
+        ma_device_uninit_after_backend_init_failure(pDevice, postInitSucceeded);
         return result;
     }
+    postInitSucceeded = MA_TRUE;
 
 
     /*
@@ -44880,7 +44947,7 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
 
             pDevice->capture.pIntermediaryBuffer = ma_malloc((size_t)intermediaryBufferSizeInBytes, &pContext->allocationCallbacks);
             if (pDevice->capture.pIntermediaryBuffer == NULL) {
-                ma_device_uninit(pDevice);
+                ma_device_uninit_after_backend_init_failure(pDevice, postInitSucceeded);
                 return MA_OUT_OF_MEMORY;
             }
 
@@ -44906,7 +44973,7 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
 
             pDevice->playback.pIntermediaryBuffer = ma_malloc((size_t)intermediaryBufferSizeInBytes, &pContext->allocationCallbacks);
             if (pDevice->playback.pIntermediaryBuffer == NULL) {
-                ma_device_uninit(pDevice);
+                ma_device_uninit_after_backend_init_failure(pDevice, postInitSucceeded);
                 return MA_OUT_OF_MEMORY;
             }
 
@@ -44924,7 +44991,7 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
         /* The worker thread. */
         result = ma_thread_create(&pDevice->thread, pContext->threadPriority, pContext->threadStackSize, ma_worker_thread, pDevice, &pContext->allocationCallbacks);
         if (result != MA_SUCCESS) {
-            ma_device_uninit(pDevice);
+            ma_device_uninit_after_backend_init_failure(pDevice, postInitSucceeded);
             return result;
         }
 
@@ -44940,7 +45007,7 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
             if (pConfig->deviceType == ma_device_type_duplex) {
                 result = ma_duplex_rb_init(pDevice->capture.format, pDevice->capture.channels, pDevice->sampleRate, pDevice->capture.internalSampleRate, pDevice->capture.internalPeriodSizeInFrames, &pDevice->pContext->allocationCallbacks, &pDevice->duplexRB);
                 if (result != MA_SUCCESS) {
-                    ma_device_uninit(pDevice);
+                    ma_device_uninit_after_backend_init_failure(pDevice, postInitSucceeded);
                     return result;
                 }
             }
@@ -45027,6 +45094,7 @@ MA_API ma_result ma_device_init_ex(const ma_backend backends[], ma_uint32 backen
     ma_backend* pBackendsToIterate;
     ma_uint32 backendsToIterateCount;
     ma_allocation_callbacks allocationCallbacks;
+    ma_bool32 preserveWASAPIProcessLoopbackResult = MA_FALSE;
 
     if (pConfig == NULL) {
         return MA_INVALID_ARGS;
@@ -45040,6 +45108,10 @@ MA_API ma_result ma_device_init_ex(const ma_backend backends[], ma_uint32 backen
     } else {
         allocationCallbacks = ma_allocation_callbacks_init_default();
     }
+
+#ifdef MA_SUPPORT_WASAPI
+    preserveWASAPIProcessLoopbackResult = pConfig->deviceType == ma_device_type_loopback && pConfig->wasapi.loopbackProcessID != 0;
+#endif
 
     pContext = (ma_context*)ma_malloc(sizeof(*pContext), &allocationCallbacks);
     if (pContext == NULL) {
@@ -45095,6 +45167,11 @@ MA_API ma_result ma_device_init_ex(const ma_backend backends[], ma_uint32 backen
             } else {
                 ma_context_uninit(pContext);   /* Failure. */
             }
+        }
+
+        /* A process-specific request has no meaningful fallback outside WASAPI. Preserve its public error. */
+        if (preserveWASAPIProcessLoopbackResult && pBackendsToIterate[iBackend] == ma_backend_wasapi) {
+            break;
         }
     }
 
