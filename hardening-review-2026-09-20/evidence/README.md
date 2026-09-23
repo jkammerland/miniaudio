@@ -21,6 +21,10 @@ these files and archives, not the deleted temporary paths.
 - `steam-audio-hardening.tar.zst` and `steam-audio-native-text.tar.zst` retain
   the Steam Audio integration evidence needed by this review.
 - `native-cleanup-records.tar.zst` retains the native-host cleanup reports.
+- `linux-cxx23-0f459ed-evidence.tar.zst` retains the compact GCC and Clang
+  C++23 build/test receipts, negative conformance-guard outputs, and the final
+  Clang tests/examples/tools compile-command inventory for exact commit
+  `0f459ed`.
 - `validation-logs.tar.zst` retains the small top-level lifecycle, manifest,
   optional-codec, and sanitizer logs that were otherwise only in `/tmp`.
 - `cleanup-deleted.txt` enumerates the local temporary roots removed after the
