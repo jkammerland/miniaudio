@@ -76318,6 +76318,11 @@ static void ma_node_input_bus_detach__no_output_bus_lock(ma_node_input_bus* pInp
     iterating the output bus again.
     */
 
+    /* Test-only observation point after detachment, before waiting for graph readers. */
+#if defined(MA_NODE_DETACH_BEFORE_READER_WAIT_HOOK)
+    MA_NODE_DETACH_BEFORE_READER_WAIT_HOOK(pOutputBus);
+#endif
+
     /* Part 1: Wait for the current iteration to complete. */
     while (ma_node_input_bus_get_next_counter(pInputBus) > 0) {
         ma_yield();
