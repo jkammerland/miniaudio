@@ -3198,6 +3198,7 @@ static int resource_manager_test_direct_continuation_cancellation(void)
         return 1;
     }
 
+    dequeuedJob = ma_job_init(MA_JOB_TYPE_QUIT);
     currentJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
     nextJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
     executionCounter = 7;
@@ -3283,6 +3284,7 @@ static int resource_manager_test_single_worker_nested_retirement(void)
 
     externalFrames[0] = 0;
     externalFrames[1] = 0;
+    MA_ZERO_OBJECT(&dataBuffer);
     result = ma_resource_manager_register_decoded_data(&fixture.resourceManager, "single-worker-nested", externalFrames, 2, ma_format_f32, 1, 48000);
     if (result == MA_SUCCESS) {
         result = ma_resource_manager_data_buffer_init(&fixture.resourceManager, "single-worker-nested", 0, NULL, &dataBuffer);

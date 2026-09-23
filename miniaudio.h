@@ -22867,6 +22867,8 @@ static ma_result ma_completion_handler_create(ma_context* pContext, ma_completio
     MA_ASSERT(pContext != NULL);
     MA_ASSERT(ppHandler != NULL);
 
+    (void)pContext;
+
     *ppHandler = NULL;
     /* Windows can retain this object after a bounded wait times out and the context is gone. */
     pHandler = (ma_completion_handler*)MA_WASAPI_COMPLETION_HANDLER_ALLOC(sizeof(*pHandler));

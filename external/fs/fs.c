@@ -4952,10 +4952,10 @@ static fs_result fs_mount_write(fs* pFS, const char* pActualPath, const char* pV
 
     /* Since we'll be wanting to write out files to the mount point we should ensure the folder actually exists. */
     if ((options & FS_NO_CREATE_DIRS) == 0) {
-        fs_result result = fs_mkdir(pFS, pActualPath, FS_IGNORE_MOUNTS);
-        if (result != FS_SUCCESS && result != FS_ALREADY_EXISTS) {
+        fs_result mkdirResult = fs_mkdir(pFS, pActualPath, FS_IGNORE_MOUNTS);
+        if (mkdirResult != FS_SUCCESS && mkdirResult != FS_ALREADY_EXISTS) {
             fs_unmount_write(pFS, pActualPath, options);
-            return result;
+            return mkdirResult;
         }
     }
 
