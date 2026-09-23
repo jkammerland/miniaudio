@@ -23,6 +23,9 @@ these files and archives, not the deleted temporary paths.
 - `native-cleanup-records.tar.zst` retains the native-host cleanup reports.
 - `validation-logs.tar.zst` retains the small top-level lifecycle, manifest,
   optional-codec, and sanitizer logs that were otherwise only in `/tmp`.
+- `cleanup-deleted.txt` enumerates the local temporary roots removed after the
+  durable evidence commit; `cleanup-retained.txt` records the one live root
+  that was deliberately left in place.
 
 `SHA256SUMS` authenticates every durable file except itself. Verify the set
 from this directory with:
@@ -54,5 +57,7 @@ authoritative integrity record for the durable set.
 
 The local cleanup was limited to top-level temporary entries owned by this
 review whose names began with `miniaudio`, `steam-audio`, or `hardening`, plus
-the review's named cleanup helpers. A still-running debugger tree was excluded
-and is listed in `cleanup-retained.txt`.
+the review's named cleanup helpers. On 2026-09-23, 280 enumerated entries
+(approximately 20.5 GiB) were removed after the evidence was committed at
+`475b59e`. A still-running debugger tree was excluded and is listed in
+`cleanup-retained.txt`.

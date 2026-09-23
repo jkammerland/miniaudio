@@ -1,5 +1,5 @@
 0c6dc8f9bc643db54d6da8451acaf11916605e3c3839a0e36b512aad428daafc  ./.gitattributes
-aa77feb0884e344ead24af5d32da73451ac138ecdb12d516e7411b99e4cf7a33  ./README.md
+b9b8b5a88d0a2f18478e0259bf8cbd9422bd5a0945adcc8e988b9b03a3f647b2  ./README.md
 874b9193420f244b74729054f7eea68233e7fc2098cd3c9c067000c7e6053992  ./audit/1123.wav
 51a38750c2dbff521695f76755f28bbcd536f353a1adb33970f4238098837d27  ./audit/1128-crash_input.bin
 7e0d8773b842a936c02651ec6aea6b42d8f8da9aa28e1442c8d58cccdab7e032  ./audit/1128-poc.c
@@ -52,6 +52,7 @@ f40a616f566a2d22fa3e4e01c077ef95b4cbfb76035e6ef6146fe3bcd1e7212c  ./audit/repro-
 c4c4b9c145d3d807ee5a2b8173fe3f50639be72fe6714be0696a1894ffb1e6ed  ./audit/repro-results.json
 06b0f212af58e46fdac30e2ff62d8097a91f417d3d8235a8fe607ff6e89f2ed3  ./audit/upstream-dev.diff
 c9cf08ef7c907a5191083f464b4e94dc89a69cbcd9d5fb9c422612253d4624b0  ./audit/upstream-versions.json
+e6be014d549d1b28e9f4c389b2afb196e5abf7c853abe0985df896116d4edeb0  ./cleanup-deleted.txt
 bfa07f1a0576932983d9aec595819817aa740bf4c035e7f3ca3b61c33081692e  ./cleanup-retained.txt
 071caa007e085ae783e4d2bd8b9ffa81939410f36a752ba2008afce8a28a257e  ./native-cleanup-records.tar.zst
 d1f13cf92c4123213ac7bd312f8bfb82f08593269dff4b8f8d096ffd957f21fd  ./native-macos-e4658df-final.tar.zst
