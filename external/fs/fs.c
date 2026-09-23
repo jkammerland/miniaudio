@@ -8336,8 +8336,6 @@ FS_API int fs_path_compare(const char* pPathA, size_t pathALen, const char* pPat
             return +1;
         }
     }
-
-    return 0;
 }
 
 FS_API const char* fs_path_file_name(const char* pPath, size_t pathLen)
