@@ -1180,7 +1180,11 @@ static int hardening_test_success_publishes_complete_candidate(void)
 int main(void)
 {
     ma_result result;
+    ma_result (*pDefaultDeviceInit)(ma_context*, ma_device_type, const ma_device_id*, ma_device_init_internal_data__coreaudio*, void*) = ma_device_init_internal__coreaudio;
     int failed = 0;
+
+    /* The injected call site must not hide the production initializer from strict implementation builds. */
+    (void)pDefaultDeviceInit;
 
     failed += hardening_test_tracking_worker_lifecycle();
     failed += hardening_test_callback_retirement_before_pipe_close();
