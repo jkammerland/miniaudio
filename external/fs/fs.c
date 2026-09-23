@@ -6752,7 +6752,8 @@ static fs_result fs_remove_win32(fs* pFS, const char* pFilePath)
                     result = fs_result_from_GetLastError();
                     goto done;
                 } else {
-                    return FS_SUCCESS;
+                    result = FS_SUCCESS;
+                    goto done;
                 }
             } else {
                 result = fs_result_from_GetLastError();
@@ -6763,8 +6764,6 @@ static fs_result fs_remove_win32(fs* pFS, const char* pFilePath)
             goto done;
         }
 
-        result = fs_result_from_GetLastError();
-        goto done;
     } else {
         result = FS_SUCCESS;
     }
@@ -6915,7 +6914,7 @@ static fs_result fs_file_open_win32(fs* pFS, fs_stream* pStream, const char* pFi
     fs_file_win32* pFileWin32 = (fs_file_win32*)fs_file_get_backend_data(pFile);
     fs_result result;
     fs_win32_path path;
-    HANDLE hFile;
+    HANDLE hFile = NULL;
     DWORD dwDesiredAccess = 0;
     DWORD dwShareMode = 0;
     DWORD dwCreationDisposition = OPEN_EXISTING;

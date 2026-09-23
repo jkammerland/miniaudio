@@ -781,6 +781,12 @@ if(MINIAUDIO_BUILD_TESTS)
     add_miniaudio_test(miniaudio_hardening_no_resource_manager hardening/hardening_no_resource_manager.c)
     add_test(NAME miniaudio_hardening_no_resource_manager COMMAND miniaudio_hardening_no_resource_manager)
 
+    if(WIN32)
+        add_miniaudio_test(miniaudio_hardening_fs_win32 hardening/hardening_fs_win32.c)
+        target_compile_definitions(miniaudio_hardening_fs_win32 PRIVATE UNICODE _UNICODE)
+        add_test(NAME miniaudio_hardening_fs_win32 COMMAND miniaudio_hardening_fs_win32)
+    endif()
+
     add_miniaudio_test(miniaudio_hardening_mp3 hardening/hardening_mp3.c)
     add_test(NAME miniaudio_hardening_mp3 COMMAND miniaudio_hardening_mp3)
 
