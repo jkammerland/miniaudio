@@ -1,9 +1,10 @@
 # Implementation prompt: miniaudio backend hardening
 
-> **Execution status (2026-09-23):** implementation and available native
-> validation have reached `e4658df`. Exact-final Linux and deterministic macOS
-> gates pass; Windows production code is exact-tested through `06e3a06`, after
-> which only the macOS-only CoreAudio test translation unit changed.
+> **Execution status (2026-09-23):** implementation, tests, and build
+> integration have reached `0f459ed`. Exact-current Linux gates pass; Windows
+> production evidence is exact through `06e3a06`, and macOS native evidence is
+> exact through `e4658df`. Later changes are confined to portable CMake,
+> hardening tests, and documentation; production source remains unchanged.
 > `UNRESOLVED.md` is the authoritative current disposition. In particular, the
 > owner explicitly rejected Windows GCC/MinGW deployment; do not provision or
 > run MinGW unless that decision is later reversed.
@@ -440,7 +441,7 @@ report the exact native blocker; do not claim the corresponding behavior fixed.
 
 ## Completed execution record
 
-The implementation sequence is complete through `54a9ef5`. The late
+The implementation sequence is complete through `0f459ed`. The late
 saturation review added `7dc7c8e` (retained resource-manager admission records)
 and `75158b8` (serialized continuation/cancellation/retirement). Strict native
 builds then drove `6681823`, `a99cdc0`, `205e334`, and `06e3a06`; those commits
@@ -453,11 +454,15 @@ forced-C++ CMake option changed the compiler driver's interpretation without
 changing CMake's source language, so its C++23/`-Werror` matrix was
 misattributed. `54a9ef5` assigns `.c` sources to CXX while retaining the
 driver-extension flag, adds an actual C++23 compile guard, and removes the
-test-only escaped stack pointer exposed by the corrected policy.
+test-only escaped stack pointer exposed by the corrected policy. Follow-up
+commit `0f459ed` makes the source-language helper propagate the driver flag
+itself, covering the opt-in `madoc` target as well as libraries, tests, and
+examples.
 
 Final available gates are recorded in [UNRESOLVED.md](UNRESOLVED.md): exact
-`54a9ef5` Linux GCC/Clang C++23 passes 14/14 with all intended compile commands
-audited for C++23 and warnings-as-errors; pinned optional codecs and the
+`0f459ed` Linux GCC/Clang C++23 passes 14/14 with the default compile commands
+audited for C++23 and warnings-as-errors; an all-target Clang configure audit
+also covers 47/47 `.c` actions, including `madoc`; pinned optional codecs and the
 adjacent Steam Audio integration pass; Windows `06e3a06` passes strict
 Debug/Release 17/17, focused clang-cl, 100/100 stress, and ABI comparison;
 macOS exact `e4658df` passes Apple Clang Debug/Release and Homebrew LLVM Release

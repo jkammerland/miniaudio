@@ -1,7 +1,7 @@
 # Miniaudio 0.11.25 hardening review
 
 > **Current implementation status (2026-09-23):** the confirmed implementation
-> and independent-review findings have been addressed through `54a9ef5`.
+> and independent-review findings have been addressed through `0f459ed`.
 > Exact-final Linux C/C89/C++23 and deterministic macOS gates pass; Windows
 > production code is exact-tested through `06e3a06`, after which only test,
 > build, and documentation files changed. Physical/acoustic and owner-rejected

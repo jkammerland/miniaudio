@@ -2,7 +2,7 @@
 
 Status date: 2026-09-23
 
-Implementation and test/build code validated through: `54a9ef5`
+Implementation and test/build code validated through: `0f459ed`
 
 This is the authoritative remaining-work record for
 `IMPLEMENTATION-PROMPT.md`. A hardware, toolchain, permission, or acoustic
@@ -76,6 +76,12 @@ The whole-series Astra-max continuation `c34d44bdf141b742` then reviewed exact
 record on one Medium build-attribution error and two Low evidence-scope errors.
 Commit `54a9ef5` fixes the language-mode implementation and its newly exposed
 strict diagnostic; this reconciliation narrows the two documentation claims.
+Continuation `47cb7c0d7a7d8207` independently closed `FINAL-01` through
+`FINAL-03` with zero Critical, High, or Medium findings. It found two Low
+integration/record issues: the opt-in `madoc` target did not receive the
+driver-extension flag, and the implementation prompt retained an obsolete
+native-boundary sentence. Commit `0f459ed` centralizes that flag in the target
+helper; the current reconciliation corrects the boundary.
 
 | Finding | Why it was a problem | Disposition |
 |---|---|---|
@@ -112,6 +118,8 @@ strict diagnostic; this reconciliation narrows the two documentation claims.
 | The corrected C++23 policy exposed an escaped stack address in a resource-manager test hook | The fault injector stored a stack-backed notification address in global state solely to recognize invalid wait/uninit calls. GCC's C++23 dangling-pointer analysis diagnosed the escape under the newly effective `-Werror` policy. | **Fixed in `54a9ef5`.** The hook writes a poison callback into the still-live notification object and recognizes that in-object marker instead. The same invalid-use counters and assertions remain; C, C89, C++23, ASan/UBSan, and TSan resource-manager checks pass. |
 | The macOS matrix said every full-build target used `-Werror` (`FINAL-02`) | The three exact `e4658df` compile databases show `-Werror` on all 20 C translation units, including every selected deterministic test, but not on the two `.cpp` translation units. Complete logs still contain zero warnings. | **Documentation corrected.** The native result is now stated at its proven scope: all selected deterministic C targets used `-Werror`, and the complete builds emitted zero warnings. No physical-device result is inferred. |
 | The resource-manager dossier attributed terminal cleanup ownership to every saturated-deferral case (`FINAL-03`) | The all-site matrix deliberately tests admission/guard transport with synthetic, order-mismatched jobs and retires their records through the queue helper. Those cases do not construct decoder/VFS/fence owners or execute every terminal handler. | **Documentation corrected.** The transport matrix is credited only with retained record/code/order preservation. Separate live-owner continuation, cancellation, node/buffer retirement, fence, and shutdown tests carry the end-to-end cleanup claims. |
+| The opt-in `madoc` target missed the forced-C++ driver-extension flag (`FINAL-04`) | The source-language helper made `madoc.c` a CXX source, but `madoc` did not link the common compile-options interface. Clang therefore saw a `.c` input through `clang++` without `-x c++` and rejected its deprecation diagnostic under `-Werror`. | **Fixed in `0f459ed`.** The helper now owns both the CMake `CXX` language property and compiler-specific `-x c++`/`/TP` option. A Clang all-target configure inventory proves 47/47 `.c` actions, including `madoc`, use the C++ driver, C++23, `-Werror`, and `-x c++`; both `.cpp` actions use C++23 and `-Werror`. Full `madoc` compilation remains unavailable because its documented sibling `fs`, `c89str`, and `webplate` development repositories are absent; the compile now reaches that pre-existing missing dependency without the language-mode diagnostic. |
+| The implementation prompt's opening banner retained the old native boundary (`FINAL-05`) | It said only the macOS CoreAudio test changed after Windows `06e3a06`, omitting the later portable CMake and resource-manager hardening-test changes at `54a9ef5`. The completed record elsewhere was already correct. | **Documentation corrected.** The banner now distinguishes current portable build/test integration (`0f459ed`), exact Windows production evidence (`06e3a06`), exact macOS native evidence (`e4658df`), and the fact that production source stayed unchanged after the native boundaries. |
 
 Earlier findings remain fixed by the commits listed in Git history: validated
 WAV traversal/metadata bounds, resource-manager failed-load ownership, MP3
@@ -201,14 +209,14 @@ ma_device__untrack__coreaudio(device); /* waits for / excludes reroute */
 ma_device__set_state(device, ma_device_state_uninitialized);
 ```
 
-## Validation matrix through `54a9ef5`
+## Validation matrix through `0f459ed`
 
 | Environment | Result | Scope / qualification |
 |---|---|---|
 | Linux GCC 16.2.1 with pinned Opus/Vorbis | **16/16 Debug pass; 15/15 strict-C89 option pass** | libogg 1.3.6, libopus 1.6.1, opusfile 0.12, and libvorbis commit `1b75110b...`; the C89-option build intentionally omits C++ tests. |
 | Linux GCC Release + LTO + warnings-as-errors | **exact `54a9ef5`: 14/14 pass** | This is native Linux GCC, not Windows MinGW validation. |
 | Linux Clang 22.1.8 warnings-as-errors | **exact `54a9ef5`: 14/14 pass** | Complete registered non-optional suite. |
-| Forced C++23 implementation | **exact `54a9ef5`: GCC 14/14 and Clang 14/14 pass** | Compile-command audits prove all 19 `.c` actions use the C++ driver, `-x c++`, `-std=c++23`, and `-Werror`; both `.cpp` actions use C++23 and `-Werror`. The conformance guard fails under C and under GCC/Clang C++20. Evidence is retained in `/home/ai-dev1/miniaudio-cxx23-language-evidence-20260923` and the two exact-commit build trees. |
+| Forced C++23 implementation | **exact `0f459ed`: GCC 14/14 and Clang 14/14 pass** | Default compile-command audits prove all 19 `.c` actions use the C++ driver, `-x c++`, `-std=c++23`, and `-Werror`; both `.cpp` actions use C++23 and `-Werror`. A Clang configure inventory with tests, examples, and tools enabled proves the same policy on 47/47 `.c` actions, including `madoc`, plus 2/2 `.cpp` actions. The conformance guard fails under C and under GCC/Clang C++20. Full `madoc` compilation is limited by its absent sibling development repositories. Evidence is retained under `/home/ai-dev1/miniaudio-*cxx23`, `/home/ai-dev1/miniaudio-final04-clang-inventory`, and `/home/ai-dev1/miniaudio-cxx23-language-evidence-20260923`. |
 | Linux ASan/UBSan and TSan | **exact `54a9ef5` focused pass** | ASan/UBSan covers resource-manager, no-resource-manager, and WAV; TSan covers the resource-manager scheduler. Earlier focused WAV/no-resource-manager and full SteamAudio-suite evidence is retained; the latter also reports an unrelated pre-existing `tests/deviceio/deviceio.c` race, so no universal TSan-clean claim is made. |
 | Optional-codec ASan/UBSan and TSan | **2/2 + 2/2 pass** | Opus and Vorbis adapter tests from the pinned dependency matrix. |
 | Steam Audio real SDK | **15/15 final normal suite pass; focused normal/C89-option/ASan+UBSan/TSan passes retained** | The final suite links the existing adjacent `../steam-audio/unity` binary. The authoritative clean SDK build was made earlier from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac` with a C++17 override. No Steam Audio source or user build output was edited. |
@@ -318,7 +326,9 @@ coroutine handle.
 
 The exact-`754f852` Astra-max review reported zero Critical/High findings, one
 Medium build-attribution finding, and two Low evidence-scope findings. Code
-commit `54a9ef5` and this documentation reconciliation address all three. The
-final gate is a continuation of that same reviewer conversation over the
-remediated tree. The hardware, acoustic, owner-scope, and external-dependency
-limits above remain explicit.
+commit `54a9ef5` and the following reconciliation addressed all three. The
+exact-`509a167` continuation independently closed them with zero
+Critical/High/Medium findings, then identified the two Low items fixed by
+`0f459ed` and this reconciliation. The final gate is one last continuation of
+that same reviewer conversation over the remediated tree. The hardware,
+acoustic, owner-scope, and external-dependency limits above remain explicit.
