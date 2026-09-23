@@ -1,8 +1,8 @@
 # Hardening implementation: unresolved work and validation limits
 
-Status date: 2026-09-21
+Status date: 2026-09-23
 
-Implementation code validated through: `fee518b`
+Implementation code validated through: `e4658df`
 
 This is the authoritative remaining-work record for
 `IMPLEMENTATION-PROMPT.md`. A hardware, toolchain, permission, or acoustic
@@ -17,7 +17,7 @@ the source invariant and a deterministic regression establish the fix.
 | #1155 alleged optional-libopus UAF | **Unresolved as the alleged UAF; no valid owner-mediated UAF reproduced** | Pinned Opus/Vorbis builds cover valid, malformed, truncated, chained, seek/EOF, nonseekable, allocator/VFS/open failure, callback lifetime, and deterministic resource-manager cancellation under normal, C89-option, ASan/UBSan, and TSan configurations. Separate callback-contract defects were fixed. | The report still lacks a supported call sequence and sanitizer stack. Concurrent public read/uninit is not assumed valid. The seek/tell and EOF fixes do not prove or disprove an unrelated ownership UAF. |
 | #1157 Windows GCC/MinGW LTO diagnostics | **Owner-rejected / outside accepted deployment scope** | Linux GCC 16.2.1 C/C++ Release+LTO with warnings-as-errors passes. | The owner explicitly will never deploy GCC/MinGW on Windows. No MinGW toolchain was provisioned or invoked. This is a scope rejection, not a pass or fix. Reopening requires a new owner decision or an external exact compiler/triple/flags reproducer. |
 | #484 process-specific WASAPI content isolation | **Implemented; live acoustic include/exclude remains unresolved on this host** | Desktop process-loopback activation, feature/config gates, timeout-safe completion ownership, public error preservation, virtual metadata, and deterministic include/exclude/failure/timeout tests pass. At exact commit `fee518b`, the test passed directly plus 100/100 independent runs. Nine named-event live scenarios exercised whole-system control, include, exclude, descendant inclusion, target exit, nonexistent/no-stream targets, and explicit-render selection at 288,000 frames per case; all producers crossed their thresholds and reaped cleanly. | The whole-system positive control and every process capture were bitwise silent while distinct producer reference WAVs were nonzero. Silence cannot prove filtering. Only one active render endpoint existed, so cross-endpoint/default-switch behavior is also unverified. Synchronous public initialization still exposes no object that can be canceled while activation is pending. |
-| CoreAudio real-device behavior | **Deterministic teardown/reroute lifetime fixed; physical I/O remains unverified** | The started-device overlap test uses the actual control worker, an allocated old converter, an in-flight reroute barrier, injected restart failure, and exact old/candidate endpoint teardown. Debug, C89, supported ASan/UBSan, TSan, and 100/100 independent native stress runs pass. | Both macOS playback endpoints initialized but delivered zero callbacks in bounded probes; capture permission was denied. The full portable suite therefore timed out in two physical-device tests (12/14), and real playback/capture, hotplug, duplex, and default switching remain unverified. Apple LeakSanitizer is unsupported in this environment. |
+| CoreAudio real-device behavior | **Deterministic teardown/reroute lifetime fixed; physical I/O remains unverified** | At exact final commit `e4658df`, Apple Clang Debug and optimized Release plus Homebrew LLVM optimized Release each pass 13/13 deterministic tests with warnings-as-errors and zero warnings. Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, the deterministic CoreAudio lifecycle, 100/100 independent resource-manager runs, and an arm64 field-layout comparison also pass. | The isolated account's prior playback endpoints initialized but delivered zero callbacks in bounded probes; capture permission was denied. Real playback/capture, hotplug, duplex, and default switching therefore remain unverified. Apple LeakSanitizer is unsupported in this environment. |
 | #1153 original audible spatialization report | **Related gain and Steam Audio synchronization defects fixed; original audible scenario not reproduced** | Independent scalar/SSE2 oracles cover split ramps, target changes, tails, guards, in/out-of-place operation, null advancement, and 1/2/6/8/33 channels. Steam Audio snapshot synchronization passes against the SDK built from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac`. | The reported Windows listener-rotation/spatialization symptom was not reproduced acoustically. The deterministic fixes do not prove that every possible cause of the original audible report is gone. |
 | 32-bit and additional architecture coverage | **Validation limitation** | Linux x86_64, Windows x64, and macOS arm64 were exercised; scalar/SSE2 and available sanitizers pass. Checked arithmetic covers the hostile metadata paths and no public layout change was made. | No usable 32-bit libc/toolchain was available, and not every architecture-specific DSP path, compiler, or packing mode was exercised. This is not universal ABI proof. |
 | Steam Audio checkout in its default C++14 mode | **External dependency/toolchain limitation; miniaudio integration validated with C++17 override** | `phonon` was built from the adjacent `../steam-audio` checkout at commit `902e09545ae6bfd06768bcd38980b009317641ac`. The miniaudio fixed/partial/tail test passes in normal, C89-option, ASan/UBSan, and TSan configurations. | Steam Audio's bundled FlatBuffers selects the host Abseil `string_view`, while the checkout requests C++14 and current Abseil requires C++17. That external checkout needs its own dependency/standard fix. No Steam Audio source was changed here. |
@@ -62,6 +62,15 @@ The pre-`fee518b` final continuations `084376fdca0e83bd` (core),
 `172e0a7282c3d69b` (backends), and `966c74b232430999` (release/tests)
 then found the remaining items called out below.
 
+A later saturation-focused pass found that retrying an admitted cleanup was
+still unsafe when the sole worker itself encountered a full queue. Commits
+`7dc7c8e` and `75158b8` replace that retry model with retained admission
+records and serialize cancellation, continuation publication, and last-owner
+retirement. Astra-max continuations `399b8c7d33d2e6ef` (core) and
+`74cea9479359e715` (backend/release) independently approved exact `75158b8`
+with no Critical, High, or Medium findings. Native strict builds subsequently
+exposed the warning and Win32 filesystem items also recorded below.
+
 | Finding | Why it was a problem | Disposition |
 |---|---|---|
 | Resource-manager result publication still preceded final job access (`FR01` / later `CORE-001`) | A waiter could observe a terminal result, release the last owner, and race the worker's execution-pointer access. | **Fixed in `26ad922`.** Buffer, node-load, and node-page jobs capture their last object-dependent decision, advance the execution pointer, and only then signal notifications/fences. Barrier tests destroy the last owner at the former gap. |
@@ -69,6 +78,12 @@ then found the remaining items called out below.
 | Queue-full posts consumed execution order before publication (`CORE-010`) | Initial and continuation page jobs incremented an object's execution counter before asking the bounded queue for a slot. A failed post left an order that no job could retire, so teardown could wait forever. | **Fixed in `fee518b`.** The queue reserves a slot first and only then atomically assigns the order to the queued copy. Initial/continuation post-failure tests and the `UINT32_MAX` wrap test prove no hole is created. |
 | Result-poll regression could join before the free job was published (`CORE-011`) | Its barrier acknowledged a pre-post hook, so the only manual pump could run on an empty queue and then join an uninit thread waiting for that pump. | **Fixed in `fee518b`.** A separate post-publication acknowledgment now orders the one manual pump after enqueue; an explicit barrier still forces the former gap without sleeps or retries. |
 | Full resource-manager queues could orphan last-reference retirement (`FR07`) | Once a node/buffer was removed and marked unavailable, failure to enqueue its FREE job could discard the only cleanup path. Propagating an error was insufficient because public ownership had already been surrendered. | **Fixed in `fee518b`.** Retirement posts retain ownership and make a slot in manual-pump mode or yield to workers until publication succeeds; order is allocated only on success. Saturated unregister and buffer-uninit regressions require exact final frees and zero live supply. |
+| A sole worker could deadlock while retrying cleanup into its own full queue | The worker that had to consume the next slot could spin/yield inside a FREE/continuation post, so no thread remained able to make capacity. | **Fixed in `7dc7c8e`.** Resource-manager queues use private retained admission records. A running record transitions directly back to READY for a deferral/continuation, while externally initiated retirement carries its own retained record. Saturation tests cover sole-worker nested cleanup without sleeps or retries. |
+| An accepted deferral or continuation could be lost under saturation | The current job's admission was retired before the follow-up had durable capacity. A failed post could therefore return an error after the operation had already been accepted, with no job left to complete it. | **Fixed in `7dc7c8e`.** The accepted operation keeps or transfers the same stable record under the queue lock; it cannot fall through the bounded generic queue. Exact ownership/fence/allocation counts prove eventual completion. |
+| Last-reference FREE could be ordered before a later page continuation (`CORE-014`) | The node state check, continuation order allocation, and FREE publication were separate operations. A page job could observe BUSY, lose the race to retirement, and then allocate an order after FREE, allowing the node to be freed first. | **Fixed in `75158b8`.** The queue lock now atomically checks required state and publishes the continuation/order, or publishes `MA_UNAVAILABLE` with the FREE order. A losing continuation destroys its decoder locally and never touches the retired node again. |
+| Shutdown cancellation returned stale caller job data (`CORE-015` / `BR-012`) | `ma_job_queue_next()` returned `MA_CANCELLED` after draining but left the caller's previous `ma_job` contents intact, so code inspecting the output could see and potentially reuse a stale operation. | **Fixed in `75158b8`.** The shutdown path writes a freshly initialized QUIT job before returning cancellation. Direct and worker-thread tests seed hostile sentinels and require the QUIT output. |
+| Invalid dequeued dispatch could strand a retained admission (`CORE-016`) | A corrupted or feature-disabled job code returned before the tracked completion path, leaving its private record RUNNING forever and reducing queue capacity permanently. | **Fixed in `75158b8`.** Dispatchability is rejected before admission, and a dequeued job mutated afterward explicitly releases its retained record before returning `MA_INVALID_OPERATION`. |
+| `MA_NO_RESOURCE_MANAGER` strict builds saw resource-manager-only helpers (`BR-013`) | Private continuation/retirement helpers were compiled even when the resource manager was disabled, producing unused-static diagnostics under warnings-as-errors. | **Fixed in `75158b8`.** Resource-manager-only helpers are feature-guarded, and a dedicated `MA_NO_RESOURCE_MANAGER` implementation test compiles and runs in C and forced C++ modes. |
 | Nested WAV LIST children were counted before their parent bounds were proved (`CORE-012`) | A child could declare a huge payload inside a tiny LIST. The count pass could inflate metadata allocation before later traversal noticed the enclosing extent was impossible. | **Fixed in `fee518b`.** Child ID, size, payload, and internal pad must all fit the parent before counting, allocating, reading, or seeking. A reject-all allocator proves malformed known, unknown, label, truncated-header, and missing-pad inputs make zero allocation attempts. |
 | WASAPI notification `Release` published zero active releases too early (`FR02`) | Teardown could free the sidecar after seeing zero while `Release` still executed its hook/final sidecar access. | **Fixed in `0ab5917`.** The retirement counter decrement is the final sidecar access; teardown waits through it. A barrier holds `Release` in the formerly unsafe interval. |
 | WASAPI cleanup command acceptance was not transactional (`BR-009`, reopened) | The ring stored a stack-backed command before releasing its semaphore. If semaphore release failed, the caller saw rejection while the ring retained its pointers. A wait error could also return before worker retirement, and quit failure allowed generic cleanup to destroy synchronization under a live worker. | **Fixed in `fee518b`.** The wake token is released under the queue lock before the ring commit; failure leaves count/index unchanged. Accepted waits retain stack storage through worker completion, release/quit retry publication, and quit always joins before sync teardown. Injected native counters prove the failure, retry, and exact COM-release paths; lifecycle passes directly and 100/100. |
@@ -79,9 +94,14 @@ then found the remaining items called out below.
 | MP3 callback refill could decode through null storage, and its release record overclaimed OOM proof (`FR08`) | `df9ed4c` added a valid missing-storage guard, but its original synthetic test did not actually invoke a failing allocator or prove cleanup after retained-buffer growth failure. | **Completed in `fee518b`.** The synthetic invariant remains distinct. New counted callbacks reject the initial allocation and a real growth realloc while one buffer is live; no read occurs, the original pointer/capacity survive, and final allocation/free counts balance exactly. |
 | MP3/WAV/EOF proof omitted boundary and callback-fault cases (`FR04`) | Earlier coverage still omitted the named RIFX/W64 fact boundaries, W64 totals below 24, short AIFF fixed headers, very large `fmt` remainders, and a valid large unknown chunk. | **Completed in `fee518b` after the earlier `cfb4e89`, `cd840c6`, and `e9c62c3` work.** Sparse callbacks cover `INT_MAX`, `INT_MAX+1`, and `UINT32_MAX` without huge allocation. RIFX fact 0-4, W64 fact 0-8 plus padded/extended valid forms, W64 total 0-23, AIFF COMM/SSND short headers, and a valid large unknown chunk are asserted. The independent W64 fixtures also exposed and fixed the padding formula to round up to the next 8-byte boundary. |
 | Documentation conflated private and public process-loopback errors (`FR05`) | Private unsupported activation returns `MA_NOT_IMPLEMENTED`, while invalid public configurations return `MA_INVALID_DEVICE_CONFIG`; treating them as one claim obscured API behavior. | **Corrected.** The two layers and results are documented and tested separately. |
-| Validation timing text looked like retry-to-green (`FR06`) | It did not state which bound applied to the original failure, diagnostic run, and later complete suite. | **Corrected.** The original 30-second failure is retained; a 36.76-second diagnostic used 180 seconds, a 40.55-second complete run used 90 seconds, and the final exact-Windows run completed generation in 39.228 seconds under 90 seconds. |
+| Validation timing text looked like retry-to-green (`FR06`) | It did not state which bound applied to the original failure, diagnostic run, and later complete suite. | **Corrected.** The original 30-second failure is retained; a 36.76-second diagnostic used 180 seconds, a 40.55-second complete run used 90 seconds, exact `a1229bf` completed generation in 39.228 seconds, and exact `fee518b` completed it in 38.415 seconds under the same 90-second bound. |
 | New Windows test named `HANDLE` before Windows declarations | MSVC could not compile the process-loopback test even though production code built. | **Fixed in `a1229bf`.** Hooks use the already-public `ma_handle`. A fresh native build then passed 15/15 and the test passed directly plus 100/100 stress runs. |
 | Strict optimized WAV test warned about an uninitialized diagnostic output | The compatibility helper's error path left a local used by an assertion indeterminate. | **Fixed in `346acda`.** The diagnostic is initialized and passes C89 warnings-as-errors. |
+| WAV implementation shadowed its outer stream-size variable under MSVC (`C4456`) | A nested signed `fileSize` declaration hid the outer stream size. The scopes were behaviorally distinct, but `/W4 /WX` correctly made the ambiguity release-blocking. | **Fixed in `6681823`.** The inner value is named `streamSizeSigned`; behavior and public layout are unchanged. |
+| Optimized MSVC exposed assertion-elided and potentially uninitialized diagnostics | `pContext` was used only by an assertion removed under `NDEBUG`; short-circuit test diagnostics could read uninitialized sentinels; and `external/fs` reused the name `result` in a nested scope. | **Fixed in `a99cdc0`.** The release-only parameter is explicitly consumed, test sentinels are initialized, and the nested filesystem result is named `mkdirResult`. Assertions and warning levels were not weakened. |
+| Successful Win32 removal leaked long-path conversion storage | `fs_remove()` returned immediately after `RemoveDirectoryW()` succeeded, bypassing `fs_win32_path_uninit()`. Paths longer than the stack buffer therefore leaked their heap-backed UTF-16 conversion on every successful removal. | **Fixed in `205e334`.** Success now flows through the common cleanup label. A Windows-only counted-allocator regression creates/removes a path longer than 255 characters and requires the live allocation count to return to zero; the parent leaks one allocation. The same commit initializes the standard-path `HANDLE` and removes a now-unreachable fallback that strict MSVC diagnosed. |
+| Path comparison ended with unreachable code under strict Debug MSVC (`C4702`) | `fs_path_compare()` has an unconditional `for (;;)` whose branches all return, so the trailing fallback return could never execute. | **Fixed in `06e3a06`.** The unreachable statement was removed; semantics are unchanged, and both Debug and optimized Release build with `/W4 /WX` and zero warnings. |
+| The CoreAudio lifecycle hook hid the production initializer from unused-function analysis | The test replaces the initializer call site to inject failures. The real static initializer was still compiled but had no reference in that translation unit, producing an Apple/Homebrew Clang warning; simply compiling it out exposed five dependent helpers as unused and would have reduced implementation coverage. | **Fixed in `e4658df`.** The test keeps a typed reference to the production initializer while still routing runtime calls through the hook. Exact-final Apple Clang Debug/Release and Homebrew LLVM Release now build the full deterministic suite with `-Werror` and zero warnings. |
 
 Earlier findings remain fixed by the commits listed in Git history: validated
 WAV traversal/metadata bounds, resource-manager failed-load ownership, MP3
@@ -139,19 +159,28 @@ while (!ma_atomic_load_32(&releaseData.isComplete)) {
 }
 ```
 
-The resource-manager queue follows the same commit rule. It reserves a slot
-before consuming an execution order, so a full queue cannot create a number
-that no job will ever retire:
+The resource-manager queue follows the same commit rule, but its final design
+also keeps accepted work alive when the bounded queue is saturated. A running
+record can become the next READY record under one lock, so the sole worker
+never waits for itself to create capacity:
 
 ```c
-slot = ma_job_queue_allocate_slot(queue);
-if (slot == MA_JOB_ID_NONE) {
-    return MA_OUT_OF_MEMORY;
+ma_spinlock_lock(&queuePrivate->lock);
+if (requiredState != NULL && *requiredState != expectedState) {
+    ma_spinlock_unlock(&queuePrivate->lock);
+    return MA_SUCCESS; /* retirement won; caller owns local cleanup */
 }
-queue->pJobs[index] = job;
-queue->pJobs[index].order = ma_atomic_fetch_add_32(counter, 1);
-/* publication cannot fail after this point */
+ma_job_queue_prepare_record_job(record, &nextJob, executionCounter);
+ma_job_queue_append_ready_record_locked(queuePrivate, record);
+currentJob.next = 0; /* ownership transferred to the READY record */
+ma_spinlock_unlock(&queuePrivate->lock);
 ```
+
+Last-reference retirement uses the same lock to publish `MA_UNAVAILABLE` and
+allocate the FREE order. That prevents a page continuation from receiving an
+order after FREE. Invalid codes are rejected before admission; if a dequeued
+job is corrupted later, its retained record is still retired before the error
+is returned.
 
 For CoreAudio, removal from the worker's tracked set is the quiescence point.
 It happens before public terminal state, under the mutex the worker holds
@@ -162,22 +191,21 @@ ma_device__untrack__coreaudio(device); /* waits for / excludes reroute */
 ma_device__set_state(device, ma_device_state_uninitialized);
 ```
 
-## Validation matrix through `fee518b`
+## Validation matrix through `e4658df`
 
 | Environment | Result | Scope / qualification |
 |---|---|---|
-| Linux GCC 16.2.1 Debug | **13/13 pass** | Complete ordinary registered suite. |
-| Linux GCC 16.2.1 Release and strict C89 option | **13/13 and 14/14 pass** | The C89-option matrix includes pinned Opus/Vorbis adapters; C++ tests are intentionally absent. |
-| Linux GCC Release + LTO + warnings-as-errors | **13/13 pass** | Not Windows MinGW validation. |
-| Linux Clang 22.1.8 C90 + C++23 + warnings-as-errors | **13/13 pass** | Complete ordinary registered suite. |
-| Forced C++23 implementation | **13/13 pass** | Complete ordinary registered suite with implementation compiled as C++23. |
-| Pinned Opus/Vorbis Debug and C89 option | **15/15 and 14/14 pass** | libogg 1.3.6, libopus 1.6.1, opusfile 0.12, libvorbis commit `1b75110b...`. |
-| Core ASan/UBSan | **6/6 focused pass** | WAV, WAV metadata, resource manager, MP3, EOF, and generic device rollback. |
-| Optional-codec ASan/UBSan and TSan | **2/2 + 2/2 pass** | Opus and Vorbis adapters. |
-| Core TSan | **2/2 focused pass** | Resource manager and engine EOF. |
-| Steam Audio real SDK | **pass in normal, C89-option, ASan/UBSan, and TSan** | Adjacent source build with C++17 override; no Steam Audio source edit. |
-| macOS arm64 Apple Clang 21 | **focused CoreAudio pass in Debug, C89, supported ASan/UBSan, TSan, and 100/100 stress** | Complete Debug suite was 12/14 because physical `cpp`/`deviceio` tests timed out with zero playback callbacks. Capture permission denied. LeakSanitizer unsupported. |
-| Windows x64 MSVC 19.51 / SDK 10.0.26100.0 | **15/15 pass at exact `fee518b`; lifecycle 100/100; process-loopback 100/100; UWP C/C++ objects and desktop C/C++ context links pass** | Twelve explicitly selected USB microphone cases passed ownership/duration invariants; exclusive WAVs were nonzero and shared WAVs silent. Nine synchronized loopback scenarios delivered exact frames but all captures, including whole-system control, were silent. |
+| Linux GCC 16.2.1 with pinned Opus/Vorbis | **16/16 Debug pass; 15/15 strict-C89 option pass** | libogg 1.3.6, libopus 1.6.1, opusfile 0.12, and libvorbis commit `1b75110b...`; the C89-option build intentionally omits C++ tests. |
+| Linux GCC Release + LTO + warnings-as-errors | **14/14 pass** | Exact final source; this is native Linux GCC, not Windows MinGW validation. |
+| Linux Clang 22.1.8 warnings-as-errors | **14/14 pass** | Complete registered non-optional suite at the final source. |
+| Forced C++23 implementation | **14/14 pass** | The implementation and tests compile as C++23. |
+| Linux ASan/UBSan and TSan | **focused pass** | ASan/UBSan covers resource-manager, no-resource-manager, WAV, and WAV/no-resource-manager paths; TSan covers the resource-manager scheduler. Full SteamAudio-suite TSan also reports an unrelated pre-existing `tests/deviceio/deviceio.c` race, so no universal TSan-clean claim is made. |
+| Optional-codec ASan/UBSan and TSan | **2/2 + 2/2 pass** | Opus and Vorbis adapter tests from the pinned dependency matrix. |
+| Steam Audio real SDK | **15/15 final normal suite pass; focused normal/C89-option/ASan+UBSan/TSan passes retained** | The final suite links the existing adjacent `../steam-audio/unity` binary. The authoritative clean SDK build was made earlier from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac` with a C++17 override. No Steam Audio source or user build output was edited. |
+| macOS 26.5.2 arm64, Apple Clang 21 / Homebrew LLVM 22.1.8 | **exact `e4658df`: Debug 13/13, Apple Release 13/13, LLVM Release 13/13; all full builds `-Werror`, zero warnings** | Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, deterministic CoreAudio 1/1, and resource-manager stress 100/100 pass. Arm64 size/alignment and listed offsets for six types match `75158b8`. Physical `cpp`/`deviceio` remain excluded for the documented permission/callback limitation; LeakSanitizer is unsupported. |
+| Windows 11 x64, MSVC 19.44 / SDK 10.0.26100.0 | **exact `06e3a06`: Debug 17/17 and Release 17/17; 0 warnings under `/W4 /WX`; resource-manager stress 100/100** | Release also used `/O2 /GL /LTCG`. Direct Win32 filesystem Debug/Release, standalone C/C++latest 2/2, and six-type MSVC/clang-cl ABI comparisons pass. No retries or skipped registered tests. |
+| Windows clang-cl 23.1.1 | **4/4 focused pass** | Resource manager, no-resource-manager, WAV, and Win32 filesystem compile/link/run with strict warnings. The first standalone filesystem link omitted required `shell32.lib`; the corrected command passed and the harness error is retained. |
+| Windows USB capture and process loopback | **exact `fee518b` deterministic/live campaigns pass their code invariants** | Twelve selected microphone cases did not reproduce #1152. Nine synchronized loopback scenarios delivered exact frames, but all captured WAVs—including the whole-system control—were silent, so content isolation remains unresolved. |
 
 No assertion, tolerance, or semantic test condition was weakened. Unsupported
 Apple leak detection and unavailable physical audio are recorded as limits,
@@ -207,6 +235,46 @@ not converted to passes.
   (571 files; internal manifest verified all 570 entries; 110 WAVs). Cleanup
   continuation manifest:
   `5ca812773b3a4987b3f4415db6d3dadce61bdda0407cb437ff36970abd452f06`.
+- Post-review Windows evidence was fetched after each exact commit: `75158b8`
+  transport `51d2959682e06c13a3bf4f5a1c5cd44da7b4480fa58a4194e20cec3b8b00e73f`
+  (215 files), `6681823` transport
+  `5bae9f9380f5cbaf3bf97857322f1ae6f918aa85d1333235850703dd894f839d`
+  (767 files), `a99cdc0` transport
+  `d479994ff77511d7c8e42f01151a84cf14c29d1d2dd85b1b2ac402b9617998af`
+  (739 files), and `205e334` transport
+  `65d7b40810dea3abf24d855b499f0f5928c7f0a6a7b22134d7afc7a3446326b1`
+  (608 files). Each failed strict build was retained as evidence and drove the
+  next source fix; no warning was suppressed.
+- Exact-final Windows Batch job `b3261e86fa57e276` tested `06e3a06`. Its
+  input bundle SHA-256 is
+  `3c20ebde0327a234b7e4d51bd689e975607a6ea471c9800455bfd3d28f9be951`;
+  transport manifest
+  `2f4c34eee86f16ec6d87ff0d2f42e28a97bc6c8773d89b1cb10394f8d7995e12`
+  fetched 543 files / 5,589,029 bytes. The controller independently matched
+  all 542 internal manifest rows by size and SHA-256.
+- Exact-`7dc7c8e` macOS transport manifest
+  `8a4e0859c8fcba26d6767d067d0d02ef07f894d9a5708bb7dfd666b0b405715e`
+  fetched 200 files / 1,012,769 bytes and all 198 internal evidence hashes
+  were verified. After the host returned, exact-final `e4658df` was validated
+  from input bundle SHA-256
+  `1fb3bd400d44862cb04310ebd37c7c41049061a8550542966f9e76da35160d6f`.
+  The controller fetched the preserved evidence over hardened SSH and
+  independently matched all 358 files by size and SHA-256. The scoped cleanup
+  report SHA-256 is
+  `c060861daf4fd2d9ef5aaafdf934f07802f5465dbb5196e25d0f1dd9e2c06e75`:
+  18 exact roots were renamed/deleted, six never-created failed-attempt roots
+  were already absent, zero failed, and 2,964,736,633 logical bytes were
+  recovered. Incoming bundles, evidence, repositories, and all non-allowlisted
+  paths were preserved.
+- Windows cleanup Batch job `2bd73fb5b57c7d5d` verified the exact source HEAD
+  and non-reparse ownership of all five post-review attempt roots, renamed
+  each to a unique same-parent quarantine, deleted it, and verified all five
+  original and all five quarantine paths absent. Its evidence transport
+  manifest is
+  `cb2c59d47e2091f9915501cb03538da64644be514ef0adf6909d030c9a043c0c`
+  (4 files / 61,994 bytes, all entries independently matched). Incoming
+  bundles, shared caches, server artifacts, and unrelated attempts were
+  preserved.
 - Final Windows live/native transport manifest:
   `b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`
   (392 files; internal manifest verified 391 entries).
@@ -226,7 +294,9 @@ After retrieval and hash verification, exact attempt-owned roots were removed:
 717,677,709 logical bytes from the exact-`fee518b` Windows attempt,
 864,251,904 bytes from the prior final Windows attempts, 723,202,048 bytes from
 the earlier WASAPI build/staging roots, and 833,662,976 bytes from the final
-macOS attempt. Clean source worktrees and server artifact roots were preserved.
+macOS attempt. The five later Windows roots through `06e3a06` were also removed
+by the allowlisted cleanup above. Clean source worktrees, incoming bundles,
+shared caches, and server artifact roots were preserved.
 
 No `timer_wheels` source was modified. Future coroutine integration must keep
 logical cancellation separate from physical callback retirement, post
@@ -236,8 +306,8 @@ coroutine handle.
 
 ## Remaining release gate
 
-The implementation and native matrices above are complete. The last gate is
-the owner-requested Astra-max review of the entire current series and this
-reconciled evidence. Any evidence-backed finding from that review must be
-fixed and revalidated before handoff; the unresolved table's hardware,
-acoustic, owner-scope, and external-dependency limits must remain explicit.
+The implementation and native matrices are complete. The final gate is the
+owner-requested Astra-max review of the entire current series and this
+reconciled evidence. Any evidence-backed finding from that review must be fixed
+and revalidated before handoff. The hardware, acoustic, owner-scope, and
+external-dependency limits above remain explicit.

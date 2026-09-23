@@ -1,10 +1,12 @@
 # Implementation prompt: miniaudio backend hardening
 
-> **Execution status (2026-09-21):** implementation and exact native Windows
-> validation have reached `fee518b`. `UNRESOLVED.md` is the authoritative
-> current disposition. In particular, the owner explicitly rejected Windows
-> GCC/MinGW deployment; do not provision or run MinGW unless that decision is
-> later reversed.
+> **Execution status (2026-09-23):** implementation and available native
+> validation have reached `e4658df`. Exact-final Linux and deterministic macOS
+> gates pass; Windows production code is exact-tested through `06e3a06`, after
+> which only the macOS-only CoreAudio test translation unit changed.
+> `UNRESOLVED.md` is the authoritative current disposition. In particular, the
+> owner explicitly rejected Windows GCC/MinGW deployment; do not provision or
+> run MinGW unless that decision is later reversed.
 
 You are the lead engineer implementing and validating the miniaudio hardening
 work described below. This prompt authorizes implementation, local testing,
@@ -435,3 +437,25 @@ Persist until all locally confirmed fixes are implemented and validated and all
 native jobs have reached terminal state with evidence fetched. If Windows or
 macOS access is genuinely unavailable, finish every independent local task and
 report the exact native blocker; do not claim the corresponding behavior fixed.
+
+## Completed execution record
+
+The implementation sequence is complete through `e4658df`. The late
+saturation review added `7dc7c8e` (retained resource-manager admission records)
+and `75158b8` (serialized continuation/cancellation/retirement). Strict native
+builds then drove `6681823`, `a99cdc0`, `205e334`, and `06e3a06`; those commits
+remove ambiguous or unreachable code and fix a real Win32 long-path cleanup
+leak without changing public layouts. Exact-final macOS warnings-as-errors
+coverage exposed one test-hook-only unused-function warning; `e4658df` keeps a
+typed reference to the production CoreAudio initializer while preserving the
+runtime injection seam.
+
+Final available gates are recorded in [UNRESOLVED.md](UNRESOLVED.md): Linux
+GCC/Clang, pinned optional codecs, and the adjacent Steam Audio integration
+pass; Windows `06e3a06` passes strict Debug/Release 17/17, focused clang-cl,
+100/100 stress, and ABI comparison; macOS exact `e4658df` passes Apple Clang
+Debug/Release and Homebrew LLVM Release 13/13 with `-Werror`, focused
+C89/sanitizers, CoreAudio lifecycle, 100/100 stress, and field-layout
+comparison. Physical/acoustic reports remain unresolved only where a valid
+signal or permitted endpoint was unavailable. Windows MinGW/GCC remains an
+explicit owner rejection, not a pass.

@@ -142,16 +142,37 @@ present in this checkout, as the fresh ASan reproduction demonstrates.
 ## Implemented retirement result
 
 The immediate failed-load ownership fix and later publish-before-retire fix are
-landed. Final review then found two related bounded-queue defects: an execution
-order was reserved before a job had a slot, and a last-reference FREE job could
-be lost after public ownership was already surrendered. `fee518b` reserves the
-queue slot first and allocates the order only when publication can no longer
-fail. Retirement posts keep retryable ownership; manual-pump mode executes one
-queued job to make space, while threaded mode yields to its workers.
+landed. The first bounded-queue repair in `fee518b` stopped consuming execution
+orders before publication and prevented a last-reference FREE job from being
+silently discarded. A later saturation review showed that retrying publication
+was still insufficient: when the only worker itself encountered a full queue,
+waiting for capacity deadlocked because that same worker was the only consumer.
+An accepted continuation could also lose its only completion path after the
+current admission was retired.
 
-Deterministic regressions cover initial and continuation page-post failure,
-`UINT32_MAX` order wrap, saturated last-reference unregister, saturated buffer
-uninit, and the exact post-publication acknowledgment needed before a single
-manual pump. Every path requires balanced decoder/VFS/allocation counts and
-zero live node/supply ownership. ASan/UBSan, TSan, C89/C++23, and the exact
-native Windows suite pass.
+`7dc7c8e` replaces that retry model for resource-manager queues with private,
+stable admission records allocated in the queue's initialization heap. A
+dequeued record remains owned while RUNNING and can transition directly back
+to READY for a deferral or continuation. External last-reference retirement
+uses a caller-owned retained record. Shutdown is queue state rather than an
+ordinary slot-consuming job, so it cannot displace accepted cleanup. These
+changes do not add fields to any public structure.
+
+The follow-up review found one more ordering race: a page continuation could
+check `MA_BUSY`, lose to last-reference retirement, and receive an execution
+order after the FREE job. `75158b8` moves the required-state check, order
+allocation, `MA_UNAVAILABLE` publication, and READY publication under the same
+queue lock. A continuation that loses that serialization frees its decoder
+locally. The same commit initializes a fresh QUIT output before returning
+shutdown cancellation, rejects undispatchable jobs before admission, releases
+a retained record if a dequeued code is later corrupted, and excludes
+resource-manager-only helpers from `MA_NO_RESOURCE_MANAGER` builds.
+
+Deterministic regressions cover initial and continuation post failure,
+`UINT32_MAX` order wrap, saturated last-reference unregister/buffer teardown,
+sole-worker nested cleanup, saturated deferral, direct and worker shutdown,
+continuation-versus-retirement barriers, invalid dispatch, and strict
+no-resource-manager compilation. Every path requires balanced
+decoder/VFS/allocation/fence counts and zero live node/supply/admission
+ownership. Focused ASan/UBSan and TSan pass; Linux C89/C++23 and exact native
+Windows/macOS matrices pass through the final implementation.
