@@ -10,7 +10,8 @@ channel count of this node is always stereo.
 Steam Audio requires fixed sized processing, the size of which must be specified at initialization
 time of the IPLBinauralEffect and IPLHRTF objects. The node below stages input into fixed Steam
 Audio blocks, so miniaudio callbacks may use any frame count. This adds one Steam Audio block of
-latency and lets the node safely flush a short final block and the effect tail.
+latency. Missing input is staged as silence; signal end-of-input explicitly to flush a short
+final block and the effect tail.
 */
 #include "../miniaudio.c"
 
@@ -126,6 +127,7 @@ typedef struct
     ma_uint32 outputFrameOffset;
     ma_uint32 outputFrameCount;
     ma_bool32 tailComplete;
+    volatile ma_uint32 inputEnded;
     float* ppBuffersIn[2];      /* Each buffer is an offset of _pHeap. */
     float* ppBuffersOut[2];     /* Each buffer is an offset of _pHeap. */
     void* _pHeap;
@@ -134,6 +136,10 @@ typedef struct
 MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, const ma_steamaudio_binaural_node_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_steamaudio_binaural_node* pBinauralNode);
 MA_API void ma_steamaudio_binaural_node_uninit(ma_steamaudio_binaural_node* pBinauralNode, const ma_allocation_callbacks* pAllocationCallbacks);
 MA_API ma_result ma_steamaudio_binaural_node_set_direction(ma_steamaudio_binaural_node* pBinauralNode, float x, float y, float z);
+/* Call after the upstream source stops. A later NULL input then drains the final block and tail. */
+MA_API ma_result ma_steamaudio_binaural_node_end_input(ma_steamaudio_binaural_node* pBinauralNode);
+/* For a seek/restart, detach the output bus and quiesce readers before resetting and reattaching. */
+MA_API ma_result ma_steamaudio_binaural_node_reset(ma_steamaudio_binaural_node* pBinauralNode);
 
 
 MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_init(ma_uint32 channelsIn, IPLAudioSettings iplAudioSettings, IPLContext iplContext, IPLHRTF iplHRTF)
@@ -253,6 +259,7 @@ static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const
     ma_uint32 inputFramesConsumed = 0;
     ma_uint32 outputFramesProduced = 0;
     ma_uint32 frameSize = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+    ma_bool32 inputEnded = ma_atomic_load_32(&pBinauralNode->inputEnded);
 
     while (outputFramesProduced < outputFrameCapacity) {
         ma_uint32 framesThisIteration = outputFrameCapacity - outputFramesProduced;
@@ -261,7 +268,7 @@ static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const
             ma_steamaudio_binaural_node_process_block(pBinauralNode);
         }
 
-        if (pFramesIn == NULL && inputFramesConsumed == inputFrameCount && pBinauralNode->outputFrameCount == 0) {
+        if (pFramesIn == NULL && inputEnded && pBinauralNode->outputFrameCount == 0) {
             if (pBinauralNode->inputFrameCount > 0) {
                 ma_steamaudio_binaural_node_flush_partial_input(pBinauralNode);
                 continue;
@@ -291,12 +298,13 @@ static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const
             if (framesThisIteration > inputFrameSpace) {
                 framesThisIteration = inputFrameSpace;
             }
-        } else if (pBinauralNode->outputFrameCount == 0) {
-            if (pFramesOut != NULL) {
-                ma_silence_pcm_frames(ma_offset_pcm_frames_ptr_f32(pFramesOut, outputFramesProduced, 2), outputFrameCapacity - outputFramesProduced, ma_format_f32, 2);
+        } else if (pFramesIn == NULL && inputEnded) {
+            /* An explicit EOF drains queued output without extending the input stream. */
+        } else {
+            ma_uint32 inputFrameSpace = frameSize - pBinauralNode->inputFrameCount;
+            if (framesThisIteration > inputFrameSpace) {
+                framesThisIteration = inputFrameSpace;
             }
-            outputFramesProduced = outputFrameCapacity;
-            break;
         }
 
         if (framesThisIteration == 0) {
@@ -306,6 +314,14 @@ static void ma_steamaudio_binaural_node_process_pcm_frames(ma_node* pNode, const
         if (inputFramesConsumed < inputFrameCount) {
             ma_steamaudio_binaural_node_copy_input(pBinauralNode, pFramesIn, inputFramesConsumed, framesThisIteration);
             inputFramesConsumed += framesThisIteration;
+        } else if (!(pFramesIn == NULL && inputEnded)) {
+            ma_uint32 iChannel;
+            ma_uint32 channelsIn = ma_node_get_input_channels(&pBinauralNode->baseNode, 0);
+            for (iChannel = 0; iChannel < channelsIn; iChannel += 1) {
+                ma_silence_pcm_frames(pBinauralNode->ppBuffersIn[iChannel] + pBinauralNode->inputFrameCount,
+                    framesThisIteration, ma_format_f32, 1);
+            }
+            pBinauralNode->inputFrameCount += framesThisIteration;
         }
 
         if (pBinauralNode->outputFrameCount > 0) {
@@ -471,6 +487,34 @@ MA_API ma_result ma_steamaudio_binaural_node_set_direction(ma_steamaudio_binaura
         ma_steamaudio_direction_state_publish(&pBinauralNode->directionState, direction);
     }
 
+    return MA_SUCCESS;
+}
+
+MA_API ma_result ma_steamaudio_binaural_node_end_input(ma_steamaudio_binaural_node* pBinauralNode)
+{
+    if (pBinauralNode == NULL) {
+        return MA_INVALID_ARGS;
+    }
+
+    ma_atomic_store_32(&pBinauralNode->inputEnded, 1);
+    return MA_SUCCESS;
+}
+
+MA_API ma_result ma_steamaudio_binaural_node_reset(ma_steamaudio_binaural_node* pBinauralNode)
+{
+    if (pBinauralNode == NULL) {
+        return MA_INVALID_ARGS;
+    }
+    if (ma_node_output_bus_is_attached(&pBinauralNode->baseNode.pOutputBuses[0])) {
+        return MA_INVALID_OPERATION;
+    }
+
+    iplBinauralEffectReset(pBinauralNode->iplEffect);
+    pBinauralNode->inputFrameCount = 0;
+    pBinauralNode->outputFrameOffset = 0;
+    pBinauralNode->outputFrameCount = 0;
+    pBinauralNode->tailComplete = MA_TRUE;
+    ma_atomic_store_32(&pBinauralNode->inputEnded, 0);
     return MA_SUCCESS;
 }
 

@@ -506,6 +506,10 @@ static int hardening_test_real_sdk(void)
     failed += hardening_guarded_buffer_check(&output, "mono partial final block");
     failed += hardening_expect_direction(&monoNode, 0, 0, 1, "mono partial final block");
 
+    if (ma_steamaudio_binaural_node_end_input(&monoNode) != MA_SUCCESS) {
+        printf("mono end-of-input signal failed\n");
+        failed = 1;
+    }
     remainingTailFrames = monoNode.outputFrameCount;
     hardening_guarded_buffer_init(&output);
     failed += hardening_process(&monoNode, NULL, 0, output.frames, remainingTailFrames, "mono pending output drain");
