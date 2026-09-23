@@ -1,0 +1,63 @@
+#1129 Heap use-after-free in `ma_sound_init_from_file` in error-handling branch | closed | completed | 2026-07-12T22:41:02Z
+https://github.com/mackron/miniaudio/issues/1129
+I hit a UAF error with Address Sanitizer and I checked on all 3 branches. On `dev-0.12`, line `80304` onwards:
+
+```c++
+/* If we failed to initialize the data buffer we need to free it. */
+if (result != MA_SUCCESS) {
+    if (nodeAlreadyExists == MA_FALSE) {
+        ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
+        ma_free(pDataBufferNode, &pResourceManager->config.allocationCallbacks);
+    }
+}
+
+/*
+The init notification needs to be uninitialized. This will be used if the node does not already
+exist, and we've specified ASYNC | WAIT_INIT.
+*/
+if (nodeAlreadyExists == MA_FALSE && pDataBufferNode->isDataOwnedByResourceManager && (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC) != 0) {
+    if ((flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_WAIT_INIT) != 0) {
+        ma_resource_manager_inline_notification_uninit(&initNotification);
+    }
+}
+```
+
+By stepping through a debugger, `ma_free` is called, de-allocating `pDataBufferNode`, then `pDataBufferNode->isDataOwnedByResourceManager` is accessed, tripping ASAN.
+
+```c++
+==22054==ERROR: AddressSanitizer: heap-use-after-free on address 0x734592739a54 at pc 0x5f3fd45937b2 bp 0x7fffd2f1fea0 sp 0x7fffd2f1fe90
+READ of size 4 at 0x734592739a54 thread T0
+    #0 0x5f3fd45937b1 in ma_resource_manager_data_buffer_node_acquire /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80315
+    #1 0x5f3fd4594d30 in ma_resource_manager_data_buffer_init_ex_internal /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80575
+    #2 0x5f3fd4595d97 in ma_resource_manager_data_buffer_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80692
+    #3 0x5f3fd45a0e2b in ma_resource_manager_data_source_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:81996
+    #4 0x5f3fd45d6ade in ma_sound_init_from_file_internal /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:87933
+    #5 0x5f3fd45d8cc3 in ma_sound_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:88084
+    #6 0x5f3fd45d766c in ma_sound_init_from_file /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:87974
+    #7 0x5f3fd37c7461 in EcSound::Reload() /home/**/Documents/**/src/impl/component/Sound.cpp:240
+
+*****************************
+
+0x734592739a54 is located 52 bytes inside of 144-byte region [0x734592739a20,0x734592739ab0)
+freed by thread T0 here:
+    #0 0x767594f2114b in free ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:51
+    #1 0x5f3fd33321f7 in Memory::Free(void*) /home/**/Documents/**/src/impl/Memory.cpp:193
+    #2 0x5f3fd37c07eb in operator() /home/**/Documents/**/src/impl/component/Sound.cpp:191
+    #3 0x5f3fd37c0817 in _FUN /home/**/Documents/**/src/impl/component/Sound.cpp:192
+    #4 0x5f3fd4540f4d in ma_free /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:69075
+    #5 0x5f3fd45936fb in ma_resource_manager_data_buffer_node_acquire /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80307
+    #6 0x5f3fd4594d30 in ma_resource_manager_data_buffer_init_ex_internal /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80575
+    #7 0x5f3fd4595d97 in ma_resource_manager_data_buffer_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:80692
+    #8 0x5f3fd45a0e2b in ma_resource_manager_data_source_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:81996
+    #9 0x5f3fd45d6ade in ma_sound_init_from_file_internal /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:87933
+    #10 0x5f3fd45d8cc3 in ma_sound_init_ex /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:88084
+    #11 0x5f3fd45d766c in ma_sound_init_from_file /home/**/Documents/**/Vendor/miniaudio/miniaudio.h:87974
+    #12 0x5f3fd37c7461 in EcSound::Reload() /home/**/Documents/**/src/impl/component/Sound.cpp:240
+```
+Compiling on G++.
+
+COMMENT mackron 2026-05-23T08:08:28Z https://github.com/mackron/miniaudio/issues/1129#issuecomment-4524733524
+Thanks. Good catch. Will get this addressed when I get a chance to get back onto miniaudio. Will report back.
+
+COMMENT mackron 2026-07-12T22:41:02Z https://github.com/mackron/miniaudio/issues/1129#issuecomment-4953061072
+I pushed a potential fix for this to both the dev and dev-0.12 branches. Feel free to reopen this if this is still not fixed. Thanks for the report.

@@ -231,20 +231,22 @@ not converted to passes.
 
 ## Audio evidence available for manual inspection
 
-- Exact-`fee518b` #1152 microphone captures are under
-  `/tmp/miniaudio-native-win-fee518b-evidence/microphone/`. Start with
+- Exact-`fee518b` #1152 microphone captures are in
+  [`evidence/native-windows-fee518b-primary.tar.zst`](evidence/native-windows-fee518b-primary.tar.zst)
+  under `miniaudio-native-win-fee518b-evidence/microphone/`. Start with
   `exclusive-reported-10ms.wav` (nonzero) and
   `shared-reported-10ms.wav` (silent); all 12 WAVs and per-case metrics remain
   available.
-- Exact-`fee518b` #484 captures and producer references are under
-  `/tmp/miniaudio-native-win-fee518b-evidence/loopback/`. Compare
+- Exact-`fee518b` #484 captures and producer references are in the same archive
+  under `miniaudio-native-win-fee518b-evidence/loopback/`. Compare
   `control.wav.role0.reference.wav` (nonzero producer data) with
   `control.wav` (silent capture), then the equivalent `include*`, `exclude*`,
   and `child*` files. Manual listening can confirm file content, but cannot
   establish isolation until the whole-system capture control is nonzero.
 - Earlier #1152 and #484 evidence remains in
-  `/tmp/miniaudio-1152-20260921-1-evidence` and
-  `/tmp/miniaudio-0484-2d76179-evidence`.
+  [`evidence/windows-1152-prior.tar.zst`](evidence/windows-1152-prior.tar.zst)
+  and
+  [`evidence/windows-0484-prior.tar.zst`](evidence/windows-0484-prior.tar.zst).
 
 ## Evidence and lifecycle status
 

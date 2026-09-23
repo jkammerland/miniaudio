@@ -14,7 +14,7 @@ request, so no multi-gigabyte allocation was performed. The reproducer exiting
 normally means the dangerous request was intercepted; it is not a passing
 library result.
 
-Evidence: `/tmp/miniaudio-audit-20260920/repro-1138.log`.
+Evidence: [repro-1138.log](evidence/audit/repro-1138.log).
 
 ## Suspect code
 

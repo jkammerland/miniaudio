@@ -1,0 +1,25 @@
+#1155 uaf bug found | open | None | 2026-09-15T07:13:01Z
+https://github.com/mackron/miniaudio/issues/1155
+**DELETE ALL OF THIS TEXT BEFORE SUBMITTING**
+
+If you think you've found a bug, it will be helpful to compile with `#define MA_DEBUG_OUTPUT`. If you are having issues with playback, please run the simple_payback_sine example and report whether or not it's consistent with what's happening in your program.
+
+Title: Security: Heap Use-After-Free (CWE-416) in extras/decoders/libopus/miniaudio_libopus.c
+
+## Summary
+A heap use-after-free vulnerability exists in the optional libopus decoding backend of miniaudio.
+When processing specially crafted Opus audio input, a race condition can trigger invalid memory access.
+Impact: Application crash (denial of service), possible memory corruption on vulnerable builds.
+
+Affected version: [INSERT YOUR TESTED VERSION]
+Component: extras/decoders/libopus/miniaudio_libopus.c
+
+## Reproduction
+Environment: Ubuntu 22.04, clang-14, AddressSanitizer
+Build command:
+clang -I/usr/include/opus -fsanitize=address -g -O1 uaf.c extras/decoders/libopus/miniaudio_libopus.c -o uaf -lopusfile -lopus -lpthread
+
+ASAN summary: AddressSanitizer: heap-use-after-free READ of size 168
+
+I have submitted a CVE reservation request via MITRE's Non-CNA Report Request portal.
+If you want to know more details, obtain the full PoC and crash artifacts, please contact me at lloyd.jie@qq.com.

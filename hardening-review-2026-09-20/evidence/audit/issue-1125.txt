@@ -1,0 +1,21 @@
+#1125 Short sounds are cut off at the end | closed | completed | 2026-07-12T21:57:59Z
+https://github.com/mackron/miniaudio/issues/1125
+Something broke between 0.11.23 and 0.11.24 and short sounds no longer play correctly in my application. They play correctly with `examples/simple_playback.c`. It may be possible I'm doing something wrong with API but it worked as expected before.
+
+[Minimal example](https://gist.github.com/skullernet/af598a0e271a6e02db9578a36a454837)
+[Debug output](https://gist.github.com/skullernet/0b18192377619568aaaa247ea679b853)
+
+Notice how sound plays correctly with 0.11.23 but it is audibly cut off at the end with 0.11.24.
+
+
+COMMENT skullernet 2026-05-15T21:27:47Z https://github.com/mackron/miniaudio/issues/1125#issuecomment-4463780631
+It seems to be related to sound length / device period size ratio. It may also be possible that all sounds are effected, it's just more noticeable with shorter sounds.
+
+E.g. sound length in example above is 3036 frames. If I set `periodSizeInFrames` to 3036 in `ma_engine_config`, sound is played fully. If I set  `periodSizeInFrames` to 3037 sound can't be heard at all.
+
+This also happens with 0.11.25 and -dev branch.
+
+COMMENT mackron 2026-07-12T21:49:03Z https://github.com/mackron/miniaudio/issues/1125#issuecomment-4952902466
+Sorry for taking so long to get to this one. Good catch! This should be fixed in both the dev and dev-0.12 branches. Will need to get a new release out soon for this fix.
+
+Thanks a lot for taking the time to set up that repro.

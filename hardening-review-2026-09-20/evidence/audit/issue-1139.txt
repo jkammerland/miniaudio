@@ -1,0 +1,28 @@
+#1139 Use-after-free in ma_resource_manager_data_buffer_node_acquire() on failed load (v0.11.25) | closed | completed | 2026-07-16T02:27:59Z
+https://github.com/mackron/miniaudio/issues/1139
+**Version:** v0.11.25 (2026-03-04)
+**Bug:** In `ma_resource_manager_data_buffer_node_acquire()`, when acquiring a brand-new
+node (`nodeAlreadyExists == MA_FALSE`) fails (`result != MA_SUCCESS`), the code frees the
+node but then unconditionally reads a field from the same now-freed pointer:
+    done:
+        if (result != MA_SUCCESS) {
+            if (nodeAlreadyExists == MA_FALSE) {
+                ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
+                ma_free(pDataBufferNode, &pResourceManager->config.allocationCallbacks);
+                // pDataBufferNode is now dangling
+            }
+        }
+        if (nodeAlreadyExists == MA_FALSE && pDataBufferNode->isDataOwnedByResourceManager && ...) {
+            // <-- use-after-free read here
+        }
+**Repro:** Call `ma_sound_init_from_file()` (or `ma_engine_play_sound()`) with a path to a
+file that does not exist. The node allocation/init fails, gets freed, and the very next
+line reads a field off the freed pointer. Under a debug heap / Application Verifier / ASan
+this crashes with an access violation / heap-use-after-free. Without such tooling it may
+silently read garbage instead.
+**Suggested fix:** set `pDataBufferNode = NULL` right after the `ma_free()` call, and guard
+the following check with `pDataBufferNode != NULL`.
+I patched this locally and it resolves the crash for us.
+
+COMMENT mackron 2026-07-16T02:27:58Z https://github.com/mackron/miniaudio/issues/1139#issuecomment-4987555412
+Duplicate of https://github.com/mackron/miniaudio/issues/1129. Fixed in the dev branch.

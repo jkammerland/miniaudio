@@ -1,0 +1,84 @@
+#1153 Glitching / popping spatialized audio when spinning listener | open | None | 2026-09-03T15:16:34Z
+https://github.com/mackron/miniaudio/issues/1153
+Hi,
+
+When playing spatialized sound effects and rotating the camera (listener) I end up getting some crackling / popping / glitching effects.
+
+It's much more noticeable when using headphones.
+
+Here is a video showing the issue. Notice that when I start shaking the camera around there is some audible glitching and popping in the knocking sound effect that is being played.
+https://github.com/user-attachments/assets/c4f05cdf-3dbc-449b-baa8-1baec43a0c16
+
+I am using miniaudio-0.11.25. 
+
+The compiler toolchain is MSVC 2022. 
+PC is running Microsoft Windows 10 Home - 10.0.19045 Build 19045.
+
+I have tried the following without success.
+ - Using MA_SOUND_FLAG_NO_PITCH
+ - Disabling doppler effect using ma_sound_set_doppler_factor(&sound, 0.0f);
+ - Changing the config.gainSmoothTimeInMilliseconds = 100, (this does have some limited success, but does not entirely remove the glitching)
+ - Smoothing out the listener direction before passing it into ma_engine_listener_set_direction
+ - Using v0.11.22 - 2025-02-24
+ - Using the dev branch (commit #dc3b628)
+ - Using both mono and stereo .wav files (sample rate 48000)
+ - Using .ogg vorbis files
+
+I update the listener by just calling ma_engine_listener_set_position + ma_engine_listener_set_direction once per frame on the main thread at 60Hz.
+
+I am unsure if I am doing something wrong in code, or have a bad asset or have found an actual bug. 
+
+I have made a minimal repro case here, which should just load up miniaudio, play a .wav file and rotate the listener on the spot to showcase the issue.
+[Miniaudio_GlitchPop_ReproCase.zip](https://github.com/user-attachments/files/31795761/Miniaudio_GlitchPop_ReproCase.zip)
+
+Let me know if there is any other useful information I can provide. 
+
+Here are the ma debug logs from the repro case if this is a device issue, in-case they are valuable. Although I have tested the repro case on a different machine and still hear the glitching issue.
+DEBUG: Loading library: user32.dll
+DEBUG: Loading symbol: GetForegroundWindow
+DEBUG: Loading symbol: GetDesktopWindow
+DEBUG: Loading library: advapi32.dll
+DEBUG: Loading symbol: RegOpenKeyExA
+DEBUG: Loading symbol: RegCloseKey
+DEBUG: Loading symbol: RegQueryValueExA
+DEBUG: Loading library: ole32.dll
+DEBUG: Loading symbol: CoInitialize
+DEBUG: Loading symbol: CoInitializeEx
+DEBUG: Loading symbol: CoUninitialize
+DEBUG: Loading symbol: CoCreateInstance
+DEBUG: Loading symbol: CoTaskMemFree
+DEBUG: Loading symbol: PropVariantClear
+DEBUG: Loading symbol: StringFromGUID2
+DEBUG: Attempting to initialize WASAPI backend...
+DEBUG: Loading library: kernel32.dll
+DEBUG: Loading symbol: VerifyVersionInfoW
+DEBUG: Loading symbol: VerSetConditionMask
+DEBUG: Loading library: avrt.dll
+DEBUG: Loading symbol: AvSetMmThreadCharacteristicsA
+DEBUG: Loading symbol: AvRevertMmThreadCharacteristics
+DEBUG: System Architecture:
+DEBUG:   Endian: LE
+DEBUG:   SSE2:   YES
+DEBUG:   AVX2:   YES
+DEBUG:   NEON:   NO
+DEBUG: [WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=480)
+DEBUG:     defaultPeriodInFrames=480
+DEBUG:     fundamentalPeriodInFrames=480
+DEBUG:     minPeriodInFrames=480
+DEBUG:     maxPeriodInFrames=480
+DEBUG: [WASAPI] Using IAudioClient3
+DEBUG:     periodSizeInFramesOut=480
+INFO: [WASAPI]
+INFO:   Speakers (Realtek(R) Audio) (Playback)
+INFO:     Format:      32-bit IEEE Floating Point -> 32-bit IEEE Floating Point
+INFO:     Channels:    2 -> 2
+INFO:     Sample Rate: 48000 -> 48000
+INFO:     Buffer Size: 480*3 (1440)
+INFO:     Conversion:
+INFO:       Pre Format Conversion:  NO
+INFO:       Post Format Conversion: NO
+INFO:       Channel Routing:        NO
+INFO:       Resampling:             NO
+INFO:       Passthrough:            YES
+INFO:       Channel Map In:         {CHANNEL_FRONT_LEFT CHANNEL_FRONT_RIGHT}
+INFO:       Channel Map Out:        {CHANNEL_FRONT_LEFT CHANNEL_FRONT_RIGHT},

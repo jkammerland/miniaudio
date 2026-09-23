@@ -1,0 +1,15 @@
+Test project /tmp/miniaudio-audit-20260920/build
+    Start 1: miniaudio_cpp
+1/5 Test #1: miniaudio_cpp ....................   Passed    5.01 sec
+    Start 2: miniaudio_deviceio
+2/5 Test #2: miniaudio_deviceio ...............   Passed    4.99 sec
+    Start 3: miniaudio_conversion
+3/5 Test #3: miniaudio_conversion .............   Passed    0.01 sec
+    Start 4: miniaudio_filtering
+4/5 Test #4: miniaudio_filtering ..............   Passed    2.17 sec
+    Start 5: miniaudio_generation
+5/5 Test #5: miniaudio_generation .............   Passed    0.80 sec
+
+100% tests passed out of 5
+
+Total Test time (real) =  12.99 sec

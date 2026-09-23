@@ -1,0 +1,254 @@
+#1149 Deadlock in WASAPI notification callback | open | None | 2026-08-21T07:10:40Z
+https://github.com/mackron/miniaudio/issues/1149
+There's a deadlock in WASAPI notification callback when rerouting to a device that has an explicit owner.
+
+Found on `master` branch (`0.11.25`), but the relevant code path seems to be unchanged in `dev` and `dev-0.12`.
+
+100% reproduceable, with `simple_playback_sine` as well.
+
+The deadlock is verified by a call stack trace showing that the blocking `IAudioClient::Initialize` call is executing directly on an OS-managed thread pool worker `ntdll.dll`.
+
+Documentation for [IMMNotificationClient interface](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nn-mmdeviceapi-immnotificationclient) states:
+
+> In implementing the IMMNotificationClient interface, the client should observe these rules to avoid deadlocks and undefined behavior:
+> - **The methods of the interface must be nonblocking**. The client should never wait on a synchronization object during an event callback.
+> - To avoid dead locks, the client should never call [IMMDeviceEnumerator::RegisterEndpointNotificationCallback](https://learn.microsoft.com/en-us/windows/desktop/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-registerendpointnotificationcallback) or [IMMDeviceEnumerator::UnregisterEndpointNotificationCallback](https://learn.microsoft.com/en-us/windows/desktop/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-unregisterendpointnotificationcallback) in its implementation of IMMNotificationClient methods.
+> - The client should never release the final reference on an MMDevice API object during an event callback.
+
+I suspect `IAudioClient::Initialize` inside the notification callback waits for Audio Service, while Audio Service waits for the notification callback to return and we get a deadlock.
+
+Here's the callstack (not from sine playback example):
+```
+ma_IAudioClient_Initialize(ma_IAudioClient * pThis, MA_AUDCLNT_SHAREMODE shareMode, unsigned long streamFlags, __int64 bufferDuration, __int64 periodicity, const MA_WAVEFORMATEX * pFormat, const _GUID * pAudioSessionGuid) Line 22059
+	at miniaudio.h(22059)
+ma_device_init_internal__wasapi(ma_context * pContext, ma_device_type deviceType, const ma_device_id * pDeviceID, ma_device_init_internal_data__wasapi * pData) Line 23985
+	at miniaudio.h(23985)
+ma_device_reinit__wasapi(ma_device * pDevice, ma_device_type deviceType) Line 24178
+	at miniaudio.h(24178)
+ma_device_reroute__wasapi(ma_device * pDevice, ma_device_type deviceType) Line 24524
+	at miniaudio.h(24524)
+ma_IMMNotificationClient_OnDefaultDeviceChanged(ma_IMMNotificationClient * pThis, ma_EDataFlow dataFlow, ma_ERole role, const wchar_t * pDefaultDeviceID) Line 22541
+	at miniaudio.h(22541)
+```
+
+### Sine playback example test
+
+#### Steps to reproduce:
+1. Run sine playback example
+2. In Windows mixer make sure it's routed to a spare device (doesn't matter which one)
+3. Run another application using WASAPI that can take device in exclusive mode
+4. In Windows mixer route sure the second application is using device that allows exclusive mode
+5. In Windows mixer reroute the sine playback example to the same device the second app is currently using in exclusive mode.
+6. Deadlock☠️
+
+I'm using [Voicemeter](https://vb-audio.com/Voicemeeter/) as the "second app", which connects in exclusive mode to output device if using WDM, or shared mode if using MME.
+
+#### Output log
+
+Here's the output log from sine playback example that hit the deadlock: with `/DMA_DEBUG_OUTPUT`, the interesting part is near the end:
+```
+PS D:\software dev\third party\miniaudio\examples\build\bin> ./simple_playback_sine.exe
+DEBUG: Loading library: user32.dll
+DEBUG: Loading symbol: GetForegroundWindow
+DEBUG: Loading symbol: GetDesktopWindow
+DEBUG: Loading library: advapi32.dll
+DEBUG: Loading symbol: RegOpenKeyExA
+DEBUG: Loading symbol: RegCloseKey
+DEBUG: Loading symbol: RegQueryValueExA
+DEBUG: Loading library: ole32.dll
+DEBUG: Loading symbol: CoInitialize
+DEBUG: Loading symbol: CoInitializeEx
+DEBUG: Loading symbol: CoUninitialize
+DEBUG: Loading symbol: CoCreateInstance
+DEBUG: Loading symbol: CoTaskMemFree
+DEBUG: Loading symbol: PropVariantClear
+DEBUG: Loading symbol: StringFromGUID2
+DEBUG: Attempting to initialize WASAPI backend...
+DEBUG: Loading library: kernel32.dll
+DEBUG: Loading symbol: VerifyVersionInfoW
+DEBUG: Loading symbol: VerSetConditionMask
+DEBUG: Loading library: avrt.dll
+DEBUG: Loading symbol: AvSetMmThreadCharacteristicsA
+DEBUG: Loading symbol: AvRevertMmThreadCharacteristics
+DEBUG: System Architecture:
+DEBUG:   Endian: LE
+DEBUG:   SSE2:   YES
+DEBUG:   AVX2:   YES
+DEBUG:   NEON:   NO
+DEBUG: [WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=480)
+DEBUG:     defaultPeriodInFrames=480
+DEBUG:     fundamentalPeriodInFrames=1
+DEBUG:     minPeriodInFrames=128
+DEBUG:     maxPeriodInFrames=480
+DEBUG: [WASAPI] Using IAudioClient3
+DEBUG:     periodSizeInFramesOut=480
+INFO: [WASAPI]
+INFO:   Voicemeeter In 7.1 (VB-Audio Voicemeeter VAIO) (Playback)
+INFO:     Format:      32-bit IEEE Floating Point -> 32-bit IEEE Floating Point
+INFO:     Channels:    2 -> 8
+INFO:     Sample Rate: 48000 -> 48000
+INFO:     Buffer Size: 480*3 (1440)
+INFO:     Conversion:
+INFO:       Pre Format Conversion:  NO
+INFO:       Post Format Conversion: NO
+INFO:       Channel Routing:        YES
+INFO:       Resampling:             NO
+INFO:       Passthrough:            NO
+INFO:       Channel Map In:         {CHANNEL_FRONT_LEFT CHANNEL_FRONT_RIGHT}
+INFO:       Channel Map Out:        {CHANNEL_FRONT_LEFT CHANNEL_FRONT_RIGHT CHANNEL_FRONT_CENTER CHANNEL_LFE CHANNEL_BACK_LEFT CHANNEL_BACK_RIGHT CHANNEL_SIDE_LEFT CHANNEL_SIDE_RIGHT}
+Device Name: Voicemeeter In 7.1 (VB-Audio Voicemeeter VAIO)
+Press Enter to quit...
+DEBUG: === CHANGING DEVICE ===
+DEBUG: [WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=480)
+DEBUG:     defaultPeriodInFrames=480
+DEBUG:     fundamentalPeriodInFrames=480
+DEBUG:     minPeriodInFrames=480
+DEBUG:     maxPeriodInFrames=480
+```
+
+- I first reroute sine playback example to to Voicemeter 7.1 virtual device, to free up the system default device. It doesn't matter to which device sine playback example is switched, reproduceable with any.
+- Then from Voicemeter settings I reroute it to a device that allows exclusive mode via `WDM (WASAPI)` 
+- Then from Windows volume miser I reroute sine playback example to the same device (`=== CHANGING DEVICE ===`
+- And we are stuck.
+
+---
+
+There's another possibly related issue.
+If another thread then tries to `ma_device_uninit` the `ma_devcie` that's stuck holding `rerouteLock` indefinitely inside of the notification callback, then that thread gets a deadlock as well on releasing `IMMDeviceEnumerator`. This happens probably not because of the lock itself, but because the Audio Service is blocked.
+
+Here's the callstack (not from sine playback example):
+```
+ma_device_uninit__wasapi(ma_device * pDevice) Line 23547
+	at miniaudio.h(23547)
+ma_device_uninit(ma_device * pDevice) Line 44138
+	at miniaudio.h(44138)
+```
+
+It possibly happens for the same reason - lock in OS notification thread. But also `rerouteLock` seems to be not regarded on device uninitialization.
+
+---
+
+#### Workaround
+For now my workaroud is to set `noAutoStreamRouting= MA_TRUE` and initialize my own notification client where I just set a flag on reroute, which is then consumed on the main thread that initialized the device.
+
+#### Possible solution
+Perhaps `miniaudio` could defer device reinitialization to outside of the notification callback.
+
+COMMENT mackron 2026-08-19T22:15:52Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5348660603
+Thanks for the report. So `ma_IMMNotificationClient_OnDefaultDeviceChanged()` has indeed changed in dev-0.12. It now just pushes a message for later processing by the main audio thread and then returns. I think that should address this issue, but I haven't had a chance to confirm. Regardless, since this code has changed and I want to focus my attention on 0.12, this will be a Will Not Fix for the 0.11.x cycle, but I'll definitely confirm this for 0.12. Will report back when I get a chance.
+
+COMMENT Jaytheway 2026-08-20T06:27:30Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5352249863
+Thanks for looking into this, David! I was pretty sure I checked `dev-0.12`, but looks like I was mistaken. I see there's now new `ma_device_op_queue`. I will test this with `dev-0.12` in my context as well and report back.
+
+COMMENT Jaytheway 2026-08-20T10:14:30Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5354520557
+Looks like on `dev-0.12` it crashes when rerouted into a device that has exclusive owner. Same reroute situation, crash is in different place.
+
+Here's the log from `simple_playback_sine` when change of device called:
+```
+DEBUG: === CHANGING DEVICE ===
+DEBUG: [WASAPI] Trying IAudioClient3_InitializeSharedAudioStream(actualPeriodInFrames=480)
+DEBUG:     defaultPeriodInFrames=480
+DEBUG:     fundamentalPeriodInFrames=480
+DEBUG:     minPeriodInFrames=480
+DEBUG:     maxPeriodInFrames=480
+DEBUG: [WASAPI] IAudioClient3_InitializeSharedAudioStream failed. Falling back to IAudioClient.
+ERROR: [WASAPI] Failed to initialize device. Device in use.
+WARNING: [WASAPI] Reinitializing device after route change failed.
+```
+
+Exception is thrown when trying to `GetCurrentPadding` with `ma_IAudioClient pThis = nullptr`.
+
+Here's `simple_playback_sine` callstack on crash:
+```
+simple_playback_sine.exe!ma_IAudioClient_GetCurrentPadding(ma_IAudioClient * pThis, unsigned int * pNumPaddingFrames) Line 22709
+	at D:\software dev\third party\miniaudio\miniaudio.h(22709)
+simple_playback_sine.exe!ma_device_start__wasapi(ma_device * pDevice) Line 25300
+	at D:\software dev\third party\miniaudio\miniaudio.h(25300)
+simple_playback_sine.exe!ma_device_handle_client_notifications__wasapi(ma_device * pDevice) Line 25534
+	at D:\software dev\third party\miniaudio\miniaudio.h(25534)
+simple_playback_sine.exe!ma_device_step__wasapi(ma_device * pDevice, ma_blocking_mode blockingMode) Line 25586
+	at D:\software dev\third party\miniaudio\miniaudio.h(25586)
+simple_playback_sine.exe!ma_audio_thread(void * pData) Line 50293
+	at D:\software dev\third party\miniaudio\miniaudio.h(50293)
+simple_playback_sine.exe!ma_thread_entry_proxy(void * pData) Line 19118
+	at D:\software dev\third party\miniaudio\miniaudio.h(19118)
+```
+
+
+COMMENT Jaytheway 2026-08-20T10:50:55Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5354882077
+Another possibly related issue on `dev-0.12`.
+
+When starting a program that initializes `ma_device` to audio device that has an exclusive owner, `ma_device_init` returns `MA_BUSY`, but then if you try to `ma_device_uninit` it will thrown an "Invalid handle was specified" exception when waiting for audio thread.
+
+Initialization fails on line 51291: `ma_device_op_completion_event_result` returns `MA_BUSY`, which is expected.
+
+But then if you try to uninitialize this `ma_device`, it's has `ma_device_status_stopped`, so it goes through uninitialization process and crashes on waiting for audio thread.
+
+Here's the callstack (not from sine playback example):
+```
+ma_thread_wait__win32(void * * pThread) Line 18607
+	at miniaudio.h(18607)
+ma_thread_wait(void * * pThread) Line 19180
+	at miniaudio.h(19180)
+ma_device_uninit(ma_device * pDevice) Line 51592
+	miniaudio.h(51592)
+```
+
+Here's a snapshot of the device when it enters `ma_device_uninit()`:
+
+<HTML>
+<body>
+<!--StartFragment-->
+
+  | Name | Value | Type
+-- | -- | -- | --
+◢ | pDevice | 0x0000023c18f8c520 {pContext=0x0000023c19f23290 {pVTable=0x00007ff7088b6ed0 {ma_device_backend_vtable ma_gDeviceBackendVTable_WASAPI} {...} ...} ...} | ma_device *
+  | ▶ pContext | 0x0000023c19f23290 {pVTable=0x00007ff7088b6ed0 {ma_device_backend_vtable ma_gDeviceBackendVTable_WASAPI} {...} ...} | ma_context *
+  | type | ma_device_type_playback (1) | ma_device_type
+  | threadingMode | MA_THREADING_MODE_MULTI_THREADED (0) | ma_threading_mode
+  | hasAudioThread | 1 | unsigned int
+  | sampleRate | 0 | unsigned int
+  | ▶ status | {value=ma_device_status_stopped (1) } | ma_atomic_device_status
+  | onData | 0x00007ff6fc8b66d0 {AudioDriverMiniaudio::output_device_cb(ma_device *, void *, const void *, unsigned int)} | void(*)(ma_device *, void *, const void *, unsigned int)
+  | onNotification | 0x00007ff6fc8b96c0 {AudioDriverMiniaudio::output_device_notification_cb<ma_device_notification const *>(const ma_device_notification *)} | void(*)(const ma_device_notification *)
+  | pUserData | 0x00007ff708b8c4f0 {AudioDriverMiniaudio audio_driver_miniaudio} | void *
+  | pBackendState | 0x0000023c18f8c578 | void *
+  | ▶ opQueue | {lock=0x0000000000000950 sem=0x0000000000000954 count=0 ...} | ma_device_op_queue
+  | ▶ opCompletionEvent | {result=MA_BUSY (-19) event=0x0000000000000958 } | ma_device_op_completion_event
+  | audioThread | 0x000000000000095c | void *
+  | startStopLock | 0x000000000000094c | void *
+  | isOwnerOfContext | 0 '\0' | unsigned char
+  | noPreSilencedOutputBuffer | 0 '\0' | unsigned char
+  | noClip | 0 '\0' | unsigned char
+  | noDisableDenormals | 0 '\0' | unsigned char
+  | noFixedSizedCallback | 0 '\0' | unsigned char
+  | ▶ masterVolumeFactor | {value=1.00000000 } | ma_atomic_float
+  | ▶ pDuplexRB | 0x0000000000000000 <NULL> | ma_duplex_rb *
+  | ▶ resampling | {algorithm=ma_resample_algorithm_linear (0) pBackendVTable=0x0000000000000000 <NULL> pBackendUserData=...} | <unnamed-tag>
+  | ▶ playback | {pID=0x0000000000000000 <NULL> id={wasapi=0x0000023c18f8c678 L"" dsound=0x0000023c18f8c678 "" winmm=...} ...} | <unnamed-tag>
+  | ▶ capture | {pID=0x0000000000000000 <NULL> id={wasapi=0x0000023c18f8c8d0 L"" dsound=0x0000023c18f8c8d0 "" winmm=...} ...} | <unnamed-tag>
+
+
+<!--EndFragment-->
+</body>
+</HTML>
+
+---
+
+I'm not sure what's the best course of actions here. Obviously I can check if returned code is MA_BUSY, and avoid uninitializing this device. But how to properly dispose of this device, is it safe to just discard/zeromem, or is something hanging uninitialized? 🤷‍♂️
+
+COMMENT Jaytheway 2026-08-20T10:56:55Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5354940187
+In my specific application, if device is dropped, or rerouted, I retry initializing to the same endpoint after X time period (after potential fallback to default).
+If the endpoint is not available (i.e. "busy"), then I uninitalize `ma_device` and retry to initialize later.
+
+The reason I needed this tear down -> reinit `ma_device` sequence, is to initialize it to the channel count of the new system device, because otherwise internal converter would honour the channel count `ma_device` was first initialized to and convert internally if the new system device has different configuration.
+
+COMMENT mackron 2026-08-21T00:02:17Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5363523369
+Thanks for testing that. Regarding the `ma_device_unint()` crash after `ma_device_init()` returns `MA_BUSY`, that's just incorrect usage. You cannot be calling `ma_device_uninit()` on an uninitialized `ma_device` object. The correct way to just not call `ma_device_uninit()` when an error is returned from `ma_device_init()`. Regarding how to dispose of the object, the `ma_device` object is just a plain struct so dispose of its memory like you would any other struct.
+
+The other stuff I'll need to report back on later when I get a chance to look at it properly. It sounds like it's just not handling a failed initialization properly, or assuming initialization is always successful.
+
+COMMENT Jaytheway 2026-08-21T07:08:12Z https://github.com/mackron/miniaudio/issues/1149#issuecomment-5366390602
+I just assumed that if `ma_device` failed to initialize, `ma_devcie_init()` would leave it in `ma_device_status_uninitialized`, not `ma_device_status_stopped`, and `ma_device_status_uninitialized` would make any consequent `ma_device_uninit()` return early.
+
+I'll just clear the struct if `ma_device_init()` returns anything but `MA_SUCCESS`, assuming it doesn't hold any heap allocated data or dangling handles. Thanks!

@@ -20,7 +20,7 @@ g++ -std=c++23 -O3 -flto -Wall -Wextra -Wpedantic \
 ```
 
 succeeds. The only message says LTO uses serial LTRANS. Evidence:
-`/tmp/miniaudio-audit-20260920/gcc-lto.log`.
+[gcc-lto.log](evidence/audit/gcc-lto.log).
 
 This means the warning is toolchain/configuration-dependent or needs a more
 specific instantiation. It does not prove the code safe, and it does not

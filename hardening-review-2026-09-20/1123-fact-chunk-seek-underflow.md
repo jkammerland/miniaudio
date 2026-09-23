@@ -28,8 +28,8 @@ cycle seen in #1151.
 
 Evidence:
 
-- `/tmp/miniaudio-audit-20260920/probe-1123-bounded.log`
-- `/tmp/miniaudio-audit-20260920/parser-probe-results.json`
+- [probe-1123-bounded.log](evidence/audit/probe-1123-bounded.log)
+- [parser-probe-results.json](evidence/audit/parser-probe-results.json)
 
 ## Suspect code
 

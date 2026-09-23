@@ -26,9 +26,9 @@ whose clamped seeks allow the malformed parser state to revisit prior bytes.
 
 Evidence:
 
-- `/tmp/miniaudio-audit-20260920/repro-1151.log`
-- `/tmp/miniaudio-audit-20260920/probe-1151-bounded.log`
-- `/tmp/miniaudio-audit-20260920/parser-probe-results.json`
+- [repro-1151.log](evidence/audit/repro-1151.log)
+- [probe-1151-bounded.log](evidence/audit/probe-1151-bounded.log)
+- [parser-probe-results.json](evidence/audit/parser-probe-results.json)
 
 ## Suspect code
 

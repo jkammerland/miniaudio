@@ -1,0 +1,66 @@
+#1152 Discontinuity glitches on Realtek (and any exclusive mic) | open | None | 2026-09-02T12:55:46Z
+https://github.com/mackron/miniaudio/issues/1152
+**Environment:**
+* **OS:** Windows 11
+* **miniaudio** 0.11.24
+* **Backend:** WASAPI (Exclusive Mode, Capture)
+* **Format:** Tested on Realtek & M-Audio duo interface (2-channel, 48kHz, s16)
+
+---
+
+### Description
+When running a capture device in **exclusive mode** (`ma_share_mode_exclusive`), the captured audio runs ~1.44x faster than wall-clock time, and individual periods (e.g., 30ms / 1440 frames) appear duplicated in the captured buffer.
+
+In addition, `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` is triggered on almost every packet (~50/sec) during pure capture. 
+
+Shared mode capture on the same hardware and period size works as expected with no duplication or glitches.
+
+---
+
+### Suspected Root Causes
+
+1. **Double `GetBuffer` per event in `ma_device_read__wasapi()`:**
+   In WASAPI event-driven exclusive mode, the event fires once per ready packet. Inside `ma_device_read__wasapi()`, the inner loop calls `GetBuffer` -> `ReleaseBuffer` and immediately attempts another `GetBuffer` before waiting on the event again. This appears to consume the subsequent packet prematurely, resulting in 2 packets read per 1 wait event and duplicating audio frames.
+
+2. **Discontinuity handling missing for pure capture:**
+   The exclusive-mode recovery path for buffer discontinuities seems to only be applied to duplex configurations, leaving pure capture streams continuously flagging `DATA_DISCONTINUITY` once an overrun occurs.
+
+---
+
+### Minimal Reproducible Example
+
+```c
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+#include <stdio.h>
+
+void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    // Inspect pInput: identical frame blocks repeat every period.
+    (void)pOutput;
+    (void)pDevice;
+    (void)frameCount;
+}
+
+int main() {
+    ma_device_config config = ma_device_config_init(ma_device_type_capture);
+    config.capture.shareMode = ma_share_mode_exclusive;
+    config.capture.format    = ma_format_unknown; // Native format
+    config.dataCallback      = data_callback;
+    
+    // e.g. 10ms - 30ms periods
+    config.periodSizeInMilliseconds = 10; 
+
+    ma_device device;
+    if (ma_device_init(NULL, &config, &device) != MA_SUCCESS) {
+        printf("Failed to init capture device.\n");
+        return -1;
+    }
+
+    ma_device_start(&device);
+    printf("Capturing... Press Enter to stop.\n");
+    getchar();
+
+    ma_device_uninit(&device);
+    return 0;
+}
+```

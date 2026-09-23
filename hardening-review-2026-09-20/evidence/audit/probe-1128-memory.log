@@ -1,0 +1,57 @@
+=================================================================
+==3292569==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7bc1f91e0034 at pc 0x0000006c62b1 bp 0x7ffdaf592d70 sp 0x7ffdaf592d68
+READ of size 1 at 0x7bc1f91e0034 thread T0
+    #0 0x0000006c62b0 in ma_dr_mp3_init_internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:94913:27
+    #1 0x0000006c71cf in ma_dr_mp3_init_memory_with_metadata /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:95050:14
+    #2 0x00000071e5fd in ma_dr_mp3_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:95064:12
+    #3 0x00000071e5fd in ma_mp3_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:64947:21
+    #4 0x00000071e5fd in ma_decoding_backend_init_memory__mp3 /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:65278:14
+    #5 0x00000071d7c8 in ma_decoder_init_from_memory__internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:63146:14
+    #6 0x000000617b57 in ma_decoder_init_mp3_from_memory__internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:65325:12
+    #7 0x000000617b57 in ma_decoder_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:66557:26
+    #8 0x0000006d2343 in main /tmp/miniaudio-audit-20260920/probe-parser.c:39:55
+    #9 0x7f81f9f7b680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #10 0x7f81f9f7b797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #11 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/probe-parser+0x4008a4) (BuildId: 563fed758c8957889f6df82fac88ecda1660f2b3)
+
+0x7bc1f91e0034 is located 1 bytes after 35-byte region [0x7bc1f91e0010,0x7bc1f91e0033)
+allocated by thread T0 here:
+    #0 0x0000004a6958 in malloc (/tmp/miniaudio-audit-20260920/probe-parser+0x4a6958) (BuildId: 563fed758c8957889f6df82fac88ecda1660f2b3)
+    #1 0x0000006d202e in main /tmp/miniaudio-audit-20260920/probe-parser.c:31:12
+    #2 0x7f81f9f7b680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #3 0x7f81f9f7b797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #4 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/probe-parser+0x4008a4) (BuildId: 563fed758c8957889f6df82fac88ecda1660f2b3)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:94913:27 in ma_dr_mp3_init_internal
+Shadow bytes around the buggy address:
+  0x7bc1f91dfd80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7bc1f91dfe00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7bc1f91dfe80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7bc1f91dff00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7bc1f91dff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7bc1f91e0000: fa fa 00 00 00 00[03]fa fa fa fa fa fa fa fa fa
+  0x7bc1f91e0080: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bc1f91e0100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bc1f91e0180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bc1f91e0200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7bc1f91e0280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==3292569==ABORTING

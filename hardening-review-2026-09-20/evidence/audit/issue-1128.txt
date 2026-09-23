@@ -1,0 +1,75 @@
+#1128 Heap-buffer-over-read (OOB Read) in ma_dr_mp3_init_internal due to missing input size validation for truncated metadata | closed | completed | 2026-05-29T21:54:35Z
+https://github.com/mackron/miniaudio/issues/1128
+Description:
+A heap-buffer-overflow (READ of size 1) was discovered in miniaudio.h during fuzzing. The issue exists within the integrated dr_mp3 decoding module when parsing truncated MP3 frames containing Xing/Info metadata headers.
+
+Vulnerability Mechanism:
+Inside ma_dr_mp3_init_internal, the parser attempts to read the Xing or Info metadata header from the first frame data (pFirstFrameData). The code calculates the start position of the tag (pTagData) using the bitstream position:
+
+C
+pTagData = pFirstFrameData + MA_DR_MP3_HDR_SIZE + (bs.pos/8);
+
+However, the parser evaluates the condition pTagData[0] == 'X' (or 'I') directly without verifying whether pTagData is still within the boundaries of the allocated frame buffer size. If an application parses a highly truncated input stream (e.g., a file containing only a partial frame of ~35 bytes), pTagData points beyond the allocated heap region, triggering an out-of-bounds read.
+
+Impact:
+An attacker-controlled truncated MP3 file can cause any application using miniaudio to crash immediately (Denial of Service) due to memory access violation.
+
+Stack Trace (Standalone ASan Log):
+
+Plaintext
+=================================================================
+==33150==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7b5bdd2e0074 at pc 0x60538023594d bp 0x7fff46b1c130 sp 0x7fff46b1c128
+READ of size 1 at 0x7b5bdd2e0074 thread T0
+    #0 0x60538023594c in ma_dr_mp3_init_internal miniaudio.h:94913:27
+    #1 0x605380236ea9 in ma_dr_mp3_init_memory_with_metadata miniaudio.h:95050:14
+    #2 0x605380156cc4 in ma_dr_mp3_init_memory miniaudio.h:95064:12
+    #3 0x605380156c49 in ma_mp3_init_memory miniaudio.h:64947:21
+    #4 0x605380157a51 in ma_decoding_backend_init_memory__mp3 miniaudio.h:65278:14
+    #5 0x605380135ac8 in ma_decoder_init_from_memory__internal miniaudio.h:63146:14
+    #6 0x605380157be7 in ma_decoder_init_mp3_from_memory__internal miniaudio.h:65325:12
+    #7 0x60538015b2b4 in ma_decoder_init_memory miniaudio.h:66557:26
+    #8 0x60538023b210 in main poc.c:49:24
+
+0x7b5bdd2e0074 is located 1 bytes after 35-byte region [0x7b5bdd2e0050,0x7b5bdd2e0073)
+allocated by thread T0 here:
+    #0 0x605380024ac8 in malloc
+    #1 0x60538023b154 in main poc.c:35:31
+Proposed Fix:
+Ensure that the offset calculation MA_DR_MP3_HDR_SIZE + (bs.pos/8) does not exceed the valid frame size before dereferencing pTagData.
+
+[ma_decoder_init_memory_20260523_091646.zip](https://github.com/user-attachments/files/28170989/ma_decoder_init_memory_20260523_091646.zip)
+
+COMMENT mackron 2026-05-23T08:03:20Z https://github.com/mackron/miniaudio/issues/1128#issuecomment-4524716604
+Did you test on the dev branch? I believe this has been fixed.
+
+COMMENT damseleng 2026-05-23T08:31:49Z https://github.com/mackron/miniaudio/issues/1128#issuecomment-4524826544
+I just tested against the latest dev branch (commit 9634bedb5b5a2ca38c1ee7108a9358a4e233f14d), and the issue still persists. The exact same out-of-bounds read occurs.
+
+Here is the ASan log from the dev branch using the provided PoC:
+
+Plaintext
+=================================================================
+==149391==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x716b860e0074 at pc 0x63c122ceb94d bp 0x7fff53e36b90 sp 0x7fff53e36b88
+READ of size 1 at 0x716b860e0074 thread T0
+    #0 0x63c122ceb94c in ma_dr_mp3_init_internal miniaudio.h:94913:27
+    #1 0x63c122cecea9 in ma_dr_mp3_init_memory_with_metadata miniaudio.h:95050:14
+    #2 0x63c122c0ccc4 in ma_dr_mp3_init_memory miniaudio.h:95064:12
+
+0x716b860e0074 is located 1 bytes after 35-byte region [0x716b860e0050,0x716b860e0073)
+allocated by thread T0 here:
+    #0 0x63c122adaac8 in malloc
+    #1 0x63c122cf1154 in main poc.c:35:31
+The logic around pTagData = pFirstFrameData + MA_DR_MP3_HDR_SIZE + (bs.pos/8); seems to still lack a check against the actual buffer size before pTagData is dereferenced. Could you please double-check this?
+
+COMMENT mackron 2026-05-29T21:54:35Z https://github.com/mackron/miniaudio/issues/1128#issuecomment-4580177293
+I'm not convinced you actually did check the dev branch. The dev branch is clearly checking this:
+```c
+pTagDataBeg = pFirstFrameData + MA_DR_MP3_HDR_SIZE + (bs.pos/8);
+pTagData    = pTagDataBeg;
+if (firstFrameInfo.frame_bytes - (size_t)(pTagData - pFirstFrameData) < 8) {
+    goto done_xing_info;
+}
+isXing = (pTagData[0] == 'X' && pTagData[1] == 'i' && pTagData[2] == 'n' && pTagData[3] == 'g');
+isInfo = (pTagData[0] == 'I' && pTagData[1] == 'n' && pTagData[2] == 'f' && pTagData[3] == 'o
+```
+Closing.

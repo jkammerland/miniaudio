@@ -1,0 +1,2 @@
+audit/** -text -diff
+*.tar.zst -text -diff

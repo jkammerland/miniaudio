@@ -11,8 +11,8 @@ A generated 3,036-frame s16 mono sound played through a device-less engine
 produces only 2,560 nonzero output frames; the final 476 source frames are
 lost. No hardware or auditory judgment is involved in this result.
 
-Evidence is in `/tmp/miniaudio-audit-20260920/probe-dsp.log` and
-`probe-dsp-scalar.log`.
+Evidence is in [probe-dsp.log](evidence/audit/probe-dsp.log) and
+[probe-dsp-scalar.log](evidence/audit/probe-dsp-scalar.log).
 
 ## Suspect code
 

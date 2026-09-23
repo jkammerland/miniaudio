@@ -26,7 +26,8 @@ break, or modifying unrelated repositories.
   `/mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20`
 - Issue dossiers and implementation proposals:
   `/mnt/d2/agent-workspace/repos/miniaudio/hardening-review-2026-09-20`
-- Prior investigation evidence: `/tmp/miniaudio-audit-20260920`
+- Prior investigation evidence:
+  `/mnt/d2/agent-workspace/repos/miniaudio/hardening-review-2026-09-20/evidence`
 - Coroutine framework, read-only unless a separate proven framework defect
   requires explicit approval: `/home/ai-dev1/repos/timer_wheels`
 - Steam Audio source for the optional integration:

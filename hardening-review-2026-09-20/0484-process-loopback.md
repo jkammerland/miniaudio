@@ -108,8 +108,9 @@ matching free/close counts after retirement.
 
 ## Live watermark attempt
 
-Evidence is in `/tmp/miniaudio-0484-2d76179-evidence`; artifact manifest
-SHA-256 is
+Evidence is retained in
+[windows-0484-prior.tar.zst](evidence/windows-0484-prior.tar.zst); the original
+artifact manifest SHA-256 is
 `ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`.
 The host was Windows 10.0.26200.9457 and exported
 `ActivateAudioInterfaceAsync`.
@@ -150,8 +151,9 @@ producer references remained nonzero. One optional child-only calibration did
 not meet its frame-trigger precondition and is retained as a failed calibration,
 not counted as isolation evidence. Only one active render endpoint was
 available, so cross-endpoint/default-switch behavior remains untested.
-Evidence is in `/tmp/miniaudio-native-win-346acda-evidence` with transport
-manifest SHA-256
+Evidence is retained in
+[native-windows-346acda-prior.tar.zst](evidence/native-windows-346acda-prior.tar.zst)
+with original transport manifest SHA-256
 `b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`.
 
 ## Exact `fee518b` watermarked campaign
@@ -174,10 +176,12 @@ harness circular wait and failed; a separately corrected named-event rerun
 completed, remained silent, and is recorded separately rather than replacing
 the failure.
 
-Evidence is under `/tmp/miniaudio-native-win-fee518b-evidence/loopback/`.
-For manual listening, compare `control.wav.role0.reference.wav` with
-`control.wav`, then the corresponding `include`, `exclude`, and `child` pairs.
-The transport manifest ID is
+Evidence is retained in
+[native-windows-fee518b-primary.tar.zst](evidence/native-windows-fee518b-primary.tar.zst)
+under `miniaudio-native-win-fee518b-evidence/loopback/`. For manual listening,
+compare `control.wav.role0.reference.wav` with `control.wav`, then the
+corresponding `include`, `exclude`, and `child` pairs. The transport manifest
+ID is
 `4f40ae7b301cf21f43436efd99e41d97f21465652cf8631d2c0304ba5911e52a`.
 
 ## Remaining acceptance boundary

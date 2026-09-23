@@ -1,0 +1,56 @@
+=================================================================
+==3279923==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7cb9e83e0134 at pc 0x0000007370f2 bp 0x7fffff25e570 sp 0x7fffff25e568
+READ of size 1 at 0x7cb9e83e0134 thread T0
+    #0 0x0000007370f1 in ma_dr_wav__strlen /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80659:12
+    #1 0x0000007370f1 in ma_dr_wav__read_bext_to_metadata_obj /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80808:69
+    #2 0x00000072f42f in ma_dr_wav__metadata_process_chunk /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81042:29
+    #3 0x000000677969 in ma_dr_wav_init__internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81636:33
+    #4 0x0000006d2097 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:71:9
+    #5 0x7fa9e9158680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #6 0x7fa9e9158797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #7 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1101+0x4008a4) (BuildId: a343441a363fc04e9b24e6114299dec81b3f2673)
+
+0x7cb9e83e0134 is located 0 bytes after 244-byte region [0x7cb9e83e0040,0x7cb9e83e0134)
+allocated by thread T0 here:
+    #0 0x0000004a6958 in malloc (/tmp/miniaudio-audit-20260920/repro-1101+0x4a6958) (BuildId: a343441a363fc04e9b24e6114299dec81b3f2673)
+    #1 0x0000006d2275 in filled_malloc /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:20:9
+    #2 0x0000007334fd in ma_dr_wav__metadata_alloc /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80498:37
+    #3 0x00000067787a in ma_dr_wav_init__internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81624:18
+    #4 0x0000006d2097 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:71:9
+    #5 0x7fa9e9158680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #6 0x7fa9e9158797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #7 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1101+0x4008a4) (BuildId: a343441a363fc04e9b24e6114299dec81b3f2673)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80659:12 in ma_dr_wav__strlen
+Shadow bytes around the buggy address:
+  0x7cb9e83dfe80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7cb9e83dff00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7cb9e83dff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7cb9e83e0000: fa fa fa fa fa fa fa fa 00 00 00 00 00 00 00 00
+  0x7cb9e83e0080: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7cb9e83e0100: 00 00 00 00 00 00[04]fa fa fa fa fa fa fa fa fa
+  0x7cb9e83e0180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7cb9e83e0200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7cb9e83e0280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7cb9e83e0300: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7cb9e83e0380: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==3279923==ABORTING

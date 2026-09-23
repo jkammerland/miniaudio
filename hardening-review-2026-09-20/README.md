@@ -54,16 +54,19 @@ offload endpoints.
 
 ## Shared evidence
 
-The full investigation plan and command-level evidence are stored outside the
+The full investigation plan and command-level evidence are retained in the
 working tree:
 
-- `/tmp/miniaudio-audit-20260920/PLAN.md`
-- `/tmp/miniaudio-audit-20260920/repro-results.json`
-- `/tmp/miniaudio-audit-20260920/parser-probe-results.json`
-- `/tmp/miniaudio-audit-20260920/probe-dsp.log`
-- `/tmp/miniaudio-audit-20260920/probe-dsp-scalar.log`
-- `/tmp/miniaudio-audit-20260920/ctest.log`
-- `/tmp/miniaudio-audit-20260920/upstream-dev.diff`
+- [PLAN.md](evidence/audit/PLAN.md)
+- [repro-results.json](evidence/audit/repro-results.json)
+- [parser-probe-results.json](evidence/audit/parser-probe-results.json)
+- [probe-dsp.log](evidence/audit/probe-dsp.log)
+- [probe-dsp-scalar.log](evidence/audit/probe-dsp-scalar.log)
+- [ctest.log](evidence/audit/ctest.log)
+- [upstream-dev.diff](evidence/audit/upstream-dev.diff)
+
+Native archives, integrity instructions, and the temporary-artifact retention
+policy are in the [durable evidence index](evidence/README.md).
 
 The existing CMake test suite passed 5/5 before any fix, so it does not cover
 the confirmed parser, resource-manager, or DSP failures.

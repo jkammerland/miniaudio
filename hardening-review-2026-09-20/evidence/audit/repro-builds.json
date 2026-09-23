@@ -1,0 +1,70 @@
+[
+  {
+    "issue": 1151,
+    "command": [
+      "clang",
+      "-g",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "-fno-omit-frame-pointer",
+      "/mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1151.c",
+      "-o",
+      "/tmp/miniaudio-audit-20260920/repro-1151",
+      "-lm",
+      "-ldl",
+      "-lpthread"
+    ],
+    "exit": 0
+  },
+  {
+    "issue": 1101,
+    "command": [
+      "clang",
+      "-g",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "-fno-omit-frame-pointer",
+      "/mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c",
+      "-o",
+      "/tmp/miniaudio-audit-20260920/repro-1101",
+      "-lm",
+      "-ldl",
+      "-lpthread"
+    ],
+    "exit": 0
+  },
+  {
+    "issue": 1141,
+    "command": [
+      "clang",
+      "-g",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "-fno-omit-frame-pointer",
+      "/mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c",
+      "-o",
+      "/tmp/miniaudio-audit-20260920/repro-1141",
+      "-lm",
+      "-ldl",
+      "-lpthread"
+    ],
+    "exit": 0
+  },
+  {
+    "issue": 1138,
+    "command": [
+      "clang",
+      "-g",
+      "-O1",
+      "-fsanitize=address,undefined",
+      "-fno-omit-frame-pointer",
+      "/mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1138.c",
+      "-o",
+      "/tmp/miniaudio-audit-20260920/repro-1138",
+      "-lm",
+      "-ldl",
+      "-lpthread"
+    ],
+    "exit": 0
+  }
+]

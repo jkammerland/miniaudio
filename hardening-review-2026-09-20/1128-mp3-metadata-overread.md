@@ -12,7 +12,7 @@ The original 35-byte input triggers a heap-buffer over-read in
 `ma_dr_mp3_init_internal` at `miniaudio.h:94913`. Unlike the WAV BEXT and SMPL
 issues, this reaches the ordinary decoder path without a metadata opt-in.
 
-Evidence: `/tmp/miniaudio-audit-20260920/probe-1128-memory.log`.
+Evidence: [probe-1128-memory.log](evidence/audit/probe-1128-memory.log).
 
 Only the report's source and data were inspected. Bundled executable/object
 attachments were not run; the failure was reproduced using a locally compiled

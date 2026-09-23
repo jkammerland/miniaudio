@@ -1,0 +1,114 @@
+#1138 ma_dr_wav: smpl chunk samplerSpecificDataSizeInBytes not validated against chunk size → ~2 GB allocation from 112-byte WAV file (miniaudio.h:80958) | closed | completed | 2026-07-13T01:12:37Z
+https://github.com/mackron/miniaudio/issues/1138
+### Summary
+
+`ma_dr_wav__metadata_process_chunk()` (Stage 1 / count pass) reads
+`samplerSpecificDataSizeInBytes` from a WAV `smpl` chunk and passes it
+directly to `ma_dr_wav__metadata_request_extra_memory_for_stage_2()`
+without validating it against the actual chunk size. A crafted 112-byte
+WAV file triggers a ~2 GB pool allocation attempt.
+
+This is distinct from #1101 (bext coding history `strlen` OOB read).
+The vulnerable path is the `smpl` count pass at **miniaudio.h:80958**,
+not the Stage 2 read path.
+
+---
+
+### Vulnerable code
+
+**miniaudio.h ~line 80952–80958:**
+
+```c
+calculatedLoopCount = (pChunkHeader->sizeInBytes - MA_DR_WAV_SMPL_BYTES)
+                      / MA_DR_WAV_SMPL_LOOP_BYTES;
+if (calculatedLoopCount == loopCount) {          /* only check: loop count matches */
+    bytesJustRead = ma_dr_wav__metadata_parser_read(...);
+    if (bytesJustRead == sizeof(buffer)) {
+        ma_uint32 samplerSpecificDataSizeInBytes = ma_dr_wav_bytes_to_u32(buffer);
+        /* ↓ NO validation against remaining chunk size */
+        ma_dr_wav__metadata_request_extra_memory_for_stage_2(
+            pParser, samplerSpecificDataSizeInBytes, 1);   /* ← VULN */
+    }
+}
+```
+
+`samplerSpecificDataSizeInBytes` is attacker-controlled (bytes 32–35 of the
+smpl header). It is used directly as an allocation size with no upper-bound
+check against how many bytes actually remain in the chunk.
+
+**Attack:** set `loopCount = calculatedLoopCount` (passes the only existing
+check) and `samplerSpecificDataSizeInBytes = 0x7FFFFFFF`. The pool
+allocator then attempts `malloc(~2 GB)`.
+
+---
+
+### Note on upstream dr_libs
+
+The same issue exists in the standalone
+[dr_libs/dr_wav.h](https://github.com/mackron/dr_libs) at the equivalent
+line. The fix for dr_libs was not yet propagated to miniaudio's internal
+`ma_dr_wav` copy in v0.11.25.
+
+---
+
+### Reproduction
+
+**Affected version:** v0.11.25 (commit 9634bed)  
+**Platform:** Linux x86-64, gcc 13
+
+**Harness** (compile and run against miniaudio.h):
+
+```c
+/* poc_harness.c */
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+#define THRESHOLD (64UL * 1024 * 1024)  /* 64 MB — catches the 2 GB attack alloc */
+static size_t g_max = 0;
+
+static void *log_malloc(size_t sz, void *u) {
+    (void)u; if (sz > g_max) g_max = sz;
+    if (sz > THRESHOLD) {
+        printf("[ATTACK ALLOC] %zu bytes (~%.1f GB) requested\n",
+               sz, (double)sz/(1024.0*1024*1024));
+        return NULL;
+    }
+    return malloc(sz);
+}
+static void  log_free   (void *p, void *u) { (void)u; free(p); }
+static void *log_realloc(void *p, size_t sz, void *u) {
+    (void)u; if (sz > g_max) g_max = sz;
+    return (sz > THRESHOLD) ? NULL : realloc(p, sz);
+}
+
+int main(int argc, char **argv) {
+    ma_allocation_callbacks cb = { NULL, log_malloc, log_realloc, log_free };
+    ma_dr_wav wav;
+    ma_bool32 ok = ma_dr_wav_init_file_with_metadata(
+                       &wav, argc > 1 ? argv[1] : "poc.wav", 0, &cb);
+    if (ok) ma_dr_wav_uninit(&wav);
+    printf("Max alloc seen: %zu bytes (0x%zX)\n", g_max, g_max);
+    return g_max > THRESHOLD ? 0 : 1;
+}
+```
+
+```bash
+gcc -fsanitize=address -g poc_harness.c -o poc_harness -lm -ldl -lpthread
+./poc_harness poc.wav
+```
+
+**Expected output:**
+
+```
+[ATTACK ALLOC] 2147483790 bytes (~2.0 GB) requested
+Max alloc seen: 2147483790 bytes (0x8000008E)
+```
+
+**Attach:** `poc.wav` (112 bytes) — attached below.
+
+Reproduced 3/3 on Linux x86-64.
+
+COMMENT mackron 2026-07-13T01:12:37Z https://github.com/mackron/miniaudio/issues/1138#issuecomment-4953581227
+Duplicate of https://github.com/mackron/dr_libs/issues/319. Please do not be creating duplicate tickets (prefer the upstream dr_libs repository for anything relating to dr_wav, dr_flac or dr_mp3).

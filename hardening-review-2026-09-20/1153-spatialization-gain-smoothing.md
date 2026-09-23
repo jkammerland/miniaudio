@@ -35,9 +35,9 @@ Observed scalar output continues below zero after the eighth frame:
 
 Evidence:
 
-- `/tmp/miniaudio-audit-20260920/probe-dsp.c`
-- `/tmp/miniaudio-audit-20260920/probe-dsp.log`
-- `/tmp/miniaudio-audit-20260920/probe-dsp-scalar.log`
+- [probe-dsp.c](evidence/audit/probe-dsp.c)
+- [probe-dsp.log](evidence/audit/probe-dsp.log)
+- [probe-dsp-scalar.log](evidence/audit/probe-dsp-scalar.log)
 
 These defects are plausible contributors to #1153. They do not prove that all
 reported Windows pops have one cause.

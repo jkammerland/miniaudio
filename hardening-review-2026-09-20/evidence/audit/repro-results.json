@@ -1,0 +1,26 @@
+[
+  {
+    "issue": 1151,
+    "exit": -9,
+    "seconds": 3.002,
+    "evidence": ""
+  },
+  {
+    "issue": 1101,
+    "exit": 1,
+    "seconds": 0.042,
+    "evidence": "=================================================================\n==3279923==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7cb9e83e0134 at pc 0x0000007370f2 bp 0x7fffff25e570 sp 0x7fffff25e568\nREAD of size 1 at 0x7cb9e83e0134 thread T0\n    #0 0x0000007370f1 in ma_dr_wav__strlen /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80659:12\n    #1 0x0000007370f1 in ma_dr_wav__read_bext_to_metadata_obj /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80808:69\n    #2 0x00000072f42f in ma_dr_wav__metadata_process_chunk /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81042:29\n    #3 0x000000677969 in ma_dr_wav_init__internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81636:33\n    #4 0x0000006d2097 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:71:9\n    #5 0x7fa9e9158680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #6 0x7fa9e9158797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #7 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1101+0x4008a4) (BuildId: a343441a363fc04e9b24e6114299dec81b3f2673)\n\n0x7cb9e83e0134 is located 0 bytes after 244-byte region [0x7cb9e83e0040,0x7cb9e83e0134)\nallocated by thread T0 here:\n    #0 0x0000004a6958 in malloc (/tmp/miniaudio-audit-20260920/repro-1101+0x4a6958) (BuildId: a343441a363fc04e9b24e6114299dec81b3f2673)\n    #1 0x0000006d2275 in filled_malloc /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:20:9\n    #2 0x0000007334fd in ma_dr_wav__metadata_alloc /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:80498:37\n    #3 0x00000067787a in ma_dr_wav_init__internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:81624:18\n    #4 0x0000006d2097 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1101.c:71:9\n    #5 0x7fa9e9158680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (Bui"
+  },
+  {
+    "issue": 1141,
+    "exit": 1,
+    "seconds": 0.043,
+    "evidence": "=================================================================\n==3279925==ERROR: AddressSanitizer: heap-use-after-free on address 0x7c73c77e0054 at pc 0x000000642271 bp 0x7fffe44103f0 sp 0x7fffe44103e8\nREAD of size 4 at 0x7c73c77e0054 thread T0\n    #0 0x000000642270 in ma_resource_manager_data_buffer_node_acquire /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70926:59\n    #1 0x00000063ae29 in ma_resource_manager_data_buffer_init_ex_internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:71152:18\n    #2 0x0000006d2063 in ma_resource_manager_data_source_init /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:72551:12\n    #3 0x0000006d2063 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c:19:14\n    #4 0x7fc3c839a680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #5 0x7fc3c839a797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #6 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1141+0x4008a4) (BuildId: f3358390cbb13ef22932824b313290413379d561)\n\n0x7c73c77e0054 is located 20 bytes inside of 112-byte region [0x7c73c77e0040,0x7c73c77e00b0)\nfreed by thread T0 here:\n    #0 0x0000004a66ba in free (/tmp/miniaudio-audit-20260920/repro-1141+0x4a66ba) (BuildId: f3358390cbb13ef22932824b313290413379d561)\n    #1 0x000000641a9a in ma_resource_manager_data_buffer_node_acquire /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70918:13\n    #2 0x00000063ae29 in ma_resource_manager_data_buffer_init_ex_internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:71152:18\n    #3 0x0000006d2063 in ma_resource_manager_data_source_init /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:72551:12\n    #4 0x0000006d2063 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c:19:14\n    #5 0x7fc3c839a680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10e"
+  },
+  {
+    "issue": 1138,
+    "exit": 0,
+    "seconds": 0.007,
+    "evidence": "initializing 88-byte WAV with oversized smpl payload\nblocked allocation: 2147483766 bytes\n"
+  }
+]

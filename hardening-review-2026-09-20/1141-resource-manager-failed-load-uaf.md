@@ -19,7 +19,7 @@ ma_resource_manager_data_buffer_init_ex_internal
 ma_resource_manager_data_source_init
 ```
 
-Evidence: `/tmp/miniaudio-audit-20260920/repro-1141.log`.
+Evidence: [repro-1141.log](evidence/audit/repro-1141.log).
 
 This is not limited to hostile media. Missing files, corrupt files, custom VFS
 errors, or allocation failures can enter failed-load cleanup.

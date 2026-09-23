@@ -1,0 +1,16 @@
+[
+  {
+    "branch": "dev",
+    "sha": "dc3b628ddf25dbf7bdc6d39035240d9d933617af",
+    "url": "https://raw.githubusercontent.com/mackron/miniaudio/dc3b628ddf25dbf7bdc6d39035240d9d933617af/miniaudio.h",
+    "date": "2026-08-19T21:59:31Z",
+    "bytes": 4124049
+  },
+  {
+    "branch": "dev-0.12",
+    "sha": "b73904b7382998c07aa119ef1c2c1db5292fe85a",
+    "url": "https://raw.githubusercontent.com/mackron/miniaudio/b73904b7382998c07aa119ef1c2c1db5292fe85a/miniaudio.h",
+    "date": "2026-08-19T22:07:08Z",
+    "bytes": 4481086
+  }
+]

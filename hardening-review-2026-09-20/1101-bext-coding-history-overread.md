@@ -20,7 +20,7 @@ ma_dr_wav__read_bext_to_metadata  miniaudio.h:80808
 ma_dr_wav__metadata_process_chunk miniaudio.h:81042
 ```
 
-Evidence: `/tmp/miniaudio-audit-20260920/repro-1101.log`.
+Evidence: [repro-1101.log](evidence/audit/repro-1101.log).
 
 Normal `ma_wav_init*` calls do not enable metadata parsing, so default engine
 playback is less exposed than applications calling the embedded dr_wav metadata

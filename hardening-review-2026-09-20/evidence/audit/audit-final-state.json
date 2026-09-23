@@ -1,0 +1,25 @@
+{
+  "miniaudio": {
+    "head": "9634bedb5b5a2ca38c1ee7108a9358a4e233f14d",
+    "status": "",
+    "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "staged_diff_bytes": 0,
+    "initial_status_unchanged": true,
+    "initial_diff_unchanged": true
+  },
+  "timer_wheels": {
+    "head": "2532a92aa5f1160bf37f2bf31f74ff4dfb4b3b1d",
+    "status": " M examples/example_10.cpp\n M examples/example_12.cpp\n M examples/queued_parent_task.h\n",
+    "diff_sha256": "7bfe34913219d8363b20675a28465de65a6d36cb6bda145b9d2323ff2f4a0bc4",
+    "staged_diff_bytes": 0,
+    "initial_status_unchanged": false,
+    "initial_diff_unchanged": false
+  },
+  "dsp": {
+    "sse2_exit": 1,
+    "scalar_exit": 1,
+    "sse2_log": "probe-dsp.log",
+    "scalar_log": "probe-dsp-scalar.log",
+    "sanitizer_diagnostics": false
+  }
+}

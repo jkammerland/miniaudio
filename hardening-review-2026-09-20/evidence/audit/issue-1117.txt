@@ -1,0 +1,34 @@
+#1117 `ma_decoder_init_file` can create MP3 decoder with arbitrary / incorrect length value | closed | completed | 2026-04-25T21:14:50Z
+https://github.com/mackron/miniaudio/issues/1117
+Found via fuzzing using AFL++ and ASAN. Tested with latest version on Ubuntu with Clang.
+
+# Summary
+
+When called with a malformed MP3 file, `ma_decoder_init_file` can cause an integer overflow that causes an incorrect value in `totalPCMFrameCount` in the MP3 backend. This can cause `ma_data_source_get_length_in_pcm_frames` and similar to report misleading values and lead to malloc failing or heap buffer overflows.
+
+# Cause
+
+The culprit seems to be in `ma_dr_mp3_init_internal`, if the file is using Xing, line 94920 reads from the file data without checking: 
+
+```c
+detectedMP3FrameCount = (ma_uint32)pTagData[0] << 24 | (ma_uint32)pTagData[1] << 16 | (ma_uint32)pTagData[2] << 8 | (ma_uint32)pTagData[3];
+```
+
+Then, because `detectedMP3FrameCount ` has been set, the function enters the if statement on 94973, where the multiplication can integer overflow and set `pMP3->totalPCMFrameCount` to an unexpected / arbitrary value.
+
+```c
+if (detectedMP3FrameCount != 0xFFFFFFFF) {
+    pMP3->totalPCMFrameCount = detectedMP3FrameCount * firstFramePCMFrameCount;
+}
+```
+
+# reproducing
+
+Here's an example file that can trigger this bug.
+
+[bad-length.mp3](https://github.com/user-attachments/files/26768845/bad-length.mp3)
+
+COMMENT mackron 2026-04-25T21:14:50Z https://github.com/mackron/miniaudio/issues/1117#issuecomment-4320570617
+Thanks. I believe this has been fixed upstream: https://github.com/mackron/dr_libs/commit/0b12cb573cde44dc2b7aead3fc35c20a9d822f78.
+
+I've updated miniaudio with the change. It's in the dev branch. Feel free to reopen this if it's still not fixed.

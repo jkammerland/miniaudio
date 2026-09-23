@@ -1,0 +1,186 @@
+#484 Add support for windows application loopback audio capture to specify/exclude process id | open | None | 2024-12-08T11:22:33Z
+https://github.com/mackron/miniaudio/issues/484
+Windows supports capturing/excluding the audio of a specific process/process tree.
+I would like to set the ProcessLoopbackParams that is passed to the windows api.
+Related:
+https://docs.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/
+https://github.com/microsoft/Windows-classic-samples/tree/main/Samples/ApplicationLoopback
+
+COMMENT mackron 2022-06-13T23:05:57Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1154534002
+This request is reasonable. The documentation you linked to uses `ActivateAudioInterfaceAsync()` which is only used in the UWP build in miniaudio which had me worried that I wouldn't be able to do it with the regular desktop build. However, it looks like it is indeed possible.
+
+Note that development has been slow on miniaudio lately so I can't give a timeframe on when I'll get to this.
+
+---
+
+Note to self when implementing this. The following functions need to be updated to take the PROPVARIANT object:
+- `ma_IMMDevice_Activate()` in `ma_context_get_IAudioClient_Desktop__wasapi()`
+- `ActivateAudioInterfaceAsync()` in `ma_context_get_IAudioClient_UWP__wasapi()`
+
+Issue from the NAudio project on how to use the `PROPVARIANT` object: https://github.com/naudio/NAudio/issues/878
+
+COMMENT mackron 2022-09-08T01:42:43Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1240119691
+I've gone ahead and added experimental support for this. This requires Windows 10 build 20348, but unfortunately I've only got access to build 19044 so I'm not able to reliably test this.
+
+To use this, configure it in the device config:
+```c
+deviceConfig.wasapi.loopbackProcessID = 1234;
+deviceConfig.wasapi.loopbackProcessExclude = true; /* true = exclude; false = include. Defaults to false. */
+```
+
+If anybody is able to give that a test I'd appreciate it.
+
+COMMENT DanielMcPherson 2022-09-08T14:22:01Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1240787381
+I have tested this on Windows 11 Version 10.0.22000 Build 22000. Unfortunately, it does not seem to be working. I played audio from multiple sources simultaneously (two web browsers and Windows Media Player). Using the Microsoft example @nitedani linked to, I can use the Media Player's PID to record just Media Player's audio, or to record everything except Media Player. The dev branch of miniaudio records all three audio sources, not including or excluding the single PID.
+
+COMMENT mackron 2022-09-08T19:58:29Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1241170327
+That's unfortunate. I might need the community's help with this one since I lack OS support to test this properly on my side.
+
+COMMENT mackron 2022-09-09T00:52:34Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1241378510
+I've pushed a potential fix for this. I was forgetting to set the virtual device ID which is required for process-specific loopback. I've also made it so process-specific loopback will be ignored if an explicit device ID is requested because that conflicts with the requirement for the virtual device ID.
+
+Another thing to note is that initialization will fail if attempting to specify a process ID when running on an unsupported version of Windows. I was debating whether or not fall back to regular loopback mode, but I was thinking that if a program has requested a specific process ID that it's probably important to the program, and it's probably best to explicitly let them know that it didn't work rather than just silently falling back.
+
+COMMENT DanielMcPherson 2022-09-09T01:39:56Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1241404215
+I'm getting an ma_device_init_ex failure on Windows 11. It happens whether I specify a real PID that is playing audio, or just 1234, and whether I set loopbackProcessExclude to true or false. Is there something in the config setup that I'm missing?
+
+```
+    deviceConfig = ma_device_config_init(ma_device_type_loopback);
+    deviceConfig.wasapi.loopbackProcessID = 1234;
+    deviceConfig.wasapi.loopbackProcessExclude = true; /* true = exclude; false = include. Defaults to false. */
+    deviceConfig.capture.pDeviceID = NULL; /* Use default device for this example. Set this to the ID of a _playback_ device if you want to capture from a specific device. */
+    deviceConfig.capture.format = encoder.config.format;
+    deviceConfig.capture.channels = encoder.config.channels;
+    deviceConfig.sampleRate = encoder.config.sampleRate;
+    deviceConfig.dataCallback = data_callback;
+    deviceConfig.pUserData = &encoder;
+
+    result = ma_device_init_ex(backends, sizeof(backends) / sizeof(backends[0]), NULL, &deviceConfig, &device);
+    if (result != MA_SUCCESS) {
+        printf("Failed to initialize loopback device.\n");
+        return -2;
+    }
+```
+
+COMMENT mackron 2022-09-09T05:16:54Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1241508460
+That configuration is fine. I think I might know what's going on, and if I'm right, it's going to get very messy and complicated due to compatibility with Windows Vista and 7. The regular desktop Win32 build uses the IMMDevice API to connect to an audio endpoint with WASAPI. To connect to a device you need to retrieve a handle to it via `IMMDeviceEnumerator::GetDevice()` (https://docs.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-getdevice). This is supported from Vista and the beginning of WASAPI. I think the problem is that the `IMMDeviceEnumerator` class only works with actual audio endpoints and not virtual devices as is required for the use of process-specific loopback.
+
+The alternative is to use `ActivateAudioInterfaceAsync()`, which I suspect will work, and is what's used in the Microsoft examples, but the problem is that I think that's only supported starting with Windows 8. I have code in place to use `ActivateAudioInterfaceAsync()` for the UWP build, but if I enable that globally, the WASAPI backend won't work with Windows Vista and 7 which is not an acceptable trade off.
+
+I've pushed a change to the dev branch that forces the UWP build for the normal desktop build. This is just a hacked together experiment for now, but it will result in `ActivateAudioInterfaceAsync()` being used instead of `IMMDevice`. I'm not sure if that'll get process loopback stuff working, and it will lack proper device enumeration (miniaudio currently assumes default devices with the UWP build). Use like this:
+
+```c
+#define MA_FORCE_UWP // <-- Add this
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+```
+
+COMMENT DanielMcPherson 2022-09-09T12:14:37Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1241904343
+Unfortunately, this is not working for me. I get a compile error for miniaudio.h line 20835
+`'HRESULT (LPCWSTR,const IID *,PROPVARIANT *,ma_IActivateAudioInterfaceCompletionHandler *,ma_IActivateAudioInterfaceAsyncOperation **)': cannot convert argument 2 from 'const IID' to 'const IID *'`
+
+I can fix the compile error by changing **MA_IID_IAudioClient** to **&MA_IID_IAudioClient**, but `ma_device_init_ex `still fails, returning error -2.
+
+COMMENT mackron 2022-09-09T23:43:11Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1242560730
+Thanks. I forgot to test the C++ build. I've pushed another potential fix for that init error you're getting. One of these days we'll get it working!
+
+COMMENT DanielMcPherson 2022-09-10T15:08:48Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1242749057
+Latest dev version fixes the compile error. However, I'm getting error -100 from `ma_device_init_ex`. 
+
+In `ma_device_init_internal__wasapi` line 21220
+```
+hr = ma_IAudioClient_QueryInterface(pData->pAudioClient, &MA_IID_IAudioClient2, (void**)&pAudioClient2);
+```
+is returning `E_NOINTERFACE No such interface supported.`
+
+Here's my setup code:
+```
+    encoderConfig = ma_encoder_config_init(ma_encoding_format_wav, ma_format_s16, 2, 44100);
+    if (ma_encoder_init_file(argv[1], &encoderConfig, &encoder) != MA_SUCCESS) {
+        printf("Failed to initialize output file.\n");
+        return -1;
+    }
+    deviceConfig = ma_device_config_init(ma_device_type_loopback);
+    deviceConfig.wasapi.loopbackProcessID = 1234;
+    deviceConfig.wasapi.loopbackProcessExclude = true; /* true = exclude; false = include. Defaults to false. */
+    deviceConfig.capture.pDeviceID = NULL; /* Use default device for this example. Set this to the ID of a _playback_ device if you want to capture from a specific device. */
+    deviceConfig.capture.format = encoder.config.format;
+    deviceConfig.capture.channels = encoder.config.channels;
+    deviceConfig.sampleRate = encoder.config.sampleRate;
+    deviceConfig.dataCallback = data_callback;
+    deviceConfig.pUserData = &encoder;
+
+    result = ma_device_init_ex(backends, sizeof(backends) / sizeof(backends[0]), NULL, &deviceConfig, &device);
+```
+
+
+COMMENT mackron 2022-09-17T07:38:44Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1250021820
+So when that particular line fails, it should recover and just keep going with the initialization process. Is `ma_device_init_ex()` actually returning an error?
+
+COMMENT DanielMcPherson 2022-09-20T22:42:40Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1252990045
+I'm no longer getting an error from `ma_device_init_ex()` and can run the loopback example code. However it is still not excluding or including a process ID. It records all sound being played on the PC, regardless of the process ID or exclude parameter.
+
+COMMENT mackron 2022-09-21T02:27:30Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1253128345
+OK, that's annoying. I'm out of ideas for now. I think it might be easier to just wait until I've got a compatible version of Windows to do my own testing with because right now this is basically just an inefficient trial-and-error we're engaging in. If anyone out there has any ideas on what I'm missing I'm happy to listen.
+
+COMMENT DanielMcPherson 2022-09-22T12:43:15Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1254970522
+Understandable. By the way, the comment "This requires Windows 10 build 20348" on the Microsoft demo refers to the Windows 10 SDK build, not the build number of the Windows 10 release. I was confused by that for a while, since the most recent Windows 10 release is 21H2 Build 19044.
+
+COMMENT mackron 2022-09-22T21:58:09Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1255597337
+Windows Server 2022 is based on Windows 10 and is build 20348 (https://en.wikipedia.org/wiki/Windows_Server_2022). That'll be what Microsoft is referring to as the minimum supported version. For regular consumer desktop PCs, it effectively requires Windows 11. The docs are pretty clear to me that it's the version of Windows they're referring to, not the SDK:
+
+![image](https://user-images.githubusercontent.com/1232553/191856970-dad75536-7a03-4274-b9f1-be1c970749e6.png)
+
+Note how it says minimum supported client, not SDK. Regardless, whatever it is I'm doing wrong it'll end up being something simple. I just need to figure out what it is...
+
+COMMENT SeanTolstoyevski 2023-01-05T05:48:27Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1371809730
+i am using Windows 11 and i'd like to help.
+
+COMMENT ToBiDi0410 2023-03-13T14:34:19Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1466257788
+Any news on this? I would also be able to help if needed
+
+COMMENT mackron 2023-03-13T23:18:37Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1467110005
+Unfortunately I don't yet have a compatible version of Windows to test this for myself. If someone in the community is able to submit a pull request I'd be more than happy to merge it.
+
+COMMENT mackron 2023-04-25T08:46:25Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1521410181
+So good and bad news. The good news is that I've got a new laptop with Windows 11 so I've been able to test this myself. The bad news is that for the life of me I just cannot get this to work! I've pushed a commit to the dev branch which allows the device to at the very least complete initialization and run. The callback get's fired, but the problem is that in my testing the captured data is always silence. I have no idea what's going on with this. Feel free to try the dev branch - maybe you might have more success than me.
+
+I don't know what I'm doing differently to the example mentioned in the original post. Everything I've seen looks the same. I haven't actually run the example though (too hard to get compiling). However, this whole process-specific loopback seems very rough on the part of Microsoft:
+
+1. Calling `IAudioClient::GetMixFormat()` always returns an error. It works fine for normal loopback, but as soon as you try doing process-specific loopback it returns an error. Why?! Confirmed with this bug report: https://web.archive.org/web/20230425083849/https://learn.microsoft.com/en-us/answers/questions/1125409/loopbackcapture-%28-activateaudiointerfaceasync-with?source=docs).
+2. Calling `IAudioClient::GetBufferSize()` does not return a valid value. It's like it always returns an undefined value. Sometimes it'll be 0, other times it'll be some huge obviously-incorrect number.
+3. You have to use a special device ID that represents a virtual device, but it doesn't work with `IMMDeviceEnumerator::GetDevice()` which is what miniaudio uses internally. It only seems to work with `ActivateAudioInterfaceAsync()` which miniaudio cannot use universally for the WASAPI backend because then it won't work on Windows 7.
+
+If you're wanting to try this out, you'll need to use `#define MA_FORCE_UWP` which I'm hoping will be temporary. To set the process ID you need to set it up via the device config:
+```c
+deviceConfig.wasapi.loopbackProcessExclude = MA_FALSE;
+deviceConfig.wasapi.loopbackProcessID = 20760;
+```
+If anyone ends up trying this out I'll be interested to hear your feedback.
+
+COMMENT jestarray 2023-10-31T02:22:11Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1786333519
+https://github.com/raysan5/raylib/issues/3489
+not sure if this is related but switching audio output source on windows crashes
+
+COMMENT mackron 2023-11-01T23:31:03Z https://github.com/mackron/miniaudio/issues/484#issuecomment-1789830965
+@jestarray This is unrelated. I've opened a separate issue: https://github.com/mackron/miniaudio/issues/764
+
+COMMENT vlad221 2024-12-08T11:22:32Z https://github.com/mackron/miniaudio/issues/484#issuecomment-2525661441
+> So good and bad news. The good news is that I've got a new laptop with Windows 11 so I've been able to test this myself. The bad news is that for the life of me I just cannot get this to work! I've pushed a commit to the dev branch which allows the device to at the very least complete initialization and run. The callback get's fired, but the problem is that in my testing the captured data is always silence. I have no idea what's going on with this. Feel free to try the dev branch - maybe you might have more success than me.
+> 
+> I don't know what I'm doing differently to the example mentioned in the original post. Everything I've seen looks the same. I haven't actually run the example though (too hard to get compiling). However, this whole process-specific loopback seems very rough on the part of Microsoft:
+> 
+> 1. Calling `IAudioClient::GetMixFormat()` always returns an error. It works fine for normal loopback, but as soon as you try doing process-specific loopback it returns an error. Why?! Confirmed with this bug report: https://web.archive.org/web/20230425083849/https://learn.microsoft.com/en-us/answers/questions/1125409/loopbackcapture-%28-activateaudiointerfaceasync-with?source=docs).
+> 2. Calling `IAudioClient::GetBufferSize()` does not return a valid value. It's like it always returns an undefined value. Sometimes it'll be 0, other times it'll be some huge obviously-incorrect number.
+> 3. You have to use a special device ID that represents a virtual device, but it doesn't work with `IMMDeviceEnumerator::GetDevice()` which is what miniaudio uses internally. It only seems to work with `ActivateAudioInterfaceAsync()` which miniaudio cannot use universally for the WASAPI backend because then it won't work on Windows 7.
+> 
+> If you're wanting to try this out, you'll need to use `#define MA_FORCE_UWP` which I'm hoping will be temporary. To set the process ID you need to set it up via the device config:
+> 
+> ```c
+> deviceConfig.wasapi.loopbackProcessExclude = MA_FALSE;
+> deviceConfig.wasapi.loopbackProcessID = 20760;
+> ```
+> 
+> If anyone ends up trying this out I'll be interested to hear your feedback.
+
+Hey, are you still working on it ? i'm trying to find a solution

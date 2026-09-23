@@ -1,0 +1,66 @@
+=================================================================
+==3279925==ERROR: AddressSanitizer: heap-use-after-free on address 0x7c73c77e0054 at pc 0x000000642271 bp 0x7fffe44103f0 sp 0x7fffe44103e8
+READ of size 4 at 0x7c73c77e0054 thread T0
+    #0 0x000000642270 in ma_resource_manager_data_buffer_node_acquire /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70926:59
+    #1 0x00000063ae29 in ma_resource_manager_data_buffer_init_ex_internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:71152:18
+    #2 0x0000006d2063 in ma_resource_manager_data_source_init /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:72551:12
+    #3 0x0000006d2063 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c:19:14
+    #4 0x7fc3c839a680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #5 0x7fc3c839a797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #6 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1141+0x4008a4) (BuildId: f3358390cbb13ef22932824b313290413379d561)
+
+0x7c73c77e0054 is located 20 bytes inside of 112-byte region [0x7c73c77e0040,0x7c73c77e00b0)
+freed by thread T0 here:
+    #0 0x0000004a66ba in free (/tmp/miniaudio-audit-20260920/repro-1141+0x4a66ba) (BuildId: f3358390cbb13ef22932824b313290413379d561)
+    #1 0x000000641a9a in ma_resource_manager_data_buffer_node_acquire /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70918:13
+    #2 0x00000063ae29 in ma_resource_manager_data_buffer_init_ex_internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:71152:18
+    #3 0x0000006d2063 in ma_resource_manager_data_source_init /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:72551:12
+    #4 0x0000006d2063 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c:19:14
+    #5 0x7fc3c839a680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #6 0x7fc3c839a797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #7 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1141+0x4008a4) (BuildId: f3358390cbb13ef22932824b313290413379d561)
+
+previously allocated by thread T0 here:
+    #0 0x0000004a6958 in malloc (/tmp/miniaudio-audit-20260920/repro-1141+0x4a6958) (BuildId: f3358390cbb13ef22932824b313290413379d561)
+    #1 0x000000640fbd in ma_resource_manager_data_buffer_node_acquire_critical_section /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70673:66
+    #2 0x000000640fbd in ma_resource_manager_data_buffer_node_acquire /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70829:18
+    #3 0x00000063ae29 in ma_resource_manager_data_buffer_init_ex_internal /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:71152:18
+    #4 0x0000006d2063 in ma_resource_manager_data_source_init /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:72551:12
+    #5 0x0000006d2063 in main /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/repro-1141.c:19:14
+    #6 0x7fc3c839a680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #7 0x7fc3c839a797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)
+    #8 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/repro-1141+0x4008a4) (BuildId: f3358390cbb13ef22932824b313290413379d561)
+
+SUMMARY: AddressSanitizer: heap-use-after-free /mnt/d2/agent-workspace/repos/miniaudio/issue-collection-2026-09-20/../miniaudio.h:70926:59 in ma_resource_manager_data_buffer_node_acquire
+Shadow bytes around the buggy address:
+  0x7c73c77dfd80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7c73c77dfe00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7c73c77dfe80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7c73c77dff00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x7c73c77dff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x7c73c77e0000: fa fa fa fa fa fa fa fa fd fd[fd]fd fd fd fd fd
+  0x7c73c77e0080: fd fd fd fd fd fd fa fa fa fa fa fa fa fa fa fa
+  0x7c73c77e0100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7c73c77e0180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7c73c77e0200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x7c73c77e0280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==3279925==ABORTING

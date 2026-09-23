@@ -1,0 +1,35 @@
+#1157 GCC is not happy for -lto | open | None | 2026-09-18T18:52:09Z
+https://github.com/mackron/miniaudio/issues/1157
+Using revision 9634bedb5b5a2ca38c1ee7108a9358a4e233f14d.
+
+No idea if it's worth fixing, please suit yourself:
+
+```
+In function 'ma_node_output_bus_set_is_attached',
+    inlined from 'ma_node_input_bus_detach__no_output_bus_lock' at D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:74003:39:
+D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:73913:5: warning: '__atomic_exchange_4' writing 4 bytes into a region of size 0 overflows the destination [-Wstringop-overflow=]
+73913 |     ma_atomic_exchange_32(&pOutputBus->isAttached, isAttached);
+      |     ^
+In function 'ma_node_input_bus_detach__no_output_bus_lock':
+lto1.exe: note: destination object is likely at address zero
+In function 'ma_node_output_bus_set_is_attached',
+    inlined from 'ma_node_input_bus_detach__no_output_bus_lock' at D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:74003:39:
+D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:73913:5: warning: '__atomic_exchange_4' writing 4 bytes into a region of size 0 overflows the destination [-Wstringop-overflow=]
+73913 |     ma_atomic_exchange_32(&pOutputBus->isAttached, isAttached);
+      |     ^
+In function 'ma_node_input_bus_detach__no_output_bus_lock':
+lto1.exe: note: destination object is likely at address zero
+In function 'ma_resource_manager_data_buffer_node_result',
+    inlined from 'ma_resource_manager_data_buffer_read_pcm_frames' at D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:71429:75,
+    inlined from 'ma_resource_manager_data_buffer_cb__read_pcm_frames' at D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:71049:59:
+D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:69834:23: warning: '__atomic_load_4' writing 4 bytes into a region of size 0 overflows the destination [-Wstringop-overflow=]
+69834 |     return (ma_result)ma_atomic_load_i32((ma_result*)&pDataBufferNode->result);    /* Need a naughty const-cast here. */
+      |                       ^
+In function 'ma_resource_manager_data_buffer_cb__read_pcm_frames':
+lto1.exe: note: destination object is likely at address zero
+D:/a/_temp/app-deps/miniaudio/include/miniaudio.h: In function 'ma_job_process__resource_manager__page_data_buffer_node':
+D:/a/_temp/app-deps/miniaudio/include/miniaudio.h:72990:24: warning: '__atomic_load_4' writing 4 bytes into a region of size 0 overflows the destination [-Wstringop-overflow=]
+72990 |     if (pJob->order != ma_atomic_load_32(&pDataBufferNode->executionPointer)) {
+      |                        ^
+```
+

@@ -33,8 +33,9 @@ session-0 environment. Induced worker delay produced discontinuity flags but
 did not violate packet ownership or duplicate a packet. The ordinary reported
 pattern did not occur, so no production change was made.
 
-Evidence is in `/tmp/miniaudio-1152-20260921-1-evidence`; its artifact manifest
-SHA-256 is
+Evidence is retained in
+[windows-1152-prior.tar.zst](evidence/windows-1152-prior.tar.zst); its original
+artifact manifest SHA-256 is
 `bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`.
 `exclusive-reported-10.wav` and `exclusive-device-native-10.wav` are suitable
 for manual inspection.
@@ -53,7 +54,8 @@ peaks were 0.028-0.033 and shared WAVs were silent.
 Combined with the earlier campaign, 37 bounded cases (35 packet-instrumented)
 account for 10,481 successful packets and releases. The approximately 1.44x
 duration defect still did not reproduce. Evidence and listenable WAVs are in
-`/tmp/miniaudio-native-win-346acda-evidence`; transport manifest SHA-256 is
+[native-windows-346acda-prior.tar.zst](evidence/native-windows-346acda-prior.tar.zst);
+the original transport manifest SHA-256 is
 `b70ae331733eddcee85200a1acec3d0fdb06dfda54fc77c20c5178c04aa09502`.
 This increases confidence in the tested USB endpoint but does not substitute
 for the reporter's Realtek/M-Audio hardware or a known acoustic/frame-index
@@ -76,8 +78,9 @@ bounded cases, 47 packet-instrumented cases, and 13,816 exact packet/release
 pairs. The approximately 1.44x report still did not reproduce, so the source
 packet loop remains unchanged.
 
-Evidence and all listenable files are under
-`/tmp/miniaudio-native-win-fee518b-evidence/microphone/`; the top-level
+Evidence and all listenable files are retained in
+[native-windows-fee518b-primary.tar.zst](evidence/native-windows-fee518b-primary.tar.zst)
+under `miniaudio-native-win-fee518b-evidence/microphone/`; the archived
 `REPORT.md`, `microphone/summary.csv`, and `microphone/verdict.json` describe
 the exact endpoint and each run. This is strong accounting evidence for one
 USB device, not proof for the reporter's hardware or a positive shared-mode

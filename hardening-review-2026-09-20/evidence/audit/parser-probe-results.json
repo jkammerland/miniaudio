@@ -1,0 +1,65 @@
+[
+  {
+    "issue": 1151,
+    "mode": "bounded",
+    "exit": 0,
+    "seconds": 0.008,
+    "output": "result=-10 seeks=37\nseek=1 pos=0 offset=0 origin=0\nseek=2 pos=38 offset=39 origin=1\nseek=3 pos=69 offset=-58 origin=1\nseek=4 pos=11 offset=1 origin=1\nseek=5 pos=38 offset=39 origin=1\nseek=6 pos=69 offset=-58 origin=1\nseek=7 pos=11 offset=1 origin=1\nseek=8 pos=38 offset=39 origin=1\nseek=9 pos=69 offset=-58 origin=1\nseek=10 pos=11 offset=1 origin=1\nseek=11 pos=38 offset=39 origin=1\nseek=12 pos=69 offset=-58 origin=1\nseek=13 pos=11 offset=1 origin=1\nseek=14 pos=38 offset=39 origin=1\nseek=15 pos=69 offset=-58 origin=1\nseek=16 pos=11 offset=1 origin=1\nseek=17 pos=38 offset=39 origin=1\nseek=18 pos=69 offset=-58 origin=1\nseek=19 pos=11 offset=1 origin=1\nseek=20 pos=38 offset=39 origin=1\nseek=21 pos=69 offset=-58 origin=1\nseek=22 pos=11 offset=1 origin=1\nseek=23 pos=38 offset=39 origin=1\nseek=24 pos=69 offset=-58 origin=1\nseek=25 pos=11 offset=1 origin=1\nseek=26 pos=38 offset=39 origin=1\nseek=27 pos=69 offset=-58 origin=1\nseek=28 pos=11 offset=1 origin=1\nseek=29 pos=38 offset=39 origin=1\nseek=30 pos=69 offset=-58 origin=1\nseek=31 pos=11 offset=1 origin=1\nseek=32 pos=38 offset=39 origin=1\n"
+  },
+  {
+    "issue": 1151,
+    "mode": "direct",
+    "exit": 0,
+    "seconds": 0.008,
+    "output": "direct init=0\n"
+  },
+  {
+    "issue": 1151,
+    "mode": "memory",
+    "exit": -9,
+    "seconds": 3.002,
+    "output": ""
+  },
+  {
+    "issue": 1151,
+    "mode": "file",
+    "exit": 0,
+    "seconds": 0.008,
+    "output": "result=-10 seeks=0\n"
+  },
+  {
+    "issue": 1123,
+    "mode": "bounded",
+    "exit": 0,
+    "seconds": 0.008,
+    "output": "result=-10 seeks=37\nseek=1 pos=0 offset=0 origin=0\nseek=2 pos=38 offset=2 origin=1\nseek=3 pos=40 offset=0 origin=1\nseek=4 pos=52 offset=2147483647 origin=1\nseek=5 pos=160 offset=2147483647 origin=1\nseek=6 pos=160 offset=2147483647 origin=1\nseek=7 pos=160 offset=2147483647 origin=1\nseek=8 pos=160 offset=2147483647 origin=1\nseek=9 pos=160 offset=2147483647 origin=1\nseek=10 pos=160 offset=2147483647 origin=1\nseek=11 pos=160 offset=2147483647 origin=1\nseek=12 pos=160 offset=2147483647 origin=1\nseek=13 pos=160 offset=2147483647 origin=1\nseek=14 pos=160 offset=2147483647 origin=1\nseek=15 pos=160 offset=2147483647 origin=1\nseek=16 pos=160 offset=2147483647 origin=1\nseek=17 pos=160 offset=2147483647 origin=1\nseek=18 pos=160 offset=2147483647 origin=1\nseek=19 pos=160 offset=2147483647 origin=1\nseek=20 pos=160 offset=2147483647 origin=1\nseek=21 pos=160 offset=2147483647 origin=1\nseek=22 pos=160 offset=2147483647 origin=1\nseek=23 pos=160 offset=2147483647 origin=1\nseek=24 pos=160 offset=2147483647 origin=1\nseek=25 pos=160 offset=2147483647 origin=1\nseek=26 pos=160 offset=2147483647 origin=1\nseek=27 pos=160 offset=2147483647 origin=1\nseek=28 pos=160 offset=2147483647 origin=1\nseek=29 pos=160 offset=2147483647 origin=1\nseek=30 pos=160 offset=2147483647 origin=1\nseek=31 pos=160 offset=2147483647 origin=1\nseek=32 pos=160 offset=2147483647 origin=1\n"
+  },
+  {
+    "issue": 1123,
+    "mode": "direct",
+    "exit": 0,
+    "seconds": 0.007,
+    "output": "direct init=0\n"
+  },
+  {
+    "issue": 1123,
+    "mode": "memory",
+    "exit": -9,
+    "seconds": 3.001,
+    "output": ""
+  },
+  {
+    "issue": 1123,
+    "mode": "file",
+    "exit": -9,
+    "seconds": 3.001,
+    "output": ""
+  },
+  {
+    "issue": 1128,
+    "mode": "memory",
+    "exit": 1,
+    "seconds": 0.042,
+    "output": "=================================================================\n==3292569==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x7bc1f91e0034 at pc 0x0000006c62b1 bp 0x7ffdaf592d70 sp 0x7ffdaf592d68\nREAD of size 1 at 0x7bc1f91e0034 thread T0\n    #0 0x0000006c62b0 in ma_dr_mp3_init_internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:94913:27\n    #1 0x0000006c71cf in ma_dr_mp3_init_memory_with_metadata /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:95050:14\n    #2 0x00000071e5fd in ma_dr_mp3_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:95064:12\n    #3 0x00000071e5fd in ma_mp3_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:64947:21\n    #4 0x00000071e5fd in ma_decoding_backend_init_memory__mp3 /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:65278:14\n    #5 0x00000071d7c8 in ma_decoder_init_from_memory__internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:63146:14\n    #6 0x000000617b57 in ma_decoder_init_mp3_from_memory__internal /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:65325:12\n    #7 0x000000617b57 in ma_decoder_init_memory /mnt/d2/agent-workspace/repos/miniaudio/miniaudio.h:66557:26\n    #8 0x0000006d2343 in main /tmp/miniaudio-audit-20260920/probe-parser.c:39:55\n    #9 0x7f81f9f7b680 in __libc_start_call_main (/lib64/libc.so.6+0x3680) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #10 0x7f81f9f7b797 in __libc_start_main@GLIBC_2.2.5 (/lib64/libc.so.6+0x3797) (BuildId: 5bd941be836f538fe5e10eff508f7f5dd94905a6)\n    #11 0x0000004008a4 in _start (/tmp/miniaudio-audit-20260920/probe-parser+0x40"
+  }
+]

@@ -1,0 +1,55 @@
+#1141 heap-use-after-free in ma_resource_manager_data_buffer_node_acquire() on synchronous decode failure (0.11.25 / master) | closed | completed | 2026-07-21T23:10:02Z
+https://github.com/mackron/miniaudio/issues/1141
+### Summary
+
+`ma_resource_manager_data_buffer_node_acquire()` reads a just-freed node pointer in its epilogue when a data buffer node is acquired **synchronously** for a file that fails to decode (nonexistent/corrupt), with a newly-created node. AddressSanitizer flags it as a heap-use-after-free.
+
+### Affected versions
+
+- **v0.11.25** (latest release, commit `9634bedb5b5a2ca38c1ee7108a9358a4e233f14d`) — confirmed.
+- **`master`** — still present (the epilogue condition around line ~70926 dereferences `pDataBufferNode->isDataOwnedByResourceManager` directly).
+- **`dev`** — already avoids it: the equivalent line (~71061) reads a **local** `isDataOwnedByResourceManager` instead of `pDataBufferNode->isDataOwnedByResourceManager`, so it looks addressed for the next release.
+
+I'm filing anyway because the current **release and `master` still crash on this path** and I couldn't find an existing issue tracking it — in case a point release is planned before the `dev` merge, or `master` should get the fix directly.
+
+### Mechanism
+
+On the synchronous failure path inside `ma_resource_manager_data_buffer_node_acquire()`:
+
+```c
+if (result != MA_SUCCESS) {
+    if (nodeAlreadyExists == MA_FALSE) {
+        ma_resource_manager_data_buffer_node_remove(pResourceManager, pDataBufferNode);
+        ma_free(pDataBufferNode, &pResourceManager->config.allocationCallbacks);   /* <-- freed here */
+    }
+    ...
+}
+```
+
+the node is freed. The epilogue then does:
+
+```c
+if (nodeAlreadyExists == MA_FALSE && pDataBufferNode->isDataOwnedByResourceManager && (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC) != 0) {
+```
+
+Because `nodeAlreadyExists == MA_FALSE` is true, `&&` proceeds to evaluate `pDataBufferNode->isDataOwnedByResourceManager` — a read of the freed node — **before** reaching the `(flags & ...ASYNC) != 0` term that would short-circuit it in the synchronous case. So the UAF read happens regardless of the async flag.
+
+### Reproduction
+
+Call `ma_sound_init_from_file()` with `MA_SOUND_FLAG_DECODE` (i.e. synchronous, no `MA_ASYNC`/`MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC`) on a **nonexistent or corrupt** file, built with `-fsanitize=address`. ASan reports a heap-use-after-free: READ of `pDataBufferNode` in the epilogue, previously freed on the `result != MA_SUCCESS` branch above.
+
+### Suggested fix
+
+The cleanest fix is already on `dev` (cache `isDataOwnedByResourceManager` into a local before the free). If a minimal patch for the release/`master` branch is preferred, guarding the epilogue condition with `result == MA_SUCCESS &&` also works — on the failure path there is nothing left to do here, and the guard short-circuits before the freed dereference:
+
+```c
+if (result == MA_SUCCESS && nodeAlreadyExists == MA_FALSE && pDataBufferNode->isDataOwnedByResourceManager && (flags & MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC) != 0) {
+```
+
+---
+
+Found while building [glintfx](https://github.com/petrinhu/glintfx), an MPL-2.0 batteries-included 2D game framework (RmlUi + GL3) that vendors miniaudio for its audio module, whose first real consumer is the game [GusWorld](https://github.com/petrinhu/GusWorld) — thanks for miniaudio!
+
+
+COMMENT mackron 2026-07-21T23:10:02Z https://github.com/mackron/miniaudio/issues/1141#issuecomment-5039997007
+Please do not open tickets for bugs that have already been fixed.
