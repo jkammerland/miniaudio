@@ -84196,10 +84196,10 @@ MA_PRIVATE ma_bool32 ma_dr_wav_init__internal(ma_dr_wav* pWav, ma_dr_wav_chunk_p
     }
     if (pWav->onTell != NULL && pWav->onSeek != NULL) {
         if (pWav->onSeek(pWav->pUserData, 0, MA_DR_WAV_SEEK_END) == MA_TRUE) {
-            ma_int64 fileSize;
-            if (pWav->onTell(pWav->pUserData, &fileSize)) {
-                if (dataChunkSize + pWav->dataChunkDataPos > (ma_uint64)fileSize) {
-                    dataChunkSize = (ma_uint64)fileSize - pWav->dataChunkDataPos;
+            ma_int64 streamSizeSigned;
+            if (pWav->onTell(pWav->pUserData, &streamSizeSigned)) {
+                if (dataChunkSize + pWav->dataChunkDataPos > (ma_uint64)streamSizeSigned) {
+                    dataChunkSize = (ma_uint64)streamSizeSigned - pWav->dataChunkDataPos;
                 }
             }
         } else {
