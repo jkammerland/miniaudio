@@ -172,7 +172,13 @@ Deterministic regressions cover initial and continuation post failure,
 `UINT32_MAX` order wrap, saturated last-reference unregister/buffer teardown,
 sole-worker nested cleanup, saturated deferral, direct and worker shutdown,
 continuation-versus-retirement barriers, invalid dispatch, and strict
-no-resource-manager compilation. Every path requires balanced
-decoder/VFS/allocation/fence counts and zero live node/supply/admission
-ownership. Focused ASan/UBSan and TSan pass; Linux C89/C++23 and exact native
-Windows/macOS matrices pass through the final implementation.
+no-resource-manager compilation. The all-site saturated-deferral matrix is a
+transport/guard test: it proves retained admission plus job code/order
+preservation, then retires its synthetic record through the queue helper. It
+does not claim live decoder/VFS/fence ownership or terminal handler execution.
+Separate live-owner initial/page continuation, cancellation, node/buffer
+retirement, fence, and shutdown tests execute the terminal paths and require
+balanced decoder/VFS/allocation/fence counts plus zero live
+node/supply/admission ownership. Focused ASan/UBSan and TSan pass; Linux
+C89/C++23 and exact native Windows/macOS matrices pass through the final
+implementation.

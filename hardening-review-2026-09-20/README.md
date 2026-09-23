@@ -1,11 +1,11 @@
 # Miniaudio 0.11.25 hardening review
 
 > **Current implementation status (2026-09-23):** the confirmed implementation
-> and independent-review findings have been addressed and natively validated
-> through `e4658df`. Exact-final Linux and deterministic macOS gates pass;
-> Windows production code is exact-tested through `06e3a06`, after which only
-> a macOS-only test changed. Physical/acoustic and owner-rejected scope limits
-> remain explicit. See
+> and independent-review findings have been addressed through `54a9ef5`.
+> Exact-final Linux C/C89/C++23 and deterministic macOS gates pass; Windows
+> production code is exact-tested through `06e3a06`, after which only test,
+> build, and documentation files changed. Physical/acoustic and owner-rejected
+> scope limits remain explicit. See
 > [UNRESOLVED.md](UNRESOLVED.md) for the authoritative table of reports that
 > were not reproducible or could not receive a valid hardware/content verdict.
 > The proposal language below describes the earlier review phase and is retained

@@ -2,7 +2,7 @@
 
 Status date: 2026-09-23
 
-Implementation code validated through: `e4658df`
+Implementation and test/build code validated through: `54a9ef5`
 
 This is the authoritative remaining-work record for
 `IMPLEMENTATION-PROMPT.md`. A hardware, toolchain, permission, or acoustic
@@ -71,6 +71,12 @@ retirement. Astra-max continuations `399b8c7d33d2e6ef` (core) and
 with no Critical, High, or Medium findings. Native strict builds subsequently
 exposed the warning and Win32 filesystem items also recorded below.
 
+The whole-series Astra-max continuation `c34d44bdf141b742` then reviewed exact
+`754f852`. It found no production correctness defect, but blocked the release
+record on one Medium build-attribution error and two Low evidence-scope errors.
+Commit `54a9ef5` fixes the language-mode implementation and its newly exposed
+strict diagnostic; this reconciliation narrows the two documentation claims.
+
 | Finding | Why it was a problem | Disposition |
 |---|---|---|
 | Resource-manager result publication still preceded final job access (`FR01` / later `CORE-001`) | A waiter could observe a terminal result, release the last owner, and race the worker's execution-pointer access. | **Fixed in `26ad922`.** Buffer, node-load, and node-page jobs capture their last object-dependent decision, advance the execution pointer, and only then signal notifications/fences. Barrier tests destroy the last owner at the former gap. |
@@ -79,7 +85,7 @@ exposed the warning and Win32 filesystem items also recorded below.
 | Result-poll regression could join before the free job was published (`CORE-011`) | Its barrier acknowledged a pre-post hook, so the only manual pump could run on an empty queue and then join an uninit thread waiting for that pump. | **Fixed in `fee518b`.** A separate post-publication acknowledgment now orders the one manual pump after enqueue; an explicit barrier still forces the former gap without sleeps or retries. |
 | Full resource-manager queues could orphan last-reference retirement (`FR07`) | Once a node/buffer was removed and marked unavailable, failure to enqueue its FREE job could discard the only cleanup path. Propagating an error was insufficient because public ownership had already been surrendered. | **Fixed in `fee518b`.** Retirement posts retain ownership and make a slot in manual-pump mode or yield to workers until publication succeeds; order is allocated only on success. Saturated unregister and buffer-uninit regressions require exact final frees and zero live supply. |
 | A sole worker could deadlock while retrying cleanup into its own full queue | The worker that had to consume the next slot could spin/yield inside a FREE/continuation post, so no thread remained able to make capacity. | **Fixed in `7dc7c8e`.** Resource-manager queues use private retained admission records. A running record transitions directly back to READY for a deferral/continuation, while externally initiated retirement carries its own retained record. Saturation tests cover sole-worker nested cleanup without sleeps or retries. |
-| An accepted deferral or continuation could be lost under saturation | The current job's admission was retired before the follow-up had durable capacity. A failed post could therefore return an error after the operation had already been accepted, with no job left to complete it. | **Fixed in `7dc7c8e`.** The accepted operation keeps or transfers the same stable record under the queue lock; it cannot fall through the bounded generic queue. Exact ownership/fence/allocation counts prove eventual completion. |
+| An accepted deferral or continuation could be lost under saturation | The current job's admission was retired before the follow-up had durable capacity. A failed post could therefore return an error after the operation had already been accepted, with no job left to complete it. | **Fixed in `7dc7c8e`.** The accepted operation keeps or transfers the same stable record under the queue lock; it cannot fall through the bounded generic queue. The all-site saturation matrix proves retained record/code/order transport; separate live-owner tests execute terminal handlers and prove balanced ownership and eventual cleanup. |
 | Last-reference FREE could be ordered before a later page continuation (`CORE-014`) | The node state check, continuation order allocation, and FREE publication were separate operations. A page job could observe BUSY, lose the race to retirement, and then allocate an order after FREE, allowing the node to be freed first. | **Fixed in `75158b8`.** The queue lock now atomically checks required state and publishes the continuation/order, or publishes `MA_UNAVAILABLE` with the FREE order. A losing continuation destroys its decoder locally and never touches the retired node again. |
 | Shutdown cancellation returned stale caller job data (`CORE-015` / `BR-012`) | `ma_job_queue_next()` returned `MA_CANCELLED` after draining but left the caller's previous `ma_job` contents intact, so code inspecting the output could see and potentially reuse a stale operation. | **Fixed in `75158b8`.** The shutdown path writes a freshly initialized QUIT job before returning cancellation. Direct and worker-thread tests seed hostile sentinels and require the QUIT output. |
 | Invalid dequeued dispatch could strand a retained admission (`CORE-016`) | A corrupted or feature-disabled job code returned before the tracked completion path, leaving its private record RUNNING forever and reducing queue capacity permanently. | **Fixed in `75158b8`.** Dispatchability is rejected before admission, and a dequeued job mutated afterward explicitly releases its retained record before returning `MA_INVALID_OPERATION`. |
@@ -102,6 +108,10 @@ exposed the warning and Win32 filesystem items also recorded below.
 | Successful Win32 removal leaked long-path conversion storage | `fs_remove()` returned immediately after `RemoveDirectoryW()` succeeded, bypassing `fs_win32_path_uninit()`. Paths longer than the stack buffer therefore leaked their heap-backed UTF-16 conversion on every successful removal. | **Fixed in `205e334`.** Success now flows through the common cleanup label. A Windows-only counted-allocator regression creates/removes a path longer than 255 characters and requires the live allocation count to return to zero; the parent leaks one allocation. The same commit initializes the standard-path `HANDLE` and removes a now-unreachable fallback that strict MSVC diagnosed. |
 | Path comparison ended with unreachable code under strict Debug MSVC (`C4702`) | `fs_path_compare()` has an unconditional `for (;;)` whose branches all return, so the trailing fallback return could never execute. | **Fixed in `06e3a06`.** The unreachable statement was removed; semantics are unchanged, and both Debug and optimized Release build with `/W4 /WX` and zero warnings. |
 | The CoreAudio lifecycle hook hid the production initializer from unused-function analysis | The test replaces the initializer call site to inject failures. The real static initializer was still compiled but had no reference in that translation unit, producing an Apple/Homebrew Clang warning; simply compiling it out exposed five dependent helpers as unused and would have reduced implementation coverage. | **Fixed in `e4658df`.** The test keeps a typed reference to the production initializer while still routing runtime calls through the hook. Exact-final Apple Clang Debug/Release and Homebrew LLVM Release now build the full deterministic suite with `-Werror` and zero warnings. |
+| Forced-C++ CMake mode did not apply the requested C++ standard or C++ warning policy (`FINAL-01`) | `-x c++` changed the compiler's interpretation of `.c` files, but CMake still modeled them as C. Consequently, `CMAKE_CXX_STANDARD=23` and `CMAKE_CXX_FLAGS=-Werror` reached only the two native `.cpp` files; 19 `.c` commands used the compiler's default C++20 mode without `-Werror`, even though all 14 runtime tests passed. | **Fixed in `54a9ef5`.** Every miniaudio-owned `.c` source is now assigned CMake language `CXX` while retaining the driver flag needed for `.c` extensions. Exact-commit GCC 16 and Clang 22 each pass 14/14; both command inventories prove 19/19 `.c` and 2/2 `.cpp` actions use C++23 and `-Werror`. A compile-time guard rejects C and C++20. |
+| The corrected C++23 policy exposed an escaped stack address in a resource-manager test hook | The fault injector stored a stack-backed notification address in global state solely to recognize invalid wait/uninit calls. GCC's C++23 dangling-pointer analysis diagnosed the escape under the newly effective `-Werror` policy. | **Fixed in `54a9ef5`.** The hook writes a poison callback into the still-live notification object and recognizes that in-object marker instead. The same invalid-use counters and assertions remain; C, C89, C++23, ASan/UBSan, and TSan resource-manager checks pass. |
+| The macOS matrix said every full-build target used `-Werror` (`FINAL-02`) | The three exact `e4658df` compile databases show `-Werror` on all 20 C translation units, including every selected deterministic test, but not on the two `.cpp` translation units. Complete logs still contain zero warnings. | **Documentation corrected.** The native result is now stated at its proven scope: all selected deterministic C targets used `-Werror`, and the complete builds emitted zero warnings. No physical-device result is inferred. |
+| The resource-manager dossier attributed terminal cleanup ownership to every saturated-deferral case (`FINAL-03`) | The all-site matrix deliberately tests admission/guard transport with synthetic, order-mismatched jobs and retires their records through the queue helper. Those cases do not construct decoder/VFS/fence owners or execute every terminal handler. | **Documentation corrected.** The transport matrix is credited only with retained record/code/order preservation. Separate live-owner continuation, cancellation, node/buffer retirement, fence, and shutdown tests carry the end-to-end cleanup claims. |
 
 Earlier findings remain fixed by the commits listed in Git history: validated
 WAV traversal/metadata bounds, resource-manager failed-load ownership, MP3
@@ -191,18 +201,18 @@ ma_device__untrack__coreaudio(device); /* waits for / excludes reroute */
 ma_device__set_state(device, ma_device_state_uninitialized);
 ```
 
-## Validation matrix through `e4658df`
+## Validation matrix through `54a9ef5`
 
 | Environment | Result | Scope / qualification |
 |---|---|---|
 | Linux GCC 16.2.1 with pinned Opus/Vorbis | **16/16 Debug pass; 15/15 strict-C89 option pass** | libogg 1.3.6, libopus 1.6.1, opusfile 0.12, and libvorbis commit `1b75110b...`; the C89-option build intentionally omits C++ tests. |
-| Linux GCC Release + LTO + warnings-as-errors | **14/14 pass** | Exact final source; this is native Linux GCC, not Windows MinGW validation. |
-| Linux Clang 22.1.8 warnings-as-errors | **14/14 pass** | Complete registered non-optional suite at the final source. |
-| Forced C++23 implementation | **14/14 pass** | The implementation and tests compile as C++23. |
-| Linux ASan/UBSan and TSan | **focused pass** | ASan/UBSan covers resource-manager, no-resource-manager, WAV, and WAV/no-resource-manager paths; TSan covers the resource-manager scheduler. Full SteamAudio-suite TSan also reports an unrelated pre-existing `tests/deviceio/deviceio.c` race, so no universal TSan-clean claim is made. |
+| Linux GCC Release + LTO + warnings-as-errors | **exact `54a9ef5`: 14/14 pass** | This is native Linux GCC, not Windows MinGW validation. |
+| Linux Clang 22.1.8 warnings-as-errors | **exact `54a9ef5`: 14/14 pass** | Complete registered non-optional suite. |
+| Forced C++23 implementation | **exact `54a9ef5`: GCC 14/14 and Clang 14/14 pass** | Compile-command audits prove all 19 `.c` actions use the C++ driver, `-x c++`, `-std=c++23`, and `-Werror`; both `.cpp` actions use C++23 and `-Werror`. The conformance guard fails under C and under GCC/Clang C++20. Evidence is retained in `/home/ai-dev1/miniaudio-cxx23-language-evidence-20260923` and the two exact-commit build trees. |
+| Linux ASan/UBSan and TSan | **exact `54a9ef5` focused pass** | ASan/UBSan covers resource-manager, no-resource-manager, and WAV; TSan covers the resource-manager scheduler. Earlier focused WAV/no-resource-manager and full SteamAudio-suite evidence is retained; the latter also reports an unrelated pre-existing `tests/deviceio/deviceio.c` race, so no universal TSan-clean claim is made. |
 | Optional-codec ASan/UBSan and TSan | **2/2 + 2/2 pass** | Opus and Vorbis adapter tests from the pinned dependency matrix. |
 | Steam Audio real SDK | **15/15 final normal suite pass; focused normal/C89-option/ASan+UBSan/TSan passes retained** | The final suite links the existing adjacent `../steam-audio/unity` binary. The authoritative clean SDK build was made earlier from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac` with a C++17 override. No Steam Audio source or user build output was edited. |
-| macOS 26.5.2 arm64, Apple Clang 21 / Homebrew LLVM 22.1.8 | **exact `e4658df`: Debug 13/13, Apple Release 13/13, LLVM Release 13/13; all full builds `-Werror`, zero warnings** | Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, deterministic CoreAudio 1/1, and resource-manager stress 100/100 pass. Arm64 size/alignment and listed offsets for six types match `75158b8`. Physical `cpp`/`deviceio` remain excluded for the documented permission/callback limitation; LeakSanitizer is unsupported. |
+| macOS 26.5.2 arm64, Apple Clang 21 / Homebrew LLVM 22.1.8 | **exact `e4658df`: Debug 13/13, Apple Release 13/13, LLVM Release 13/13; all selected deterministic C targets used `-Werror`; complete builds emitted zero warnings** | Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, deterministic CoreAudio 1/1, and resource-manager stress 100/100 pass. Arm64 size/alignment and listed offsets for six types match `75158b8`. The two compiled `.cpp` targets did not receive `-Werror`; physical `cpp`/`deviceio` remain excluded for the documented permission/callback limitation. LeakSanitizer is unsupported. |
 | Windows 11 x64, MSVC 19.44 / SDK 10.0.26100.0 | **exact `06e3a06`: Debug 17/17 and Release 17/17; 0 warnings under `/W4 /WX`; resource-manager stress 100/100** | Release also used `/O2 /GL /LTCG`. Direct Win32 filesystem Debug/Release, standalone C/C++latest 2/2, and six-type MSVC/clang-cl ABI comparisons pass. No retries or skipped registered tests. |
 | Windows clang-cl 23.1.1 | **4/4 focused pass** | Resource manager, no-resource-manager, WAV, and Win32 filesystem compile/link/run with strict warnings. The first standalone filesystem link omitted required `shell32.lib`; the corrected command passed and the harness error is retained. |
 | Windows USB capture and process loopback | **exact `fee518b` deterministic/live campaigns pass their code invariants** | Twelve selected microphone cases did not reproduce #1152. Nine synchronized loopback scenarios delivered exact frames, but all captured WAVs—including the whole-system control—were silent, so content isolation remains unresolved. |
@@ -306,8 +316,9 @@ coroutine handle.
 
 ## Remaining release gate
 
-The implementation and native matrices are complete. The final gate is the
-owner-requested Astra-max review of the entire current series and this
-reconciled evidence. Any evidence-backed finding from that review must be fixed
-and revalidated before handoff. The hardware, acoustic, owner-scope, and
-external-dependency limits above remain explicit.
+The exact-`754f852` Astra-max review reported zero Critical/High findings, one
+Medium build-attribution finding, and two Low evidence-scope findings. Code
+commit `54a9ef5` and this documentation reconciliation address all three. The
+final gate is a continuation of that same reviewer conversation over the
+remediated tree. The hardware, acoustic, owner-scope, and external-dependency
+limits above remain explicit.
