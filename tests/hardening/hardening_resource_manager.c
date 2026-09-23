@@ -24,7 +24,6 @@ typedef struct
     ma_uint32 invalidNotificationUninitCount;
     ma_uint32 failNotificationInitCall;
     ma_result notificationInitFailureResult;
-    ma_async_notification_event* pFailedNotificationEvent;
     ma_uint32 fenceAcquireCallCount;
     ma_uint32 fenceAcquireSuccessCount;
     ma_uint32 fenceReleaseCallCount;
@@ -73,8 +72,9 @@ static ma_result hardening_inline_notification_event_init(ma_async_notification_
 
     g_hardeningResourceManagerFaultState.notificationInitCallCount += 1;
     if (g_hardeningResourceManagerFaultState.notificationInitCallCount == g_hardeningResourceManagerFaultState.failNotificationInitCall) {
+        /* Keep the failure marker inside the live fixture object. A global
+         * pointer would make this stack-backed notification appear to escape. */
         pNotificationEvent->cb.onSignal = hardening_invalid_notification_on_signal;
-        g_hardeningResourceManagerFaultState.pFailedNotificationEvent = pNotificationEvent;
         return g_hardeningResourceManagerFaultState.notificationInitFailureResult;
     }
 
@@ -94,9 +94,8 @@ static ma_result hardening_inline_notification_event_init(ma_async_notification_
 static ma_result hardening_inline_notification_event_uninit(ma_async_notification_event* pNotificationEvent)
 {
     g_hardeningResourceManagerFaultState.notificationUninitCallCount += 1;
-    if (pNotificationEvent == g_hardeningResourceManagerFaultState.pFailedNotificationEvent) {
+    if (pNotificationEvent->cb.onSignal == hardening_invalid_notification_on_signal) {
         g_hardeningResourceManagerFaultState.invalidNotificationUninitCount += 1;
-        g_hardeningResourceManagerFaultState.pFailedNotificationEvent = NULL;
         return MA_INVALID_OPERATION;
     }
 
@@ -106,7 +105,7 @@ static ma_result hardening_inline_notification_event_uninit(ma_async_notificatio
 static ma_result hardening_inline_notification_event_wait(ma_async_notification_event* pNotificationEvent)
 {
     g_hardeningResourceManagerFaultState.notificationWaitCallCount += 1;
-    if (pNotificationEvent == g_hardeningResourceManagerFaultState.pFailedNotificationEvent) {
+    if (pNotificationEvent->cb.onSignal == hardening_invalid_notification_on_signal) {
         g_hardeningResourceManagerFaultState.invalidNotificationWaitCount += 1;
         return MA_INVALID_OPERATION;
     }

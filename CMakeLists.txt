@@ -107,15 +107,26 @@ endif()
 
 if(MINIAUDIO_FORCE_CXX)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        message(STATUS "Compiling as C++ (GNU/Clang)")
         list(APPEND COMPILE_OPTIONS -x c++)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        message(STATUS "Compiling as C++ (MSVC)")
         list(APPEND COMPILE_OPTIONS /TP)
-    else()
-        message(WARNING "MINIAUDIO_FORCE_CXX is enabled but the compiler does not support it. Ignoring.")
     endif()
+    message(STATUS "Compiling .c sources as C++")
 endif()
+
+# The driver flags make compilers treat the .c extension as C++, but they do
+# not change CMake's language model. Mark each miniaudio-owned .c source as
+# CXX as well so CXX_STANDARD and CMAKE_CXX_FLAGS reach the generated rules.
+function(miniaudio_force_cxx_target target)
+    if(MINIAUDIO_FORCE_CXX)
+        get_target_property(target_sources ${target} SOURCES)
+        foreach(source IN LISTS target_sources)
+            if(source MATCHES "\\.c$")
+                set_source_files_properties("${source}" PROPERTIES LANGUAGE CXX)
+            endif()
+        endforeach()
+    endif()
+endfunction()
 
 if(MINIAUDIO_FORCE_C89)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -530,6 +541,7 @@ add_library(miniaudio
     miniaudio.c
     miniaudio.h
 )
+miniaudio_force_cxx_target(miniaudio)
 
 list(APPEND LIBS_TO_INSTALL miniaudio)
 if(MINIAUDIO_INSTALL)
@@ -558,6 +570,7 @@ if(HAS_LIBVORBIS)
         extras/decoders/libvorbis/miniaudio_libvorbis.c
         extras/decoders/libvorbis/miniaudio_libvorbis.h
     )
+    miniaudio_force_cxx_target(miniaudio_libvorbis)
 
     list(APPEND LIBS_TO_INSTALL miniaudio_libvorbis)
     if(MINIAUDIO_INSTALL)
@@ -588,6 +601,7 @@ if(HAS_LIBOPUS)
         extras/decoders/libopus/miniaudio_libopus.c
         extras/decoders/libopus/miniaudio_libopus.h
     )
+    miniaudio_force_cxx_target(miniaudio_libopus)
 
 
     list(APPEND LIBS_TO_INSTALL miniaudio_libopus)
@@ -608,6 +622,7 @@ if (NOT MINIAUDIO_NO_EXTRA_NODES)
             extras/nodes/ma_${name}_node/ma_${name}_node.c
             extras/nodes/ma_${name}_node/ma_${name}_node.h
         )
+        miniaudio_force_cxx_target(miniaudio_${name}_node)
         
         set(libs "${LIBS_TO_INSTALL}")
 
@@ -623,6 +638,7 @@ if (NOT MINIAUDIO_NO_EXTRA_NODES)
 
         if(MINIAUDIO_BUILD_EXAMPLES)
             add_executable(miniaudio_${name}_node_example extras/nodes/ma_${name}_node/ma_${name}_node_example.c)
+            miniaudio_force_cxx_target(miniaudio_${name}_node_example)
             target_link_libraries(miniaudio_${name}_node_example PRIVATE miniaudio_common_options)
         endif()
     endfunction()
@@ -744,6 +760,7 @@ if(MINIAUDIO_BUILD_TESTS)
 
     function(add_miniaudio_test name source)
         add_executable(${name} ${TESTS_DIR}/${source})
+        miniaudio_force_cxx_target(${name})
         target_link_libraries(${name} PRIVATE miniaudio_common_options)
     endfunction()
 
@@ -779,6 +796,9 @@ if(MINIAUDIO_BUILD_TESTS)
     add_test(NAME miniaudio_hardening_resource_manager COMMAND miniaudio_hardening_resource_manager)
 
     add_miniaudio_test(miniaudio_hardening_no_resource_manager hardening/hardening_no_resource_manager.c)
+    if(MINIAUDIO_FORCE_CXX AND DEFINED CMAKE_CXX_STANDARD AND CMAKE_CXX_STANDARD GREATER_EQUAL 23)
+        target_compile_definitions(miniaudio_hardening_no_resource_manager PRIVATE MINIAUDIO_HARDENING_REQUIRE_CXX23)
+    endif()
     add_test(NAME miniaudio_hardening_no_resource_manager COMMAND miniaudio_hardening_no_resource_manager)
 
     if(WIN32)
@@ -848,6 +868,7 @@ if (MINIAUDIO_BUILD_EXAMPLES)
 
     function(add_miniaudio_example name source)
         add_executable(${name} ${EXAMPLES_DIR}/${source})
+        miniaudio_force_cxx_target(${name})
         target_link_libraries(${name} PRIVATE miniaudio_common_options)
     endfunction()
 
@@ -923,6 +944,7 @@ if (MINIAUDIO_BUILD_TOOLS)
     set(TOOLS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tools)
 
     add_executable(madoc ${TOOLS_DIR}/madoc/madoc.c)
+    miniaudio_force_cxx_target(madoc)
 endif()
 
 
