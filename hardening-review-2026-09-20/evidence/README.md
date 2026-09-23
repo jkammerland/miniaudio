@@ -63,5 +63,8 @@ The local cleanup was limited to top-level temporary entries owned by this
 review whose names began with `miniaudio`, `steam-audio`, or `hardening`, plus
 the review's named cleanup helpers. On 2026-09-23, 280 enumerated entries
 (approximately 20.5 GiB) were removed after the evidence was committed at
-`475b59e`. A still-running debugger tree was excluded and is listed in
-`cleanup-retained.txt`.
+`475b59e`. Nine additional top-level home build/evidence directories
+(approximately 1.7 GiB) were removed after the Linux C++23 evidence was
+committed at `28e2145`; all 289 exact paths are listed in
+`cleanup-deleted.txt`. A still-running debugger tree was excluded and is
+listed in `cleanup-retained.txt`.

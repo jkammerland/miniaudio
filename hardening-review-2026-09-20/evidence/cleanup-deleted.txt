@@ -1,3 +1,12 @@
+/home/ai-dev1/miniaudio-54a9ef5-clang-cxx23
+/home/ai-dev1/miniaudio-54a9ef5-gcc-cxx23
+/home/ai-dev1/miniaudio-cxx23-language-evidence-20260923
+/home/ai-dev1/miniaudio-final04-clang-inventory
+/home/ai-dev1/miniaudio-post-cxxfix-asan
+/home/ai-dev1/miniaudio-post-cxxfix-clang-release
+/home/ai-dev1/miniaudio-post-cxxfix-gcc-c89
+/home/ai-dev1/miniaudio-post-cxxfix-gcc-release
+/home/ai-dev1/miniaudio-post-cxxfix-tsan
 /tmp/cleanup-miniaudio-0484-20260921-1.ps1
 /tmp/cleanup-miniaudio-0484-20260921-2.ps1
 /tmp/close-steam-audio-0546-7efef74-mac1.py
