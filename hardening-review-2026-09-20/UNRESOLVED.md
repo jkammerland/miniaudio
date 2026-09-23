@@ -322,13 +322,20 @@ affinity-bound completion before inline resume, retain one generation-bound
 resume token per suspension, and never retain or independently resume a raw
 coroutine handle.
 
-## Remaining release gate
+## Final release review
 
 The exact-`754f852` Astra-max review reported zero Critical/High findings, one
 Medium build-attribution finding, and two Low evidence-scope findings. Code
 commit `54a9ef5` and the following reconciliation addressed all three. The
 exact-`509a167` continuation independently closed them with zero
 Critical/High/Medium findings, then identified the two Low items fixed by
-`0f459ed` and this reconciliation. The final gate is one last continuation of
-that same reviewer conversation over the remediated tree. The hardware,
-acoustic, owner-scope, and external-dependency limits above remain explicit.
+`0f459ed` and this reconciliation.
+
+Final Astra-max continuation `85b4d76f78ae019f` reviewed exact clean
+`f64a12b` and returned **APPROVE with 0 Critical, 0 High, 0 Medium, and 0 Low
+findings**. It independently verified the 47/47 all-target forced-C++ command
+inventory, both default 14/14 suites, the `madoc` dependency qualification,
+and the native evidence boundaries. No required implementation or
+documentation work remains. The hardware, acoustic, owner-scope,
+architecture, sanitizer, and external-dependency limits in the unresolved
+table remain explicit; approval does not convert them into passes.
