@@ -18915,6 +18915,7 @@ static ma_result ma_job_process__noop(ma_job* pJob);
 static ma_result ma_job_process__quit(ma_job* pJob);
 static ma_result ma_job_process__custom(ma_job* pJob);
 static ma_result ma_job_process_tracked(ma_job* pJob);
+static ma_bool32 ma_job_queue_complete_current_job(ma_job* pJob);
 static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job* pJob);
 static ma_result ma_job_process__resource_manager__free_data_buffer_node(ma_job* pJob);
 static ma_result ma_job_process__resource_manager__page_data_buffer_node(ma_job* pJob);
@@ -18952,13 +18953,20 @@ static ma_job_proc g_jobVTable[MA_JOB_TYPE_COUNT] =
 #endif
 };
 
+static ma_bool32 ma_job_code_is_dispatchable(ma_uint16 code)
+{
+    return code < MA_JOB_TYPE_COUNT && g_jobVTable[code] != NULL;
+}
+
 MA_API ma_result ma_job_process(ma_job* pJob)
 {
     if (pJob == NULL) {
         return MA_INVALID_ARGS;
     }
 
-    if (pJob->toc.breakup.code >= MA_JOB_TYPE_COUNT) {
+    if (ma_job_code_is_dispatchable(pJob->toc.breakup.code) == MA_FALSE) {
+        /* A dequeued retained job must release its admission record even if its code was corrupted. */
+        (void)ma_job_queue_complete_current_job(pJob);
         return MA_INVALID_OPERATION;
     }
 
@@ -19218,6 +19226,7 @@ static ma_job_queue_private* ma_job_queue_get_private(ma_job_queue* pQueue)
     return (ma_job_queue_private*)pQueue->_pHeap;
 }
 
+#ifndef MA_NO_RESOURCE_MANAGER
 static ma_result ma_job_queue_enable_resource_manager_mode(ma_job_queue* pQueue)
 {
     ma_job_queue_private* pPrivate;
@@ -19249,6 +19258,7 @@ static ma_result ma_job_queue_enable_resource_manager_mode(ma_job_queue* pQueue)
     pPrivate->isResourceManagerQueue = MA_TRUE;
     return MA_SUCCESS;
 }
+#endif
 
 static ma_bool32 ma_job_queue_is_resource_manager_mode(ma_job_queue* pQueue)
 {
@@ -19309,7 +19319,7 @@ static void ma_job_queue_prepare_record_job(ma_job_queue_record* pRecord, const 
     pRecord->pJob->next = MA_JOB_ID_NONE;
 }
 
-static ma_result ma_job_queue_post_resource_manager_new(ma_job_queue* pQueue, const ma_job* pJob, volatile ma_uint32* pExecutionCounter)
+static ma_result ma_job_queue_post_resource_manager_new(ma_job_queue* pQueue, const ma_job* pJob, volatile ma_uint32* pExecutionCounter, volatile ma_result* pRequiredState, ma_result requiredState, ma_bool32* pWasPosted)
 {
     ma_result result;
     ma_job_queue_private* pPrivate;
@@ -19318,8 +19328,21 @@ static ma_result ma_job_queue_post_resource_manager_new(ma_job_queue* pQueue, co
     MA_ASSERT(pQueue != NULL);
     MA_ASSERT(pJob != NULL);
 
+    if (pWasPosted != NULL) {
+        *pWasPosted = MA_FALSE;
+    }
+
+    if (ma_job_code_is_dispatchable(pJob->toc.breakup.code) == MA_FALSE) {
+        return MA_INVALID_OPERATION;
+    }
+
     pPrivate = ma_job_queue_get_private(pQueue);
     ma_spinlock_lock(&pPrivate->lock);
+
+    if (pRequiredState != NULL && ma_atomic_load_i32((volatile ma_int32*)pRequiredState) != requiredState) {
+        ma_spinlock_unlock(&pPrivate->lock);
+        return MA_SUCCESS;
+    }
 
     /*
     Resource-manager shutdown is a queue state rather than an admitted job. This lets workers
@@ -19362,17 +19385,25 @@ static ma_result ma_job_queue_post_resource_manager_new(ma_job_queue* pQueue, co
     ma_job_queue_prepare_record_job(pRecord, pJob, pExecutionCounter);
     ma_job_queue_append_ready_record_locked(pPrivate, pRecord);
 
+    if (pWasPosted != NULL) {
+        *pWasPosted = MA_TRUE;
+    }
+
     ma_spinlock_unlock(&pPrivate->lock);
     return MA_SUCCESS;
 }
 
-static ma_result ma_job_queue_post_resource_manager_external(ma_job_queue* pQueue, ma_job_queue_record* pRecord, ma_job* pRecordJob, const ma_job* pJob, volatile ma_uint32* pExecutionCounter)
+#ifndef MA_NO_RESOURCE_MANAGER
+static ma_result ma_job_queue_post_resource_manager_external(ma_job_queue* pQueue, ma_job_queue_record* pRecord, ma_job* pRecordJob, const ma_job* pJob, volatile ma_uint32* pExecutionCounter, volatile ma_result* pPublishedState, ma_result publishedState)
 {
     ma_result result;
     ma_job_queue_private* pPrivate;
 
     if (pQueue == NULL || pRecord == NULL || pRecordJob == NULL || pJob == NULL) {
         return MA_INVALID_ARGS;
+    }
+    if (ma_job_code_is_dispatchable(pJob->toc.breakup.code) == MA_FALSE) {
+        return MA_INVALID_OPERATION;
     }
 
     pPrivate = ma_job_queue_get_private(pQueue);
@@ -19394,12 +19425,16 @@ static ma_result ma_job_queue_post_resource_manager_external(ma_job_queue* pQueu
     pRecord->pJob       = pRecordJob;
     pRecord->slot       = MA_JOB_SLOT_EXTERNAL_RECORD;
     pRecord->isExternal = MA_TRUE;
+    if (pPublishedState != NULL) {
+        ma_atomic_exchange_i32((volatile ma_int32*)pPublishedState, publishedState);
+    }
     ma_job_queue_prepare_record_job(pRecord, pJob, pExecutionCounter);
     ma_job_queue_append_ready_record_locked(pPrivate, pRecord);
 
     ma_spinlock_unlock(&pPrivate->lock);
     return MA_SUCCESS;
 }
+#endif
 
 static ma_job_queue_record* ma_job_queue_record_from_job(const ma_job* pJob)
 {
@@ -19448,6 +19483,7 @@ static ma_result ma_job_queue_next_resource_manager(ma_job_queue* pQueue, ma_job
         if (pPrivate->isShutdownRequested && pPrivate->runningCount == 0) {
             /* Pass cancellation between all blocking consumers after the queue has drained. */
             result = ma_job_queue_wake_one_locked(pQueue);
+            *pJob = ma_job_init(MA_JOB_TYPE_QUIT);
             ma_spinlock_unlock(&pPrivate->lock);
             return (result == MA_SUCCESS) ? MA_CANCELLED : result;
         }
@@ -19526,8 +19562,12 @@ static ma_result ma_job_queue_post_internal(ma_job_queue* pQueue, const ma_job* 
         return MA_INVALID_ARGS;
     }
 
+    if (ma_job_code_is_dispatchable(pJob->toc.breakup.code) == MA_FALSE) {
+        return MA_INVALID_OPERATION;
+    }
+
     if (ma_job_queue_is_resource_manager_mode(pQueue)) {
-        return ma_job_queue_post_resource_manager_new(pQueue, pJob, pExecutionCounter);
+        return ma_job_queue_post_resource_manager_new(pQueue, pJob, pExecutionCounter, NULL, (ma_result)0, NULL);
     }
 
     /* We need a new slot. */
@@ -19734,7 +19774,8 @@ static ma_bool32 ma_job_queue_complete_current_job(ma_job* pJob)
     return MA_TRUE;
 }
 
-static ma_result ma_job_queue_defer_or_continue_current_job(ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter)
+#ifndef MA_NO_RESOURCE_MANAGER
+static ma_result ma_job_queue_defer_or_continue_current_job(ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter, volatile ma_result* pRequiredState, ma_result requiredState, ma_bool32* pWasPosted)
 {
     ma_result result;
     ma_job_queue_record* pRecord;
@@ -19742,6 +19783,13 @@ static ma_result ma_job_queue_defer_or_continue_current_job(ma_job* pCurrentJob,
 
     if (pCurrentJob == NULL || pNextJob == NULL) {
         return MA_INVALID_ARGS;
+    }
+    if (ma_job_code_is_dispatchable(pNextJob->toc.breakup.code) == MA_FALSE) {
+        return MA_INVALID_OPERATION;
+    }
+
+    if (pWasPosted != NULL) {
+        *pWasPosted = MA_FALSE;
     }
 
     pRecord = ma_job_queue_record_from_job(pCurrentJob);
@@ -19757,6 +19805,11 @@ static ma_result ma_job_queue_defer_or_continue_current_job(ma_job* pCurrentJob,
         return MA_INVALID_OPERATION;
     }
 
+    if (pRequiredState != NULL && ma_atomic_load_i32((volatile ma_int32*)pRequiredState) != requiredState) {
+        ma_spinlock_unlock(&pPrivate->lock);
+        return MA_SUCCESS;
+    }
+
     result = ma_job_queue_wake_one_locked(pRecord->pQueue);
     if (result != MA_SUCCESS) {
         ma_spinlock_unlock(&pPrivate->lock);
@@ -19770,9 +19823,13 @@ static ma_result ma_job_queue_defer_or_continue_current_job(ma_job* pCurrentJob,
 
     /* The queued record, not this worker copy, now owns the accepted operation. */
     pCurrentJob->next = 0;
+    if (pWasPosted != NULL) {
+        *pWasPosted = MA_TRUE;
+    }
     ma_spinlock_unlock(&pPrivate->lock);
     return MA_SUCCESS;
 }
+#endif
 
 static ma_result ma_job_process_tracked(ma_job* pJob)
 {
@@ -71118,7 +71175,7 @@ MA_API ma_result ma_noise_read_pcm_frames(ma_noise* pNoise, void* pFramesOut, ma
 
 static ma_result ma_resource_manager_post_job_with_execution_order(ma_resource_manager* pResourceManager, const ma_job* pJob, volatile ma_uint32* pExecutionCounter);
 static ma_result ma_resource_manager_defer_current_job(ma_resource_manager* pResourceManager, ma_job* pJob);
-static ma_result ma_resource_manager_continue_current_job_with_execution_order(ma_resource_manager* pResourceManager, ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter);
+static ma_result ma_resource_manager_continue_current_job_with_execution_order(ma_resource_manager* pResourceManager, ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter, volatile ma_result* pRequiredState, ma_result requiredState, ma_bool32* pWasPosted);
 
 MA_API ma_resource_manager_pipeline_notifications ma_resource_manager_pipeline_notifications_init(void)
 {
@@ -72931,9 +72988,6 @@ stage2:
             /* The sound is still loading. We need to delay the freeing of the node to a safe time. */
             ma_job job;
 
-            /* We need to mark the node as unavailable for the sake of the resource manager worker threads. */
-            ma_atomic_exchange_i32(&pDataBufferNode->result, MA_UNAVAILABLE);
-
             job = ma_job_init(MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER_NODE);
             job.data.resourceManager.freeDataBufferNode.pResourceManager = pResourceManager;
             job.data.resourceManager.freeDataBufferNode.pDataBufferNode  = pDataBufferNode;
@@ -72947,7 +73001,9 @@ stage2:
                     &pPrivateNode->retirementRecord,
                     &pPrivateNode->retirementJob,
                     &job,
-                    &pDataBufferNode->executionCounter);
+                    &pDataBufferNode->executionCounter,
+                    &pDataBufferNode->result,
+                    MA_UNAVAILABLE);
             }
             if (result != MA_SUCCESS) {
                 ma_log_postf(ma_resource_manager_get_log(pResourceManager), MA_LOG_LEVEL_ERROR, "Failed to post MA_JOB_TYPE_RESOURCE_MANAGER_FREE_DATA_BUFFER_NODE job. %s.\n", ma_result_description(result));
@@ -73389,7 +73445,9 @@ MA_API ma_result ma_resource_manager_data_buffer_uninit(ma_resource_manager_data
             &retirementRecord,
             &job,
             &job,
-            &pDataBuffer->executionCounter);
+            &pDataBuffer->executionCounter,
+            NULL,
+            (ma_result)0);
         if (result != MA_SUCCESS) {
             ma_atomic_exchange_i32(&pDataBuffer->result, previousResult);
             ma_resource_manager_inline_notification_uninit(&notification);
@@ -74092,7 +74150,9 @@ MA_API ma_result ma_resource_manager_data_stream_uninit(ma_resource_manager_data
         &retirementRecord,
         &job,
         &job,
-        &pDataStream->executionCounter);
+        &pDataStream->executionCounter,
+        NULL,
+        (ma_result)0);
     if (result != MA_SUCCESS) {
         ma_atomic_exchange_i32(&pDataStream->result, previousResult);
         ma_resource_manager_inline_notification_uninit(&freeEvent);
@@ -74873,24 +74933,24 @@ static ma_result ma_resource_manager_defer_current_job(ma_resource_manager* pRes
     MA_RESOURCE_MANAGER_DEFER_CURRENT_JOB_HOOK(pJob);
 
     if (ma_job_queue_record_from_job(pJob) != NULL) {
-        return ma_job_queue_defer_or_continue_current_job(pJob, pJob, NULL);
+        return ma_job_queue_defer_or_continue_current_job(pJob, pJob, NULL, NULL, (ma_result)0, NULL);
     }
 
     /* Inline/direct jobs have not transferred ownership to the queue. */
     return ma_resource_manager_post_job(pResourceManager, pJob);
 }
 
-static ma_result ma_resource_manager_continue_current_job_with_execution_order(ma_resource_manager* pResourceManager, ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter)
+static ma_result ma_resource_manager_continue_current_job_with_execution_order(ma_resource_manager* pResourceManager, ma_job* pCurrentJob, const ma_job* pNextJob, volatile ma_uint32* pExecutionCounter, volatile ma_result* pRequiredState, ma_result requiredState, ma_bool32* pWasPosted)
 {
-    if (pResourceManager == NULL || pCurrentJob == NULL || pNextJob == NULL || pExecutionCounter == NULL) {
+    if (pResourceManager == NULL || pCurrentJob == NULL || pNextJob == NULL || pExecutionCounter == NULL || pWasPosted == NULL) {
         return MA_INVALID_ARGS;
     }
 
     if (ma_job_queue_record_from_job(pCurrentJob) != NULL) {
-        return ma_job_queue_defer_or_continue_current_job(pCurrentJob, pNextJob, pExecutionCounter);
+        return ma_job_queue_defer_or_continue_current_job(pCurrentJob, pNextJob, pExecutionCounter, pRequiredState, requiredState, pWasPosted);
     }
 
-    return ma_resource_manager_post_job_with_execution_order(pResourceManager, pNextJob, pExecutionCounter);
+    return ma_job_queue_post_resource_manager_new(&pResourceManager->jobQueue, pNextJob, pExecutionCounter, pRequiredState, requiredState, pWasPosted);
 }
 
 MA_API ma_result ma_resource_manager_post_job_quit(ma_resource_manager* pResourceManager)
@@ -74961,6 +75021,7 @@ static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job*
         */
         ma_decoder* pDecoder;   /* <-- Free'd on the last page decode. */
         ma_job pageDataBufferNodeJob;
+        ma_bool32 wasPagePosted;
 
         /* Allocate the decoder by initializing a decoded data supply. */
         result = ma_resource_manager_data_buffer_node_init_supply_decoded(pResourceManager, pDataBufferNode, pJob->data.resourceManager.loadDataBufferNode.pFilePath, pJob->data.resourceManager.loadDataBufferNode.pFilePathW, pJob->data.resourceManager.loadDataBufferNode.flags, &pDecoder);
@@ -75002,7 +75063,14 @@ static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job*
         pageDataBufferNodeJob.data.resourceManager.pageDataBufferNode.pDoneFence        = pJob->data.resourceManager.loadDataBufferNode.pDoneFence;
 
         /* The job has been set up so it can now be posted. */
-        result = ma_resource_manager_continue_current_job_with_execution_order(pResourceManager, pJob, &pageDataBufferNodeJob, &pDataBufferNode->executionCounter);
+        result = ma_resource_manager_continue_current_job_with_execution_order(
+            pResourceManager,
+            pJob,
+            &pageDataBufferNodeJob,
+            &pDataBufferNode->executionCounter,
+            &pDataBufferNode->result,
+            MA_BUSY,
+            &wasPagePosted);
 
         /*
         When we get here, we want to make sure the result code is set to MA_BUSY. The reason for
@@ -75014,6 +75082,11 @@ static ma_result ma_job_process__resource_manager__load_data_buffer_node(ma_job*
             ma_log_postf(ma_resource_manager_get_log(pResourceManager), MA_LOG_LEVEL_ERROR, "Failed to post MA_JOB_TYPE_RESOURCE_MANAGER_PAGE_DATA_BUFFER_NODE job. %s\n", ma_result_description(result));
             ma_decoder_uninit(pDecoder);
             ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
+        } else if (wasPagePosted == MA_FALSE) {
+            /* Last-reference retirement won the queue serialization. The current job owns cleanup. */
+            ma_decoder_uninit(pDecoder);
+            ma_free(pDecoder, &pResourceManager->config.allocationCallbacks);
+            result = ma_resource_manager_data_buffer_node_result(pDataBufferNode);
         } else {
             result = MA_BUSY;
         }
@@ -75145,13 +75218,23 @@ static ma_result ma_job_process__resource_manager__page_data_buffer_node(ma_job*
     */
     if (result == MA_SUCCESS) {
         ma_job newJob;
+        ma_bool32 wasPagePosted;
         newJob = *pJob; /* Everything is the same as the input job; posting allocates a fresh execution order. */
 
-        result = ma_resource_manager_continue_current_job_with_execution_order(pResourceManager, pJob, &newJob, &pDataBufferNode->executionCounter);
+        result = ma_resource_manager_continue_current_job_with_execution_order(
+            pResourceManager,
+            pJob,
+            &newJob,
+            &pDataBufferNode->executionCounter,
+            &pDataBufferNode->result,
+            MA_BUSY,
+            &wasPagePosted);
 
         /* Since the sound isn't yet fully decoded we want the status to be set to busy. */
-        if (result == MA_SUCCESS) {
+        if (result == MA_SUCCESS && wasPagePosted) {
             result  = MA_BUSY;
+        } else if (result == MA_SUCCESS) {
+            result = ma_resource_manager_data_buffer_node_result(pDataBufferNode);
         }
     }
 

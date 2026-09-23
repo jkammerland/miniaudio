@@ -297,6 +297,10 @@ typedef struct
     ma_uint32 uninitCount;
     ma_uint32 readCount;
     ma_uint64 framesAvailable;
+    ma_event* pInitEnteredEvent;
+    ma_event* pInitContinueEvent;
+    ma_event* pReadEnteredEvent;
+    ma_event* pReadContinueEvent;
 } hardening_decoder_backend_state;
 
 typedef struct
@@ -348,6 +352,51 @@ typedef struct
     volatile ma_uint32 enteredCount;
     volatile ma_uint32 completedCount;
 } hardening_managed_worker_barrier;
+
+typedef struct
+{
+    ma_resource_manager* pResourceManager;
+    ma_result finalResult;
+    ma_uint16 finalCode;
+    ma_uint32 iterationCount;
+    ma_bool32 sawQuit;
+} hardening_job_code_worker_data;
+
+static ma_result hardening_counting_custom_job(ma_job* pJob)
+{
+    volatile ma_uint32* pCount = (volatile ma_uint32*)pJob->data.custom.data0;
+    if (pCount == NULL) {
+        return MA_INVALID_ARGS;
+    }
+
+    ma_atomic_fetch_add_32(pCount, 1);
+    return MA_SUCCESS;
+}
+
+static ma_thread_result MA_THREADCALL hardening_job_code_worker_entry(void* pUserData)
+{
+    hardening_job_code_worker_data* pThreadData = (hardening_job_code_worker_data*)pUserData;
+    ma_job job;
+
+    job = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    job.data.custom.proc = hardening_counting_custom_job;
+    job.data.custom.data0 = 0;
+    pThreadData->finalResult = MA_ERROR;
+
+    while (pThreadData->iterationCount < 4) {
+        pThreadData->finalResult = ma_resource_manager_next_job(pThreadData->pResourceManager, &job);
+        pThreadData->finalCode = job.toc.breakup.code;
+        pThreadData->iterationCount += 1;
+        if (job.toc.breakup.code == MA_JOB_TYPE_QUIT) {
+            pThreadData->sawQuit = MA_TRUE;
+            break;
+        }
+
+        (void)ma_job_process(&job);
+    }
+
+    return (ma_thread_result)0;
+}
 
 static ma_thread_result MA_THREADCALL hardening_job_thread_entry(void* pUserData)
 {
@@ -590,6 +639,13 @@ static ma_result hardening_decoder_backend_on_read(ma_data_source* pDataSource, 
     hardening_decoder_backend* pBackend = (hardening_decoder_backend*)pDataSource;
     ma_uint64 framesRead;
 
+    if (pBackend->pState->pReadEnteredEvent != NULL) {
+        ma_event_signal(pBackend->pState->pReadEnteredEvent);
+    }
+    if (pBackend->pState->pReadContinueEvent != NULL) {
+        ma_event_wait(pBackend->pState->pReadContinueEvent);
+    }
+
     pBackend->pState->readCount += 1;
     framesRead = frameCount;
     if (framesRead > pBackend->pState->framesAvailable) {
@@ -680,6 +736,13 @@ static ma_result hardening_decoder_backend_on_init(void* pUserData, ma_read_proc
     (void)onTell;
     (void)pReadSeekTellUserData;
     (void)pConfig;
+
+    if (pState->pInitEnteredEvent != NULL) {
+        ma_event_signal(pState->pInitEnteredEvent);
+    }
+    if (pState->pInitContinueEvent != NULL) {
+        ma_event_wait(pState->pInitContinueEvent);
+    }
 
     pBackend = (hardening_decoder_backend*)ma_malloc(sizeof(*pBackend), pAllocationCallbacks);
     if (pBackend == NULL) {
@@ -2380,6 +2443,247 @@ done:
     return failed;
 }
 
+static int resource_manager_test_initial_continuation_cancelled_before_publication(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_job_thread_data threadData;
+    ma_resource_manager_data_buffer_node* pNode;
+    ma_event initEnteredEvent;
+    ma_event initContinueEvent;
+    ma_thread workerThread;
+    ma_job queuedJob;
+    ma_job leftoverJob;
+    ma_result freeResult;
+    ma_result result;
+    int failed;
+
+    if (ma_event_init(&initEnteredEvent) != MA_SUCCESS) {
+        return 1;
+    }
+    if (ma_event_init(&initContinueEvent) != MA_SUCCESS) {
+        ma_event_uninit(&initEnteredEvent);
+        return 1;
+    }
+
+    failed = 0;
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2);
+    if (result != MA_SUCCESS) {
+        ma_event_uninit(&initContinueEvent);
+        ma_event_uninit(&initEnteredEvent);
+        return 1;
+    }
+
+    fixture.backendState.pInitEnteredEvent = &initEnteredEvent;
+    fixture.backendState.pInitContinueEvent = &initContinueEvent;
+    result = ma_resource_manager_register_file(&fixture.resourceManager, "cancel-initial-continuation.custom",
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC | MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE);
+    pNode = fixture.resourceManager.pRootDataBufferNode;
+    if (result != MA_SUCCESS || pNode == NULL ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &queuedJob) != MA_SUCCESS) {
+        printf("cancelled initial-continuation setup failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    /* Put the owner sequence across uint32 wrap while the only ordinary admission is running. */
+    queuedJob.order = 0xFFFFFFFF;
+    pNode->executionPointer = 0xFFFFFFFF;
+    pNode->executionCounter = 0;
+    MA_ZERO_OBJECT(&threadData);
+    threadData.job = queuedJob;
+    result = ma_thread_create(&workerThread, ma_thread_priority_normal, 0, hardening_job_thread_entry, &threadData, NULL);
+    if (result != MA_SUCCESS) {
+        printf("cancelled initial-continuation worker creation failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    ma_event_wait(&initEnteredEvent);
+    result = ma_resource_manager_unregister_file(&fixture.resourceManager, "cancel-initial-continuation.custom");
+    if (result != MA_SUCCESS || fixture.resourceManager.pRootDataBufferNode != NULL ||
+        ma_resource_manager_data_buffer_node_result(pNode) != MA_UNAVAILABLE ||
+        pNode->executionCounter != 1) {
+        printf("cancelled initial-continuation retirement did not win: result=%d counter=%u root=%p\n",
+            result, pNode->executionCounter, (void*)fixture.resourceManager.pRootDataBufferNode);
+        failed = 1;
+    }
+
+    ma_event_signal(&initContinueEvent);
+    ma_thread_wait(&workerThread);
+    fixture.backendState.pInitEnteredEvent = NULL;
+    fixture.backendState.pInitContinueEvent = NULL;
+
+    if (threadData.result != MA_UNAVAILABLE || pNode->executionPointer != 0 || pNode->executionCounter != 1 ||
+        fixture.backendState.initCount != 1 || fixture.backendState.uninitCount != 1) {
+        printf("cancelled initial-continuation worker was result=%d pointer/counter=%u/%u decoder=%u/%u\n",
+            threadData.result, pNode->executionPointer, pNode->executionCounter,
+            fixture.backendState.initCount, fixture.backendState.uninitCount);
+        failed = 1;
+    }
+
+    freeResult = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    result = ma_resource_manager_next_job(&fixture.resourceManager, &leftoverJob);
+    if (freeResult != MA_SUCCESS || result != MA_NO_DATA_AVAILABLE ||
+        fixture.backendState.initCount != fixture.backendState.uninitCount ||
+        fixture.vfs.openCount != fixture.vfs.closeCount ||
+        hardening_tracked_live_allocation_count(&fixture.allocations) != fixture.baselineLiveAllocationCount) {
+        printf("cancelled initial-continuation cleanup was free=%d next=%d decoder=%u/%u vfs=%u/%u\n",
+            freeResult, result, fixture.backendState.initCount, fixture.backendState.uninitCount,
+            fixture.vfs.openCount, fixture.vfs.closeCount);
+        failed = 1;
+    }
+
+done:
+    fixture.backendState.pInitEnteredEvent = NULL;
+    fixture.backendState.pInitContinueEvent = NULL;
+    if (fixture.resourceManager.pRootDataBufferNode != NULL) {
+        (void)ma_resource_manager_unregister_file(&fixture.resourceManager, "cancel-initial-continuation.custom");
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "cancelled initial continuation");
+    ma_event_uninit(&initContinueEvent);
+    ma_event_uninit(&initEnteredEvent);
+    return failed;
+}
+
+static int resource_manager_test_page_continuation_cancelled_before_publication(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_managed_worker_barrier fillerBarrier;
+    hardening_job_thread_data pageThreadData;
+    hardening_job_thread_data fillerThreadData;
+    ma_resource_manager_data_buffer_node* pNode;
+    ma_event readEnteredEvent;
+    ma_event readContinueEvent;
+    ma_thread pageThread;
+    ma_thread fillerThread;
+    ma_job pageJob;
+    ma_job fillerJob;
+    ma_job leftoverJob;
+    ma_result freeResult;
+    ma_result result;
+    int failed;
+
+    if (ma_event_init(&readEnteredEvent) != MA_SUCCESS) {
+        return 1;
+    }
+    if (ma_event_init(&readContinueEvent) != MA_SUCCESS) {
+        ma_event_uninit(&readEnteredEvent);
+        return 1;
+    }
+    if (hardening_managed_worker_barrier_init(&fillerBarrier) != MA_SUCCESS) {
+        ma_event_uninit(&readContinueEvent);
+        ma_event_uninit(&readEnteredEvent);
+        return 1;
+    }
+
+    failed = 0;
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 3);
+    if (result != MA_SUCCESS) {
+        hardening_managed_worker_barrier_uninit(&fillerBarrier);
+        ma_event_uninit(&readContinueEvent);
+        ma_event_uninit(&readEnteredEvent);
+        return 1;
+    }
+
+    result = ma_resource_manager_register_file(&fixture.resourceManager, "cancel-page-continuation.custom",
+        MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_ASYNC | MA_RESOURCE_MANAGER_DATA_SOURCE_FLAG_DECODE);
+    if (result == MA_SUCCESS) {
+        result = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    }
+    pNode = fixture.resourceManager.pRootDataBufferNode;
+    if (result != MA_SUCCESS || pNode == NULL ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &pageJob) != MA_SUCCESS) {
+        printf("cancelled page-continuation setup failed: %d\n", result);
+        failed = 1;
+        goto done;
+    }
+
+    pageJob.order = 0xFFFFFFFF;
+    pNode->executionPointer = 0xFFFFFFFF;
+    pNode->executionCounter = 0;
+    fixture.backendState.framesAvailable = 13;
+    fixture.backendState.pReadEnteredEvent = &readEnteredEvent;
+    fixture.backendState.pReadContinueEvent = &readContinueEvent;
+
+    fillerJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    fillerJob.data.custom.proc = hardening_managed_worker_barrier_job;
+    fillerJob.data.custom.data0 = (ma_uintptr)&fillerBarrier;
+    fillerJob.data.custom.data1 = 0;
+    if (ma_resource_manager_post_job(&fixture.resourceManager, &fillerJob) != MA_SUCCESS ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &fillerThreadData.job) != MA_SUCCESS) {
+        printf("cancelled page-continuation could not saturate the second admission\n");
+        failed = 1;
+        goto done;
+    }
+
+    MA_ZERO_OBJECT(&pageThreadData);
+    pageThreadData.job = pageJob;
+    fillerThreadData.result = MA_ERROR;
+    result = ma_thread_create(&pageThread, ma_thread_priority_normal, 0, hardening_job_thread_entry, &pageThreadData, NULL);
+    if (result != MA_SUCCESS) {
+        failed = 1;
+        goto done;
+    }
+    result = ma_thread_create(&fillerThread, ma_thread_priority_normal, 0, hardening_job_thread_entry, &fillerThreadData, NULL);
+    if (result != MA_SUCCESS) {
+        ma_event_signal(&readContinueEvent);
+        ma_thread_wait(&pageThread);
+        failed = 1;
+        goto done;
+    }
+
+    ma_event_wait(&readEnteredEvent);
+    ma_event_wait(&fillerBarrier.enteredEvents[0]);
+    result = ma_resource_manager_unregister_file(&fixture.resourceManager, "cancel-page-continuation.custom");
+    if (result != MA_SUCCESS || fixture.resourceManager.pRootDataBufferNode != NULL ||
+        ma_resource_manager_data_buffer_node_result(pNode) != MA_UNAVAILABLE ||
+        pNode->executionCounter != 1) {
+        printf("cancelled page-continuation retirement did not win: result=%d counter=%u root=%p\n",
+            result, pNode->executionCounter, (void*)fixture.resourceManager.pRootDataBufferNode);
+        failed = 1;
+    }
+
+    ma_event_signal(&readContinueEvent);
+    ma_event_signal(&fillerBarrier.continueEvents[0]);
+    ma_thread_wait(&pageThread);
+    ma_thread_wait(&fillerThread);
+    fixture.backendState.pReadEnteredEvent = NULL;
+    fixture.backendState.pReadContinueEvent = NULL;
+
+    if (pageThreadData.result != MA_UNAVAILABLE || fillerThreadData.result != MA_SUCCESS ||
+        pNode->executionPointer != 0 || pNode->executionCounter != 1 ||
+        ma_atomic_load_32(&fillerBarrier.completedCount) != 1 || fixture.backendState.readCount != 1) {
+        printf("cancelled page-continuation workers were page=%d filler=%d pointer/counter=%u/%u completed=%u reads=%u\n",
+            pageThreadData.result, fillerThreadData.result, pNode->executionPointer, pNode->executionCounter,
+            ma_atomic_load_32(&fillerBarrier.completedCount), fixture.backendState.readCount);
+        failed = 1;
+    }
+
+    freeResult = ma_resource_manager_process_next_job(&fixture.resourceManager);
+    result = ma_resource_manager_next_job(&fixture.resourceManager, &leftoverJob);
+    if (freeResult != MA_SUCCESS || result != MA_NO_DATA_AVAILABLE ||
+        fixture.backendState.initCount != fixture.backendState.uninitCount ||
+        fixture.vfs.openCount != fixture.vfs.closeCount ||
+        hardening_tracked_live_allocation_count(&fixture.allocations) != fixture.baselineLiveAllocationCount) {
+        printf("cancelled page-continuation cleanup was free=%d next=%d decoder=%u/%u vfs=%u/%u\n",
+            freeResult, result, fixture.backendState.initCount, fixture.backendState.uninitCount,
+            fixture.vfs.openCount, fixture.vfs.closeCount);
+        failed = 1;
+    }
+
+done:
+    fixture.backendState.pReadEnteredEvent = NULL;
+    fixture.backendState.pReadContinueEvent = NULL;
+    if (fixture.resourceManager.pRootDataBufferNode != NULL) {
+        (void)ma_resource_manager_unregister_file(&fixture.resourceManager, "cancel-page-continuation.custom");
+    }
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "cancelled page continuation");
+    hardening_managed_worker_barrier_uninit(&fillerBarrier);
+    ma_event_uninit(&readContinueEvent);
+    ma_event_uninit(&readEnteredEvent);
+    return failed;
+}
+
 static int hardening_check_saturated_deferral(hardening_resource_manager_fixture* pFixture, ma_job* pPostedJob, const char* pName)
 {
     ma_job currentJob;
@@ -2675,6 +2979,265 @@ static int resource_manager_test_two_worker_saturated_shutdown(void)
     }
 
     hardening_managed_worker_barrier_uninit(&barrier);
+    return failed;
+}
+
+static int hardening_check_shutdown_quit_output(ma_uint32 flags, const char* pName)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_job outputJob;
+    ma_result firstResult;
+    ma_result secondResult;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init_ex(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2, 0, flags);
+    if (result != MA_SUCCESS) {
+        printf("%s fixture init failed: %d\n", pName, result);
+        return 1;
+    }
+
+    outputJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    result = ma_resource_manager_post_job_quit(&fixture.resourceManager);
+    firstResult = ma_resource_manager_next_job(&fixture.resourceManager, &outputJob);
+    failed = 0;
+    if (result != MA_SUCCESS || firstResult != MA_CANCELLED || outputJob.toc.breakup.code != MA_JOB_TYPE_QUIT ||
+        ma_job_queue_record_from_job(&outputJob) != NULL) {
+        printf("%s first cancellation was post=%d next=%d code=%u tagged=%u\n", pName,
+            result, firstResult, outputJob.toc.breakup.code, ma_job_queue_record_from_job(&outputJob) != NULL);
+        failed = 1;
+    }
+
+    outputJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    secondResult = ma_resource_manager_next_job(&fixture.resourceManager, &outputJob);
+    if (secondResult != MA_CANCELLED || outputJob.toc.breakup.code != MA_JOB_TYPE_QUIT ||
+        ma_job_queue_record_from_job(&outputJob) != NULL) {
+        printf("%s repeated cancellation was next=%d code=%u tagged=%u\n", pName,
+            secondResult, outputJob.toc.breakup.code, ma_job_queue_record_from_job(&outputJob) != NULL);
+        failed = 1;
+    }
+
+    failed += hardening_resource_manager_fixture_uninit(&fixture, pName);
+    return failed;
+}
+
+static int resource_manager_test_shutdown_quit_output(void)
+{
+    hardening_resource_manager_fixture fixture;
+    hardening_job_code_worker_data workers[2];
+    ma_thread threads[2];
+    ma_job customJob;
+    volatile ma_uint32 callbackCount;
+    ma_result result;
+    ma_uint32 iWorker;
+    ma_uint32 initializedWorkerCount;
+    int failed;
+
+    failed = hardening_check_shutdown_quit_output(MA_RESOURCE_MANAGER_FLAG_NON_BLOCKING, "nonblocking quit output");
+    failed += hardening_check_shutdown_quit_output(0, "blocking quit output");
+
+    result = hardening_resource_manager_fixture_init_ex(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2, 0, 0);
+    if (result != MA_SUCCESS) {
+        return failed + 1;
+    }
+
+    callbackCount = 0;
+    customJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    customJob.data.custom.proc = hardening_counting_custom_job;
+    customJob.data.custom.data0 = (ma_uintptr)&callbackCount;
+    if (ma_resource_manager_post_job(&fixture.resourceManager, &customJob) != MA_SUCCESS ||
+        ma_resource_manager_post_job_quit(&fixture.resourceManager) != MA_SUCCESS) {
+        failed += 1;
+        failed += hardening_resource_manager_fixture_uninit(&fixture, "job-code worker quit output");
+        return failed;
+    }
+
+    MA_ZERO_MEMORY(workers, sizeof(workers));
+    initializedWorkerCount = 0;
+    for (iWorker = 0; iWorker < 2; iWorker += 1) {
+        workers[iWorker].pResourceManager = &fixture.resourceManager;
+        result = ma_thread_create(&threads[iWorker], ma_thread_priority_normal, 0, hardening_job_code_worker_entry, &workers[iWorker], NULL);
+        if (result != MA_SUCCESS) {
+            break;
+        }
+        initializedWorkerCount += 1;
+    }
+    for (iWorker = 0; iWorker < initializedWorkerCount; iWorker += 1) {
+        ma_thread_wait(&threads[iWorker]);
+    }
+
+    if (initializedWorkerCount != 2 || callbackCount != 1) {
+        printf("job-code workers initialized=%u callback-count=%u\n", initializedWorkerCount, callbackCount);
+        failed = 1;
+    }
+    for (iWorker = 0; iWorker < initializedWorkerCount; iWorker += 1) {
+        if (workers[iWorker].finalResult != MA_CANCELLED || workers[iWorker].finalCode != MA_JOB_TYPE_QUIT ||
+            workers[iWorker].sawQuit == MA_FALSE) {
+            printf("job-code worker %u ended result=%d code=%u saw-quit=%u iterations=%u\n", iWorker,
+                workers[iWorker].finalResult, workers[iWorker].finalCode, workers[iWorker].sawQuit,
+                workers[iWorker].iterationCount);
+            failed = 1;
+        }
+    }
+
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "job-code worker quit output");
+    return failed;
+}
+
+static int resource_manager_test_invalid_dispatch_releases_admission(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_job invalidJob;
+    ma_job validJob;
+    ma_job dequeuedJob;
+    volatile ma_uint32 callbackCount;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+
+    failed = 0;
+    callbackCount = 0;
+    invalidJob = ma_job_init(MA_JOB_TYPE_COUNT);
+    result = ma_resource_manager_post_job(&fixture.resourceManager, &invalidJob);
+    if (result != MA_INVALID_OPERATION) {
+        printf("invalid dispatch was admitted: %d\n", result);
+        failed = 1;
+    }
+
+    invalidJob = ma_job_init(MA_JOB_TYPE_DEVICE_AAUDIO_REROUTE);
+    result = ma_resource_manager_post_job(&fixture.resourceManager, &invalidJob);
+    if (result != MA_INVALID_OPERATION) {
+        printf("disabled dispatch was admitted: %d\n", result);
+        failed = 1;
+    }
+
+    validJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    validJob.data.custom.proc = hardening_counting_custom_job;
+    validJob.data.custom.data0 = (ma_uintptr)&callbackCount;
+    if (ma_resource_manager_post_job(&fixture.resourceManager, &validJob) != MA_SUCCESS ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &dequeuedJob) != MA_SUCCESS) {
+        printf("invalid-dispatch terminal validation setup failed\n");
+        failed = 1;
+        goto done;
+    }
+
+    dequeuedJob.toc.breakup.code = MA_JOB_TYPE_COUNT;
+    result = ma_job_process(&dequeuedJob);
+    if (result != MA_INVALID_OPERATION || ma_job_queue_record_from_job(&dequeuedJob) != NULL) {
+        printf("invalid dequeued dispatch was result=%d tagged=%u\n",
+            result, ma_job_queue_record_from_job(&dequeuedJob) != NULL);
+        failed = 1;
+    }
+
+    if (ma_resource_manager_post_job(&fixture.resourceManager, &validJob) != MA_SUCCESS ||
+        ma_resource_manager_process_next_job(&fixture.resourceManager) != MA_SUCCESS || callbackCount != 1) {
+        printf("invalid dispatch did not release the only admission record, callbacks=%u\n", callbackCount);
+        failed = 1;
+    }
+
+done:
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "invalid dispatch admission");
+    return failed;
+}
+
+static int resource_manager_test_invalid_dispatch_managed_worker(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_job invalidJob;
+    ma_job validJob;
+    volatile ma_uint32 callbackCount;
+    ma_result invalidResult;
+    ma_result validResult;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init_ex(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2, 1, 0);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+
+    callbackCount = 0;
+    invalidJob = ma_job_init(MA_JOB_TYPE_COUNT);
+    validJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    validJob.data.custom.proc = hardening_counting_custom_job;
+    validJob.data.custom.data0 = (ma_uintptr)&callbackCount;
+    invalidResult = ma_resource_manager_post_job(&fixture.resourceManager, &invalidJob);
+    validResult = ma_resource_manager_post_job(&fixture.resourceManager, &validJob);
+    ma_resource_manager_uninit(&fixture.resourceManager);
+
+    failed = 0;
+    if (invalidResult != MA_INVALID_OPERATION || validResult != MA_SUCCESS || callbackCount != 1 ||
+        hardening_tracked_live_allocation_count(&fixture.allocations) != 0) {
+        printf("managed invalid dispatch was invalid=%d valid=%d callbacks=%u live=%lu\n",
+            invalidResult, validResult, callbackCount,
+            (unsigned long)hardening_tracked_live_allocation_count(&fixture.allocations));
+        failed = 1;
+    }
+
+    return failed;
+}
+
+static int resource_manager_test_direct_continuation_cancellation(void)
+{
+    hardening_resource_manager_fixture fixture;
+    ma_job currentJob;
+    ma_job nextJob;
+    ma_job dequeuedJob;
+    volatile ma_uint32 executionCounter;
+    ma_result requiredState;
+    ma_bool32 wasPosted;
+    ma_result result;
+    int failed;
+
+    result = hardening_resource_manager_fixture_init(&fixture, MA_SUCCESS, 13, MA_SUCCESS, 2);
+    if (result != MA_SUCCESS) {
+        return 1;
+    }
+
+    currentJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    nextJob = ma_job_init(MA_JOB_TYPE_CUSTOM);
+    executionCounter = 7;
+    requiredState = MA_UNAVAILABLE;
+    wasPosted = MA_TRUE;
+    result = ma_resource_manager_continue_current_job_with_execution_order(
+        &fixture.resourceManager,
+        &currentJob,
+        &nextJob,
+        &executionCounter,
+        &requiredState,
+        MA_BUSY,
+        &wasPosted);
+
+    failed = 0;
+    if (result != MA_SUCCESS || wasPosted != MA_FALSE || executionCounter != 7 ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &dequeuedJob) != MA_NO_DATA_AVAILABLE) {
+        printf("direct cancelled continuation was result=%d posted=%u counter=%u\n",
+            result, wasPosted, executionCounter);
+        failed = 1;
+    }
+
+    requiredState = MA_BUSY;
+    result = ma_resource_manager_continue_current_job_with_execution_order(
+        &fixture.resourceManager,
+        &currentJob,
+        &nextJob,
+        &executionCounter,
+        &requiredState,
+        MA_BUSY,
+        &wasPosted);
+    if (result != MA_SUCCESS || wasPosted != MA_TRUE || executionCounter != 8 ||
+        ma_resource_manager_next_job(&fixture.resourceManager, &dequeuedJob) != MA_SUCCESS ||
+        dequeuedJob.order != 7 || ma_job_process(&dequeuedJob) != MA_SUCCESS) {
+        printf("direct accepted continuation was result=%d posted=%u counter=%u order=%u\n",
+            result, wasPosted, executionCounter, dequeuedJob.order);
+        failed = 1;
+    }
+
+    failed += hardening_resource_manager_fixture_uninit(&fixture, "direct continuation cancellation");
     return failed;
 }
 
@@ -3232,12 +3795,18 @@ int main(void)
     failed += resource_manager_test_page_post_failure_cleanup();
     failed += resource_manager_test_saturated_initial_page_continuation();
     failed += resource_manager_test_saturated_page_continuation();
+    failed += resource_manager_test_initial_continuation_cancelled_before_publication();
+    failed += resource_manager_test_page_continuation_cancelled_before_publication();
     failed += resource_manager_test_all_saturated_deferral_sites();
     failed += resource_manager_test_execution_order_wrap();
     failed += resource_manager_test_saturated_last_reference_retirement();
     failed += resource_manager_test_saturated_buffer_uninit_retirement();
     failed += resource_manager_test_single_worker_shutdown_drains_deferral();
     failed += resource_manager_test_two_worker_saturated_shutdown();
+    failed += resource_manager_test_shutdown_quit_output();
+    failed += resource_manager_test_invalid_dispatch_releases_admission();
+    failed += resource_manager_test_invalid_dispatch_managed_worker();
+    failed += resource_manager_test_direct_continuation_cancellation();
     failed += resource_manager_test_single_worker_nested_retirement();
     failed += resource_manager_test_custom_vfs_failure_cleanup();
     failed += resource_manager_test_external_decoded_storage_ownership();

@@ -778,6 +778,9 @@ if(MINIAUDIO_BUILD_TESTS)
     add_miniaudio_test(miniaudio_hardening_resource_manager hardening/hardening_resource_manager.c)
     add_test(NAME miniaudio_hardening_resource_manager COMMAND miniaudio_hardening_resource_manager)
 
+    add_miniaudio_test(miniaudio_hardening_no_resource_manager hardening/hardening_no_resource_manager.c)
+    add_test(NAME miniaudio_hardening_no_resource_manager COMMAND miniaudio_hardening_no_resource_manager)
+
     add_miniaudio_test(miniaudio_hardening_mp3 hardening/hardening_mp3.c)
     add_test(NAME miniaudio_hardening_mp3 COMMAND miniaudio_hardening_mp3)
 
