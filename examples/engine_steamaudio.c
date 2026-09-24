@@ -53,6 +53,8 @@ typedef struct
     IPLAudioSettings iplAudioSettings;
     IPLContext iplContext;
     IPLHRTF iplHRTF;   /* There is one HRTF object to many binaural effect objects. */
+    IPLHRTFInterpolation interpolation;
+    float dryWet;       /* 0 = dry stereo, 1 = fully spatialized; default 1. */
 } ma_steamaudio_binaural_node_config;
 
 MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_init(ma_uint32 channelsIn, IPLAudioSettings iplAudioSettings, IPLContext iplContext, IPLHRTF iplHRTF);
@@ -69,6 +71,9 @@ MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_ini
 #endif
 #ifndef MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_EXCHANGE
     #define MA_STEAMAUDIO_DIRECTION_CONSUME_AFTER_EXCHANGE() ((void)0)
+#endif
+#ifndef MA_STEAMAUDIO_DRY_WET_AFTER_LOAD
+    #define MA_STEAMAUDIO_DRY_WET_AFTER_LOAD() ((void)0)
 #endif
 
 typedef struct
@@ -122,7 +127,10 @@ typedef struct
     IPLContext iplContext;
     IPLHRTF iplHRTF;
     IPLBinauralEffect iplEffect;
+    IPLHRTFInterpolation interpolation;
     ma_steamaudio_direction_state directionState;
+    volatile ma_uint32 dryWetBits;    /* Atomic control-thread target. */
+    float appliedDryWet;              /* Audio-thread-only ramp start. */
     ma_uint32 inputFrameCount;
     ma_uint32 outputFrameOffset;
     ma_uint32 outputFrameCount;
@@ -136,6 +144,8 @@ typedef struct
 MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, const ma_steamaudio_binaural_node_config* pConfig, const ma_allocation_callbacks* pAllocationCallbacks, ma_steamaudio_binaural_node* pBinauralNode);
 MA_API void ma_steamaudio_binaural_node_uninit(ma_steamaudio_binaural_node* pBinauralNode, const ma_allocation_callbacks* pAllocationCallbacks);
 MA_API ma_result ma_steamaudio_binaural_node_set_direction(ma_steamaudio_binaural_node* pBinauralNode, float x, float y, float z);
+/* Publishes a target in [0, 1]. The audio thread ramps to it over one effect block. */
+MA_API ma_result ma_steamaudio_binaural_node_set_dry_wet(ma_steamaudio_binaural_node* pBinauralNode, float wet);
 /* Call after the upstream source stops. A later NULL input then drains the final block and tail. */
 MA_API ma_result ma_steamaudio_binaural_node_end_input(ma_steamaudio_binaural_node* pBinauralNode);
 /* For a seek/restart, detach the output bus and quiesce readers before resetting and reattaching. */
@@ -152,8 +162,52 @@ MA_API ma_steamaudio_binaural_node_config ma_steamaudio_binaural_node_config_ini
     config.iplAudioSettings = iplAudioSettings;
     config.iplContext       = iplContext;
     config.iplHRTF          = iplHRTF;
+    config.interpolation    = IPL_HRTFINTERPOLATION_NEAREST;
+    config.dryWet           = 1.0f;
 
     return config;
+}
+
+static ma_uint32 ma_steamaudio_dry_wet_to_bits(float wet)
+{
+    ma_uint32 bits;
+    MA_COPY_MEMORY(&bits, &wet, sizeof(bits));
+    return bits;
+}
+
+static float ma_steamaudio_dry_wet_from_bits(ma_uint32 bits)
+{
+    float wet;
+    MA_COPY_MEMORY(&wet, &bits, sizeof(wet));
+    return wet;
+}
+
+static void ma_steamaudio_binaural_node_mix_output(ma_steamaudio_binaural_node* pBinauralNode, ma_bool32 tail)
+{
+    ma_uint32 frameSize = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
+    ma_uint32 channelsIn = ma_node_get_input_channels(&pBinauralNode->baseNode, 0);
+    float start = pBinauralNode->appliedDryWet;
+    float target = ma_steamaudio_dry_wet_from_bits(ma_atomic_load_32(&pBinauralNode->dryWetBits));
+    ma_uint32 sample;
+    ma_uint32 ear;
+
+    MA_STEAMAUDIO_DRY_WET_AFTER_LOAD();
+    if (start == 1.0f && target == 1.0f) return;
+
+    for (sample = 0; sample < frameSize; sample += 1) {
+        float wet = (sample == frameSize - 1) ? target :
+            start + (target - start) * (float)(sample + 1) / (float)frameSize;
+        for (ear = 0; ear < 2; ear += 1) {
+            float dry = tail ? 0.0f : pBinauralNode->ppBuffersIn[channelsIn == 1 ? 0 : ear][sample];
+            float* pWet = &pBinauralNode->ppBuffersOut[ear][sample];
+            if (wet == 0.0f) {
+                *pWet = dry;
+            } else if (wet != 1.0f) {
+                *pWet = (1.0f - wet) * dry + wet * *pWet;
+            }
+        }
+    }
+    pBinauralNode->appliedDryWet = target;
 }
 
 
@@ -170,7 +224,7 @@ static void ma_steamaudio_binaural_node_process_block(ma_steamaudio_binaural_nod
     binauralParams.direction.x   = direction.x;
     binauralParams.direction.y   = direction.y;
     binauralParams.direction.z   = direction.z;
-    binauralParams.interpolation = IPL_HRTFINTERPOLATION_NEAREST;
+    binauralParams.interpolation = pBinauralNode->interpolation;
     binauralParams.spatialBlend  = 1.0f;
     binauralParams.hrtf          = pBinauralNode->iplHRTF;
 
@@ -182,6 +236,7 @@ static void ma_steamaudio_binaural_node_process_block(ma_steamaudio_binaural_nod
     outputBufferDesc.data        = pBinauralNode->ppBuffersOut;
 
     effectState = iplBinauralEffectApply(pBinauralNode->iplEffect, &binauralParams, &inputBufferDesc, &outputBufferDesc);
+    ma_steamaudio_binaural_node_mix_output(pBinauralNode, MA_FALSE);
     pBinauralNode->inputFrameCount = 0;
     pBinauralNode->outputFrameOffset = 0;
     pBinauralNode->outputFrameCount = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
@@ -198,6 +253,7 @@ static void ma_steamaudio_binaural_node_process_tail_block(ma_steamaudio_binaura
     outputBufferDesc.data        = pBinauralNode->ppBuffersOut;
 
     effectState = iplBinauralEffectGetTail(pBinauralNode->iplEffect, &outputBufferDesc);
+    ma_steamaudio_binaural_node_mix_output(pBinauralNode, MA_TRUE);
     pBinauralNode->outputFrameOffset = 0;
     pBinauralNode->outputFrameCount = (ma_uint32)pBinauralNode->iplAudioSettings.frameSize;
     pBinauralNode->tailComplete = (effectState == IPL_AUDIOEFFECTSTATE_TAILCOMPLETE);
@@ -369,7 +425,9 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
 
     MA_ZERO_OBJECT(pBinauralNode);
 
-    if (pConfig == NULL || pConfig->iplAudioSettings.frameSize <= 0 || pConfig->iplAudioSettings.samplingRate <= 0 || pConfig->iplContext == NULL || pConfig->iplHRTF == NULL) {
+    if (pConfig == NULL || pConfig->iplAudioSettings.frameSize <= 0 || pConfig->iplAudioSettings.samplingRate <= 0 || pConfig->iplContext == NULL || pConfig->iplHRTF == NULL ||
+        !(pConfig->dryWet >= 0.0f && pConfig->dryWet <= 1.0f) ||
+        (pConfig->interpolation != IPL_HRTFINTERPOLATION_NEAREST && pConfig->interpolation != IPL_HRTFINTERPOLATION_BILINEAR)) {
         return MA_INVALID_ARGS;
     }
 
@@ -391,6 +449,9 @@ MA_API ma_result ma_steamaudio_binaural_node_init(ma_node_graph* pNodeGraph, con
     }
 
     pBinauralNode->iplAudioSettings = pConfig->iplAudioSettings;
+    pBinauralNode->interpolation    = pConfig->interpolation;
+    pBinauralNode->appliedDryWet    = pConfig->dryWet;
+    ma_atomic_store_32(&pBinauralNode->dryWetBits, ma_steamaudio_dry_wet_to_bits(pConfig->dryWet));
     pBinauralNode->iplContext       = iplContextRetain(pConfig->iplContext);
     pBinauralNode->iplHRTF          = iplHRTFRetain(pConfig->iplHRTF);
     if (pBinauralNode->iplContext == NULL || pBinauralNode->iplHRTF == NULL) {
@@ -490,6 +551,16 @@ MA_API ma_result ma_steamaudio_binaural_node_set_direction(ma_steamaudio_binaura
     return MA_SUCCESS;
 }
 
+MA_API ma_result ma_steamaudio_binaural_node_set_dry_wet(ma_steamaudio_binaural_node* pBinauralNode, float wet)
+{
+    if (pBinauralNode == NULL || !(wet >= 0.0f && wet <= 1.0f)) {
+        return MA_INVALID_ARGS;
+    }
+
+    ma_atomic_store_32(&pBinauralNode->dryWetBits, ma_steamaudio_dry_wet_to_bits(wet));
+    return MA_SUCCESS;
+}
+
 MA_API ma_result ma_steamaudio_binaural_node_end_input(ma_steamaudio_binaural_node* pBinauralNode)
 {
     if (pBinauralNode == NULL) {
@@ -514,9 +585,25 @@ MA_API ma_result ma_steamaudio_binaural_node_reset(ma_steamaudio_binaural_node* 
     pBinauralNode->outputFrameOffset = 0;
     pBinauralNode->outputFrameCount = 0;
     pBinauralNode->tailComplete = MA_TRUE;
+    pBinauralNode->appliedDryWet = ma_steamaudio_dry_wet_from_bits(ma_atomic_load_32(&pBinauralNode->dryWetBits));
     ma_atomic_store_32(&pBinauralNode->inputEnded, 0);
     return MA_SUCCESS;
 }
+
+#if !defined(MA_STEAMAUDIO_NO_MAIN) || defined(MA_STEAMAUDIO_TEST_DRY_WET_PARSER)
+static ma_result ma_steamaudio_parse_dry_wet(const char* pText, float* pWet)
+{
+    char* pEnd;
+    float wet;
+
+    if (pText == NULL || pWet == NULL) return MA_INVALID_ARGS;
+    wet = strtof(pText, &pEnd);
+    if (pEnd == pText || *pEnd != '\0' || !(wet >= 0.0f && wet <= 1.0f))
+        return MA_INVALID_ARGS;
+    *pWet = wet;
+    return MA_SUCCESS;
+}
+#endif
 
 
 
@@ -537,9 +624,15 @@ int main(int argc, char** argv)
     IPLContext iplContext = NULL;
     IPLHRTFSettings iplHRTFSettings;
     IPLHRTF iplHRTF = NULL;
+    float initialDryWet = 1.0f;
 
-    if (argc < 2) {
-        printf("No input file.\n");
+    if (argc < 2 || argc > 3) {
+        printf("Usage: %s <input-file> [wet 0..1]\n", argv[0]);
+        result = MA_INVALID_ARGS;
+        goto done;
+    }
+    if (argc == 3 && ma_steamaudio_parse_dry_wet(argv[2], &initialDryWet) != MA_SUCCESS) {
+        printf("Wet mix must be a number from 0 (dry) to 1 (fully spatialized).\n");
         result = MA_INVALID_ARGS;
         goto done;
     }
@@ -648,6 +741,7 @@ int main(int argc, char** argv)
         might be to set this to mono if the source data is also mono.
         */
         binauralNodeConfig = ma_steamaudio_binaural_node_config_init(CHANNELS, iplAudioSettings, iplContext, iplHRTF);
+        binauralNodeConfig.dryWet = initialDryWet;
 
         result = ma_steamaudio_binaural_node_init(ma_engine_get_node_graph(&g_engine), &binauralNodeConfig, NULL, &g_binauralNode);
         if (result != MA_SUCCESS) {
