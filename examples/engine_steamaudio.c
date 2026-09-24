@@ -527,17 +527,21 @@ static ma_steamaudio_binaural_node g_binauralNode;   /* The echo effect is achie
 
 int main(int argc, char** argv)
 {
-    ma_result result;
+    ma_result result = MA_ERROR;
+    ma_bool32 engineInitialized = MA_FALSE;
+    ma_bool32 soundInitialized = MA_FALSE;
+    ma_bool32 nodeInitialized = MA_FALSE;
     ma_engine_config engineConfig;
     IPLAudioSettings iplAudioSettings;
     IPLContextSettings iplContextSettings;
-    IPLContext iplContext;
+    IPLContext iplContext = NULL;
     IPLHRTFSettings iplHRTFSettings;
-    IPLHRTF iplHRTF;
+    IPLHRTF iplHRTF = NULL;
 
     if (argc < 2) {
-        printf("No input file.");
-        return -1;
+        printf("No input file.\n");
+        result = MA_INVALID_ARGS;
+        goto done;
     }
 
     /* The engine needs to be initialized first. */
@@ -553,9 +557,10 @@ int main(int argc, char** argv)
 
     result = ma_engine_init(&engineConfig, &g_engine);
     if (result != MA_SUCCESS) {
-        printf("Failed to initialize audio engine.");
-        return -1;
+        printf("Failed to initialize audio engine.\n");
+        goto done;
     }
+    engineInitialized = MA_TRUE;
 
     /*
     Now that we have the engine we can initialize the Steam Audio objects.
@@ -581,8 +586,7 @@ int main(int argc, char** argv)
     
     result = ma_result_from_IPLerror(iplContextCreate(&iplContextSettings, &iplContext));
     if (result != MA_SUCCESS) {
-        ma_engine_uninit(&g_engine);
-        return result;
+        goto done;
     }
 
 
@@ -593,9 +597,7 @@ int main(int argc, char** argv)
 
     result = ma_result_from_IPLerror(iplHRTFCreate(iplContext, &iplAudioSettings, &iplHRTFSettings, &iplHRTF));
     if (result != MA_SUCCESS) {
-        iplContextRelease(&iplContext);
-        ma_engine_uninit(&g_engine);
-        return result;
+        goto done;
     }
 
 
@@ -613,8 +615,9 @@ int main(int argc, char** argv)
 
         result = ma_sound_init_ex(&g_engine, &soundConfig, &g_sound);
         if (result != MA_SUCCESS) {
-            return result;
+            goto done;
         }
+        soundInitialized = MA_TRUE;
 
         /* We'll let the Steam Audio binaural effect do the directional attenuation for us. */
         ma_sound_set_directional_attenuation_factor(&g_sound, 0);
@@ -648,18 +651,28 @@ int main(int argc, char** argv)
 
         result = ma_steamaudio_binaural_node_init(ma_engine_get_node_graph(&g_engine), &binauralNodeConfig, NULL, &g_binauralNode);
         if (result != MA_SUCCESS) {
-            printf("Failed to initialize binaural node.");
-            return -1;
+            printf("Failed to initialize binaural node.\n");
+            goto done;
         }
+        nodeInitialized = MA_TRUE;
 
         /* Connect the output of the delay node to the input of the endpoint. */
-        ma_node_attach_output_bus(&g_binauralNode, 0, ma_engine_get_endpoint(&g_engine), 0);
+        result = ma_node_attach_output_bus(&g_binauralNode, 0, ma_engine_get_endpoint(&g_engine), 0);
+        if (result != MA_SUCCESS) {
+            goto done;
+        }
     }
 
 
     /* We can now wire up the sound to the binaural node and start it. */
-    ma_node_attach_output_bus(&g_sound, 0, &g_binauralNode, 0);
-    ma_sound_start(&g_sound);
+    result = ma_node_attach_output_bus(&g_sound, 0, &g_binauralNode, 0);
+    if (result != MA_SUCCESS) {
+        goto done;
+    }
+    result = ma_sound_start(&g_sound);
+    if (result != MA_SUCCESS) {
+        goto done;
+    }
 
 #if 1
     {
@@ -691,10 +704,26 @@ int main(int argc, char** argv)
     getchar();
 #endif
 
-    ma_sound_uninit(&g_sound);
-    ma_steamaudio_binaural_node_uninit(&g_binauralNode, NULL);
-    ma_engine_uninit(&g_engine);
+    result = MA_SUCCESS;
 
-    return 0;
+done:
+    if (soundInitialized) {
+        ma_sound_stop(&g_sound);
+        ma_node_detach_all_output_buses(&g_sound);
+        ma_sound_uninit(&g_sound);
+    }
+    if (nodeInitialized) {
+        ma_steamaudio_binaural_node_uninit(&g_binauralNode, NULL);
+    }
+    if (engineInitialized) {
+        ma_engine_uninit(&g_engine);
+    }
+    if (iplHRTF != NULL) {
+        iplHRTFRelease(&iplHRTF);
+    }
+    if (iplContext != NULL) {
+        iplContextRelease(&iplContext);
+    }
+    return result;
 }
 #endif
