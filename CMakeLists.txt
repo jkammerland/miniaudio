@@ -16,6 +16,7 @@ project(miniaudio VERSION ${MINIAUDIO_VERSION})
 # Options
 option(MINIAUDIO_BUILD_EXAMPLES                "Build miniaudio examples"            OFF)
 option(MINIAUDIO_BUILD_TESTS                   "Build miniaudio tests"               OFF)
+option(MINIAUDIO_BUILD_STEAMAUDIO_BENCHMARKS   "Build opt-in Steam Audio adapter benchmarks (requires tests and Steam Audio)" OFF)
 option(MINIAUDIO_BUILD_TOOLS                   "Build miniaudio development tools. Leave this disabled unless you know what you're doing. If you enable this and you get build errors, you clearly do not know what you're doing and yet you still enabled this option. Why would you do that?" OFF)
 option(MINIAUDIO_FORCE_CXX                     "Force compilation as C++"            OFF)
 option(MINIAUDIO_FORCE_C89                     "Force compilation as C89"            OFF)
@@ -508,6 +509,10 @@ else()
     message(STATUS "SteamAudio not found. miniaudio_engine_steamaudio will be excluded.")
 endif()
 
+if(MINIAUDIO_BUILD_STEAMAUDIO_BENCHMARKS AND (NOT MINIAUDIO_BUILD_TESTS OR NOT HAS_STEAMAUDIO))
+    message(FATAL_ERROR "Steam Audio benchmarks require MINIAUDIO_BUILD_TESTS=ON and a found Steam Audio library and phonon.h")
+endif()
+
 
 # Link libraries
 set(COMMON_LINK_LIBRARIES)
@@ -843,6 +848,11 @@ if(MINIAUDIO_BUILD_TESTS)
     endif()
 
     if(HAS_STEAMAUDIO)
+        if(MINIAUDIO_BUILD_STEAMAUDIO_BENCHMARKS)
+            add_miniaudio_test(miniaudio_benchmark_steamaudio_frames hardening/benchmark_steamaudio_frames.c)
+            target_include_directories(miniaudio_benchmark_steamaudio_frames PRIVATE ${STEAMAUDIO_INCLUDE_DIR})
+            target_link_libraries(miniaudio_benchmark_steamaudio_frames PRIVATE ${STEAMAUDIO_LIBRARY})
+        endif()
         add_miniaudio_test(miniaudio_hardening_steamaudio hardening/hardening_steamaudio.c)
         target_include_directories(miniaudio_hardening_steamaudio PRIVATE ${STEAMAUDIO_INCLUDE_DIR})
         target_link_libraries(miniaudio_hardening_steamaudio PRIVATE ${STEAMAUDIO_LIBRARY})
