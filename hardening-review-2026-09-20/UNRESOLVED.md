@@ -317,7 +317,11 @@ recorded as limits, not converted to passes.
   (1,284,381 bytes; all 35 internal hashes verified). Twenty-four complete
   selected remote files matched their controller copies byte-for-byte. The two
   omitted 2.87 GB prompt-spam logs retain their remote sizes, hashes, and
-  bounded head/tail extracts in the archive.
+  bounded head/tail extracts in the archive. After archive commit `d526814`,
+  the four exact attempt-owned Mac paths were quarantined, deleted, and both
+  original/quarantine names verified absent. The cleanup freed 6,200,020 KiB
+  of available filesystem space; the durable cleanup record SHA-256 is
+  `ddc096965e0e0942306c20fbb5d6cd982bfc4cb1e3c28b9327bcfb95b6032c06`.
 - Earlier #1152, #484, and WASAPI transport manifests:
   `bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`,
   `ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`,

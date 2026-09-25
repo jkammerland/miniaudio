@@ -1,5 +1,5 @@
 0c6dc8f9bc643db54d6da8451acaf11916605e3c3839a0e36b512aad428daafc  ./.gitattributes
-9edfc351870f532ab150a5bc563a83eb86d4bce319e78f740dddf53cd2954568  ./README.md
+c21f76459e0a4da74720e341064db27edcfb68ad6b4ce0ee2c611f2aecad5a14  ./README.md
 874b9193420f244b74729054f7eea68233e7fc2098cd3c9c067000c7e6053992  ./audit/1123.wav
 51a38750c2dbff521695f76755f28bbcd536f353a1adb33970f4238098837d27  ./audit/1128-crash_input.bin
 7e0d8773b842a936c02651ec6aea6b42d8f8da9aa28e1442c8d58cccdab7e032  ./audit/1128-poc.c
@@ -57,6 +57,7 @@ bfa07f1a0576932983d9aec595819817aa740bf4c035e7f3ca3b61c33081692e  ./cleanup-reta
 2f730a52f038c4d42d5a5adbf58f56c598006130939e5f4c6c80eb3fd313f7c0  ./linux-cxx23-0f459ed-evidence.tar.zst
 071caa007e085ae783e4d2bd8b9ffa81939410f36a752ba2008afce8a28a257e  ./native-cleanup-records.tar.zst
 d1f13cf92c4123213ac7bd312f8bfb82f08593269dff4b8f8d096ffd957f21fd  ./native-macos-e4658df-final.tar.zst
+ddc096965e0e0942306c20fbb5d6cd982bfc4cb1e3c28b9327bcfb95b6032c06  ./native-macos-835a14f-physical-cleanup.md
 ce0b91a906cf7a35ea1ca8e1babab75f57f40eee6d8a23143a3ca92cd8e971c0  ./native-macos-835a14f-physical.tar.zst
 5de7a9dfd8df52770bc2edfb9763e2fe5f81b68fa4b394477074733ed7fdd884  ./native-windows-06e3a06-final.tar.zst
 a54c632981cfa72b1004e463b4008175311f131381236be29bed1cbf1d1fc74e  ./native-windows-346acda-prior.tar.zst

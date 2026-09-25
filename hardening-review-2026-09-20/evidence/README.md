@@ -22,6 +22,8 @@ these files and archives, not the deleted temporary paths.
   built-in playback/capture, Bose duplex, and manual output-reroute/hotplug
   evidence. It also records the interactive runner stdin defect and preserves
   hashes plus bounded extracts for the omitted 5.74 GB prompt-spam logs.
+- `native-macos-835a14f-physical-cleanup.md` records the exact allowlisted Mac
+  cleanup performed only after that archive was committed and verified.
 - `steam-audio-hardening.tar.zst` and `steam-audio-native-text.tar.zst` retain
   the Steam Audio integration evidence needed by this review.
 - `native-cleanup-records.tar.zst` retains the native-host cleanup reports.
@@ -72,3 +74,9 @@ the review's named cleanup helpers. On 2026-09-23, 280 enumerated entries
 committed at `28e2145`; all 289 exact paths are listed in
 `cleanup-deleted.txt`. A still-running debugger tree was excluded and is
 listed in `cleanup-retained.txt`.
+
+On 2026-09-25, the exact physical CoreAudio source, build, staged bundle, and
+remote evidence roots were removed after archive commit `d526814`. Their
+pre-cleanup allocation was 6,216,464 KiB and the filesystem gained 6,200,020
+KiB of available space. The retained cleanup record lists every selected path
+and confirms the original and quarantine names are absent.
