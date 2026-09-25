@@ -1,10 +1,10 @@
 # Implementation prompt: miniaudio backend hardening
 
-> **Execution status (2026-09-23):** implementation, tests, and build
-> integration have reached `0f459ed`. Exact-current Linux gates pass; Windows
-> production evidence is exact through `06e3a06`, and macOS native evidence is
-> exact through `e4658df`. Later changes are confined to portable CMake,
-> hardening tests, and documentation; production source remains unchanged.
+> **Execution status (2026-09-25):** core implementation, tests, and build
+> integration reached `0f459ed`; follow-on Steam Audio example hardening has
+> reached `835a14f`. Exact-current Linux gates pass; Windows backend evidence
+> is exact through `06e3a06`, deterministic macOS evidence is exact through
+> `e4658df`, and physical CoreAudio evidence is exact at `835a14f`.
 > `UNRESOLVED.md` is the authoritative current disposition. In particular, the
 > owner explicitly rejected Windows GCC/MinGW deployment; do not provision or
 > run MinGW unless that decision is later reversed.

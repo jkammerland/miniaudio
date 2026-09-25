@@ -1,8 +1,9 @@
 # Hardening implementation: unresolved work and validation limits
 
-Status date: 2026-09-23
+Status date: 2026-09-25
 
-Implementation and test/build code validated through: `0f459ed`
+Latest represented implementation/test commit: `835a14f` (exact validation
+revisions remain stated per matrix row)
 
 This is the authoritative remaining-work record for
 `IMPLEMENTATION-PROMPT.md`. A hardware, toolchain, permission, or acoustic
@@ -17,7 +18,7 @@ the source invariant and a deterministic regression establish the fix.
 | #1155 alleged optional-libopus UAF | **Unresolved as the alleged UAF; no valid owner-mediated UAF reproduced** | Pinned Opus/Vorbis builds cover valid, malformed, truncated, chained, seek/EOF, nonseekable, allocator/VFS/open failure, callback lifetime, and deterministic resource-manager cancellation under normal, C89-option, ASan/UBSan, and TSan configurations. Separate callback-contract defects were fixed. | The report still lacks a supported call sequence and sanitizer stack. Concurrent public read/uninit is not assumed valid. The seek/tell and EOF fixes do not prove or disprove an unrelated ownership UAF. |
 | #1157 Windows GCC/MinGW LTO diagnostics | **Owner-rejected / outside accepted deployment scope** | Linux GCC 16.2.1 C/C++ Release+LTO with warnings-as-errors passes. | The owner explicitly will never deploy GCC/MinGW on Windows. No MinGW toolchain was provisioned or invoked. This is a scope rejection, not a pass or fix. Reopening requires a new owner decision or an external exact compiler/triple/flags reproducer. |
 | #484 process-specific WASAPI content isolation | **Implemented; live acoustic include/exclude remains unresolved on this host** | Desktop process-loopback activation, feature/config gates, timeout-safe completion ownership, public error preservation, virtual metadata, and deterministic include/exclude/failure/timeout tests pass. At exact commit `fee518b`, the test passed directly plus 100/100 independent runs. Nine named-event live scenarios exercised whole-system control, include, exclude, descendant inclusion, target exit, nonexistent/no-stream targets, and explicit-render selection at 288,000 frames per case; all producers crossed their thresholds and reaped cleanly. | The whole-system positive control and every process capture were bitwise silent while distinct producer reference WAVs were nonzero. Silence cannot prove filtering. Only one active render endpoint existed, so cross-endpoint/default-switch behavior is also unverified. Synchronous public initialization still exposes no object that can be canceled while activation is pending. |
-| CoreAudio real-device behavior | **Deterministic teardown/reroute lifetime fixed; physical I/O remains unverified** | At exact final commit `e4658df`, Apple Clang Debug and optimized Release plus Homebrew LLVM optimized Release each pass 13/13 deterministic tests with warnings-as-errors and zero warnings. Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, the deterministic CoreAudio lifecycle, 100/100 independent resource-manager runs, and an arm64 field-layout comparison also pass. | The isolated account's prior playback endpoints initialized but delivered zero callbacks in bounded probes; capture permission was denied. Real playback/capture, hotplug, duplex, and default switching therefore remain unverified. Apple LeakSanitizer is unsupported in this environment. |
+| CoreAudio real-device behavior | **Physical playback, capture, duplex, and output hotplug verified; active-capture input switching remains untraced** | The deterministic exact-`e4658df` matrix still passes. At exact `835a14f` on macOS 26.5.2 arm64, Apple Clang built the CoreAudio-only device tools. The operator heard the 5 s 880 Hz built-in-speaker reference and spoke during a 5 s built-in-microphone capture; that capture is 48 kHz mono float32, peak -17.65 dBFS and RMS -36.15 dBFS, with no >=100 ms interval below -60 dB. Bose duplex capture is also nonzero and its live microphone output was heard. During interactive playback the operator observed the tone move built-in -> Bose, survive Bose disconnect/reconnect without a crash, and return to built-in. | The timeout wrapper consumed standard input, so `Q` could not reach `deviceio`; its EOF loop emitted 5.74 GB of repeated prompts until Control-C. The script therefore never entered its separate active-capture built-in -> Bose -> built-in switch. The operator declined a repeat. The manual output-reroute result is retained, but no machine trace or successful case exit is claimed for it, and input switching remains open. Apple LeakSanitizer is unsupported. |
 | #1153 original audible spatialization report | **Related gain and Steam Audio synchronization defects fixed; original audible scenario not reproduced** | Independent scalar/SSE2 oracles cover split ramps, target changes, tails, guards, in/out-of-place operation, null advancement, and 1/2/6/8/33 channels. Steam Audio snapshot synchronization passes against the SDK built from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac`. | The reported Windows listener-rotation/spatialization symptom was not reproduced acoustically. The deterministic fixes do not prove that every possible cause of the original audible report is gone. |
 | 32-bit and additional architecture coverage | **Validation limitation** | Linux x86_64, Windows x64, and macOS arm64 were exercised; scalar/SSE2 and available sanitizers pass. Checked arithmetic covers the hostile metadata paths and no public layout change was made. | No usable 32-bit libc/toolchain was available, and not every architecture-specific DSP path, compiler, or packing mode was exercised. This is not universal ABI proof. |
 | Steam Audio checkout in its default C++14 mode | **External dependency/toolchain limitation; miniaudio integration validated with C++17 override** | `phonon` was built from the adjacent `../steam-audio` checkout at commit `902e09545ae6bfd06768bcd38980b009317641ac`. The miniaudio fixed/partial/tail test passes in normal, C89-option, ASan/UBSan, and TSan configurations. | Steam Audio's bundled FlatBuffers selects the host Abseil `string_view`, while the checkout requests C++14 and current Abseil requires C++17. That external checkout needs its own dependency/standard fix. No Steam Audio source was changed here. |
@@ -220,17 +221,24 @@ ma_device__set_state(device, ma_device_state_uninitialized);
 | Linux ASan/UBSan and TSan | **exact `54a9ef5` focused pass** | ASan/UBSan covers resource-manager, no-resource-manager, and WAV; TSan covers the resource-manager scheduler. Earlier focused WAV/no-resource-manager and full SteamAudio-suite evidence is retained; the latter also reports an unrelated pre-existing `tests/deviceio/deviceio.c` race, so no universal TSan-clean claim is made. |
 | Optional-codec ASan/UBSan and TSan | **2/2 + 2/2 pass** | Opus and Vorbis adapter tests from the pinned dependency matrix. |
 | Steam Audio real SDK | **15/15 final normal suite pass; focused normal/C89-option/ASan+UBSan/TSan passes retained** | The final suite links the existing adjacent `../steam-audio/unity` binary. The authoritative clean SDK build was made earlier from adjacent source commit `902e09545ae6bfd06768bcd38980b009317641ac` with a C++17 override. No Steam Audio source or user build output was edited. |
-| macOS 26.5.2 arm64, Apple Clang 21 / Homebrew LLVM 22.1.8 | **exact `e4658df`: Debug 13/13, Apple Release 13/13, LLVM Release 13/13; all selected deterministic C targets used `-Werror`; complete builds emitted zero warnings** | Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, deterministic CoreAudio 1/1, and resource-manager stress 100/100 pass. Arm64 size/alignment and listed offsets for six types match `75158b8`. The two compiled `.cpp` targets did not receive `-Werror`; physical `cpp`/`deviceio` remain excluded for the documented permission/callback limitation. LeakSanitizer is unsupported. |
+| macOS 26.5.2 arm64, Apple Clang 21 / Homebrew LLVM 22.1.8 | **exact `e4658df`: Debug 13/13, Apple Release 13/13, LLVM Release 13/13; exact `835a14f`: focused physical CoreAudio playback/capture/duplex and manual output hotplug pass** | Strict C89 3/3, ASan+UBSan 3/3, TSan 1/1, deterministic CoreAudio 1/1, and resource-manager stress 100/100 pass at the deterministic baseline. Arm64 size/alignment and listed offsets for six types match `75158b8`. At `835a14f`, both bounded built-in cases exited 0, the stimulated capture is nonzero, Bose duplex is nonzero, and the operator observed successful output rerouting/disconnect recovery. The interactive runner's stdin defect prevented a normal output-case exit and the separate capture-reroute trace. LeakSanitizer is unsupported. |
 | Windows 11 x64, MSVC 19.44 / SDK 10.0.26100.0 | **exact `06e3a06`: Debug 17/17 and Release 17/17; 0 warnings under `/W4 /WX`; resource-manager stress 100/100** | Release also used `/O2 /GL /LTCG`. Direct Win32 filesystem Debug/Release, standalone C/C++latest 2/2, and six-type MSVC/clang-cl ABI comparisons pass. No retries or skipped registered tests. |
 | Windows clang-cl 23.1.1 | **4/4 focused pass** | Resource manager, no-resource-manager, WAV, and Win32 filesystem compile/link/run with strict warnings. The first standalone filesystem link omitted required `shell32.lib`; the corrected command passed and the harness error is retained. |
 | Windows USB capture and process loopback | **exact `fee518b` deterministic/live campaigns pass their code invariants** | Twelve selected microphone cases did not reproduce #1152. Nine synchronized loopback scenarios delivered exact frames, but all captured WAVs—including the whole-system control—were silent, so content isolation remains unresolved. |
 
 No assertion, tolerance, or semantic test condition was weakened. Unsupported
-Apple leak detection and unavailable physical audio are recorded as limits,
-not converted to passes.
+Apple leak detection and the missing active-capture input-reroute trace are
+recorded as limits, not converted to passes.
 
 ## Audio evidence available for manual inspection
 
+- Exact-`835a14f` physical CoreAudio recordings and compact runner evidence are
+  in
+  [`evidence/native-macos-835a14f-physical.tar.zst`](evidence/native-macos-835a14f-physical.tar.zst).
+  `capture-builtins.wav` is the stimulated built-in microphone capture;
+  `duplex-bose.wav` is the nonzero Bose duplex capture. `RUNNER-INCIDENT.md`
+  explains the failed `Q` input and why the two 2.87 GB prompt-spam logs are
+  represented by hashes and bounded extracts rather than stored in full.
 - Exact-`fee518b` #1152 microphone captures are in
   [`evidence/native-windows-fee518b-primary.tar.zst`](evidence/native-windows-fee518b-primary.tar.zst)
   under `miniaudio-native-win-fee518b-evidence/microphone/`. Start with
@@ -304,6 +312,12 @@ not converted to passes.
 - Final macOS transport manifest:
   `57a64d7d9750045e8c975da788fb8b6d65136bb0df5f65c212ee49308f0ad9bc`
   (168 files; internal manifest verified 167 entries).
+- Exact-`835a14f` physical CoreAudio archive:
+  `ce0b91a906cf7a35ea1ca8e1babab75f57f40eee6d8a23143a3ca92cd8e971c0`
+  (1,284,381 bytes; all 35 internal hashes verified). Twenty-four complete
+  selected remote files matched their controller copies byte-for-byte. The two
+  omitted 2.87 GB prompt-spam logs retain their remote sizes, hashes, and
+  bounded head/tail extracts in the archive.
 - Earlier #1152, #484, and WASAPI transport manifests:
   `bc3cb9dcab8632dd7cafbfbf5ea0cde2bc95f772dce45cbac4947ceb9163a5b1`,
   `ea28b648156ad4fe841f67f241169236d6cf9595d46d5a73265477e5ef73b335`,

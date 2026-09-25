@@ -18,6 +18,10 @@ these files and archives, not the deleted temporary paths.
 - `native-windows-06e3a06-final.tar.zst` and
   `native-macos-e4658df-final.tar.zst` retain the final native validation
   reports and command-level evidence.
+- `native-macos-835a14f-physical.tar.zst` retains the real-device CoreAudio
+  built-in playback/capture, Bose duplex, and manual output-reroute/hotplug
+  evidence. It also records the interactive runner stdin defect and preserves
+  hashes plus bounded extracts for the omitted 5.74 GB prompt-spam logs.
 - `steam-audio-hardening.tar.zst` and `steam-audio-native-text.tar.zst` retain
   the Steam Audio integration evidence needed by this review.
 - `native-cleanup-records.tar.zst` retains the native-host cleanup reports.
