@@ -9,7 +9,7 @@ miniaudio build remains the default.
 | Item | Value |
 | --- | --- |
 | miniaudio base | `ab4bd4bfb30e2321b37207fad7cc6c1eb906c096` |
-| timer_wheels integration | `e9272b5d263859abbe15c4dfd6d123c542e9e9c0` (clean worktree) |
+| timer_wheels integration | `f5853d075ba011efc5bd872ce892f1162d51db8a` (clean worktree) |
 | Steam Audio source | `4b37ab1aaff9cb7af3df531d0374112856ecc6ca` |
 | Steam Audio release library SHA-256 | `fb8511340a25c1846e110952f5c7f2c5467293b30f1815b0e20fb418441ead28` |
 | Steam Audio release ELF build ID | `10bf67cf9cb9187184faed347ea168318c90fd19` |

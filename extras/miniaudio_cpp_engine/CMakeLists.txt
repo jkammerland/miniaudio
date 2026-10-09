@@ -43,7 +43,7 @@ endif()
 set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR "" CACHE PATH
     "timer_wheels source checkout used by the experimental integration tests")
 set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION
-    "e9272b5d263859abbe15c4dfd6d123c542e9e9c0" CACHE STRING
+    "f5853d075ba011efc5bd872ce892f1162d51db8a" CACHE STRING
     "Expected timer_wheels revision for source-checkout integration")
 option(MINIAUDIO_CPP_ENGINE_VERIFY_TIMER_WHEELS_REVISION
     "Require Git verification of the timer_wheels source revision" ON)

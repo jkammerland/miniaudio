@@ -6,7 +6,7 @@ are provenance, not vendored snapshots.
 | Component | Revision | Role |
 | --- | --- | --- |
 | miniaudio | `ab4bd4bfb30e2321b37207fad7cc6c1eb906c096` | Worktree base |
-| timer_wheels integration tip | `e9272b5d263859abbe15c4dfd6d123c542e9e9c0` | Latest PR stack plus the GCC constraint-parser compatibility fix |
+| timer_wheels integration tip | `f5853d075ba011efc5bd872ce892f1162d51db8a` | Latest PR stack plus GCC and MSVC C++20 parser compatibility fixes |
 | Steam Audio source checkout | `4b37ab1aaff9cb7af3df531d0374112856ecc6ca` | Optional binaural implementation reference |
 
 The timer stack, oldest to newest, is:
@@ -15,7 +15,8 @@ The timer stack, oldest to newest, is:
 2. `25c1a22` — current cancellation usage contract;
 3. `7efaead` — fanouts, optional operation startup, direct callback operations;
 4. `f47830f` — preserved comparison evidence;
-5. `e9272b5` — parenthesized the inline-input constraint so GCC 16 can parse the public C++20 fanout header; Clang 22 already accepted the original spelling.
+5. `e9272b5` — parenthesized the inline-input constraint so GCC 16 can parse the public C++20 fanout header; Clang 22 already accepted the original spelling;
+6. `f5853d0` — split throwing and non-throwing fallback function-type specializations so MSVC 19.44 does not need to deduce a Boolean from `noexcept(Noex)`.
 
 Initial Linux validation environment:
 
