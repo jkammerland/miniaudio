@@ -1,0 +1,14 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+includedir=@MINIAUDIO_CPP_ENGINE_PC_INCLUDEDIR@
+libdir=@MINIAUDIO_CPP_ENGINE_PC_LIBDIR@
+
+Name: miniaudio-cpp-engine
+Description: Experimental C++20 planar rendering engine for miniaudio
+URL: https://miniaud.io/
+License: Unlicense OR MIT-0
+Version: @PROJECT_VERSION@
+
+Requires: miniaudio
+Cflags: -I${includedir}/miniaudio
+Libs: -L${libdir} -lminiaudio_cpp_engine

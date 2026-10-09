@@ -17,6 +17,9 @@ project(miniaudio VERSION ${MINIAUDIO_VERSION})
 option(MINIAUDIO_BUILD_EXAMPLES                "Build miniaudio examples"            OFF)
 option(MINIAUDIO_BUILD_TESTS                   "Build miniaudio tests"               OFF)
 option(MINIAUDIO_BUILD_STEAMAUDIO_BENCHMARKS   "Build opt-in Steam Audio adapter benchmarks (requires tests and Steam Audio)" OFF)
+option(MINIAUDIO_BUILD_CPP_ENGINE              "Build the experimental C++20 planar engine" OFF)
+option(MINIAUDIO_CPP_ENGINE_BUILD_BENCHMARKS   "Build experimental C++ engine benchmarks" OFF)
+option(MINIAUDIO_CPP_ENGINE_BUILD_ALLOCATION_TESTS "Build the render-path allocation contract test" ON)
 option(MINIAUDIO_BUILD_TOOLS                   "Build miniaudio development tools. Leave this disabled unless you know what you're doing. If you enable this and you get build errors, you clearly do not know what you're doing and yet you still enabled this option. Why would you do that?" OFF)
 option(MINIAUDIO_FORCE_CXX                     "Force compilation as C++"            OFF)
 option(MINIAUDIO_FORCE_C89                     "Force compilation as C89"            OFF)
@@ -76,6 +79,10 @@ option(MINIAUDIO_NO_RUNTIME_LINKING            "Disable runtime linking"        
 option(MINIAUDIO_USE_STDINT                    "Use <stdint.h> for sized types"      OFF)
 option(MINIAUDIO_DEBUG_OUTPUT                  "Enable stdout debug output"          OFF)
 option(MINIAUDIO_INSTALL                       "Enable installation targets"         ON) 
+set(MINIAUDIO_STEAMAUDIO_SOURCE_DIR "" CACHE PATH
+    "Steam Audio checkout or SDK root used for headers and packaged libraries")
+set(MINIAUDIO_STEAMAUDIO_LIBRARY "" CACHE FILEPATH
+    "Explicit Steam Audio phonon library, typically built from MINIAUDIO_STEAMAUDIO_SOURCE_DIR")
 
 include(GNUInstallDirs)
 
@@ -453,36 +460,57 @@ else()
     message(STATUS "SDL2 not found. SDL2 examples will be excluded.")
 endif()
 
-# SteamAudio has an annoying SDK setup. In the lib folder there is a folder for each platform. We need to specify the
-# platform we're compiling for.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-    # Assume 64-bit. Now we need to check if it's for Windows or Linux.
-    if(WIN32)
-        set(STEAMAUDIO_ARCH windows-x64)
-    else()
-        set(STEAMAUDIO_ARCH linux-x64)
-    endif()
+# Steam Audio's packaged directory names depend on both the target OS and ABI.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" STEAMAUDIO_PROCESSOR)
+if(CMAKE_VS_PLATFORM_NAME)
+    string(TOLOWER "${CMAKE_VS_PLATFORM_NAME}" STEAMAUDIO_TARGET_PROCESSOR)
+elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+    string(TOLOWER "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}" STEAMAUDIO_TARGET_PROCESSOR)
+elseif(CMAKE_GENERATOR_PLATFORM)
+    string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" STEAMAUDIO_TARGET_PROCESSOR)
 else()
-    # Assume 32-bit. Now we need to check if it's for Windows or Linux.
-    if(WIN32)
+    set(STEAMAUDIO_TARGET_PROCESSOR "${STEAMAUDIO_PROCESSOR}")
+endif()
+if(APPLE)
+    set(STEAMAUDIO_ARCH osx)
+elseif(WIN32)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND STEAMAUDIO_TARGET_PROCESSOR MATCHES "^(amd64|x86_64|x64)$")
+        set(STEAMAUDIO_ARCH windows-x64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+           STEAMAUDIO_TARGET_PROCESSOR MATCHES "^(amd64|x86_64|x64|win32|x86|i[3-6]86)$")
         set(STEAMAUDIO_ARCH windows-x86)
-    else()
+    endif()
+elseif(UNIX)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND STEAMAUDIO_PROCESSOR MATCHES "^(amd64|x86_64|x64)$")
+        set(STEAMAUDIO_ARCH linux-x64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4 AND
+           STEAMAUDIO_PROCESSOR MATCHES "^(amd64|x86_64|x64|x86|i[3-6]86)$")
         set(STEAMAUDIO_ARCH linux-x86)
     endif()
 endif()
 
 # When searching for SteamAudio, we'll support installing it in the external/steamaudio directory.
 set(STEAMAUDIO_FIND_LIBRARY_HINTS)
-list(APPEND STEAMAUDIO_FIND_LIBRARY_HINTS ${CMAKE_CURRENT_SOURCE_DIR}/external/steamaudio/lib/${STEAMAUDIO_ARCH})
+if(STEAMAUDIO_ARCH)
+    list(APPEND STEAMAUDIO_FIND_LIBRARY_HINTS ${CMAKE_CURRENT_SOURCE_DIR}/external/steamaudio/lib/${STEAMAUDIO_ARCH})
+endif()
+if(MINIAUDIO_STEAMAUDIO_SOURCE_DIR AND STEAMAUDIO_ARCH)
+    list(PREPEND STEAMAUDIO_FIND_LIBRARY_HINTS
+        ${MINIAUDIO_STEAMAUDIO_SOURCE_DIR}/unity/lib/${STEAMAUDIO_ARCH})
+endif()
 
-if(WIN32)
-else()
+if(NOT WIN32 AND STEAMAUDIO_ARCH)
     list(APPEND STEAMAUDIO_FIND_LIBRARY_HINTS /opt/steamaudio/lib/${STEAMAUDIO_ARCH})
     list(APPEND STEAMAUDIO_FIND_LIBRARY_HINTS /usr/local/steamaudio/lib/${STEAMAUDIO_ARCH})
 endif()
 
 set(STEAMAUDIO_FIND_HEADER_HINTS)
 list(APPEND STEAMAUDIO_FIND_HEADER_HINTS ${CMAKE_CURRENT_SOURCE_DIR}/external/steamaudio/include)
+if(MINIAUDIO_STEAMAUDIO_SOURCE_DIR)
+    # The integration-package copy contains phonon.h and generated phonon_version.h.
+    list(PREPEND STEAMAUDIO_FIND_HEADER_HINTS
+        ${MINIAUDIO_STEAMAUDIO_SOURCE_DIR}/unity/include/phonon)
+endif()
 
 if(WIN32)
 else()
@@ -491,7 +519,14 @@ else()
 endif()
 
 
-find_library(STEAMAUDIO_LIBRARY NAMES phonon HINTS ${STEAMAUDIO_FIND_LIBRARY_HINTS})
+if(MINIAUDIO_STEAMAUDIO_LIBRARY)
+    if(NOT EXISTS "${MINIAUDIO_STEAMAUDIO_LIBRARY}")
+        message(FATAL_ERROR "MINIAUDIO_STEAMAUDIO_LIBRARY does not exist: ${MINIAUDIO_STEAMAUDIO_LIBRARY}")
+    endif()
+    set(STEAMAUDIO_LIBRARY "${MINIAUDIO_STEAMAUDIO_LIBRARY}")
+else()
+    find_library(STEAMAUDIO_LIBRARY NAMES phonon HINTS ${STEAMAUDIO_FIND_LIBRARY_HINTS})
+endif()
 if(STEAMAUDIO_LIBRARY)
     message(STATUS "Found SteamAudio: ${STEAMAUDIO_LIBRARY}")
 
@@ -552,6 +587,10 @@ add_library(miniaudio
     miniaudio.h
 )
 miniaudio_force_cxx_target(miniaudio)
+
+if(BUILD_SHARED_LIBS)
+    target_compile_definitions(miniaudio PUBLIC MA_DLL)
+endif()
 
 list(APPEND LIBS_TO_INSTALL miniaudio)
 if(MINIAUDIO_INSTALL)
@@ -914,6 +953,17 @@ if(MINIAUDIO_BUILD_TESTS)
     endif()
 endif()
 
+if(MINIAUDIO_BUILD_CPP_ENGINE)
+    if(CMAKE_VERSION VERSION_LESS 3.20)
+        message(FATAL_ERROR "MINIAUDIO_BUILD_CPP_ENGINE requires CMake 3.20 or newer.")
+    endif()
+    if(MINIAUDIO_NO_DEVICEIO)
+        message(FATAL_ERROR "MINIAUDIO_BUILD_CPP_ENGINE requires miniaudio device I/O.")
+    endif()
+    set_target_properties(miniaudio PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    add_subdirectory(extras/miniaudio_cpp_engine)
+endif()
+
 # Examples
 #
 # Like tests, all examples are compiled as a single translation unit. There is no need to add miniaudio as a link library.
@@ -1030,8 +1080,15 @@ if(PC_REQUIRES_PRIVATE_LIST)
     string(JOIN ", " PC_REQUIRES_STR ${PC_REQUIRES_PRIVATE_LIST})
     string(APPEND MINIAUDIO_PC_REQUIRES_PRIVATE "${PC_REQUIRES_STR}")
 endif()
-list(TRANSFORM COMMON_LINK_LIBRARIES PREPEND "-l")
-string(JOIN " " MINIAUDIO_PC_LIBS_PRIVATE ${COMMON_LINK_LIBRARIES})
+set(MINIAUDIO_PC_LIBS_PRIVATE_LIST)
+foreach(MINIAUDIO_PC_LIBRARY IN LISTS COMMON_LINK_LIBRARIES)
+    if(IS_ABSOLUTE "${MINIAUDIO_PC_LIBRARY}" OR MINIAUDIO_PC_LIBRARY MATCHES "^-")
+        list(APPEND MINIAUDIO_PC_LIBS_PRIVATE_LIST "${MINIAUDIO_PC_LIBRARY}")
+    else()
+        list(APPEND MINIAUDIO_PC_LIBS_PRIVATE_LIST "-l${MINIAUDIO_PC_LIBRARY}")
+    endif()
+endforeach()
+string(JOIN " " MINIAUDIO_PC_LIBS_PRIVATE ${MINIAUDIO_PC_LIBS_PRIVATE_LIST})
 list(TRANSFORM COMPILE_DEFINES PREPEND "-D")
 string(JOIN " " MINIAUDIO_PC_CFLAGS ${COMPILE_DEFINES})
 
