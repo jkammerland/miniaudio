@@ -4,6 +4,11 @@ This opt-in prototype tests a smaller engine contract without replacing
 miniaudio's mature device and codec backends. See [SPEC.md](SPEC.md) before using
 the API.
 
+The current playback slice has no decoder or resource-manager layer, so it does
+not require Opus or Vorbis development packages. Those remain optional future
+decoder-adapter dependencies and should be supplied by the consuming build
+when that contract exists; they are not fetched or vendored here.
+
 Configure against the current timer_wheels PR-stack worktree:
 
 ```sh

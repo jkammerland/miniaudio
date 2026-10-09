@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "date": "2026-10-09",
+  "verdict": "PASS",
+  "scope": "native macOS arm64 deterministic engine and packaging closure; no physical audio and no Steam Audio SDK",
+  "validation": {
+    "batch_job": "1415dacb35f1b348",
+    "task": 0,
+    "model": "gpt-6-astra",
+    "reasoning_effort": "max",
+    "transport": "hardened foreground SSH through durable local-offload workflow",
+    "artifact_root": "/home/ai-dev1/.codex/codex-mcp-server/job-artifacts/1415dacb35f1b348/tasks/task-0"
+  },
+  "source": {
+    "miniaudio_commit": "1f49a2ff6ad1ae36b08b669562dd96244a9a4673",
+    "miniaudio_prerequisite_commit": "7de1c17e346801d45d11f82988668c8d9d0fc347",
+    "timer_wheels_commit": "392cab579f6c6556df16131bea878832a0b585ee",
+    "detached_worktrees_clean_before_and_after": true,
+    "verified_bundle_chain": {
+      "miniaudio_full_7de1c17_sha256": "3c45913e18267015e176c8d81c995807d59d75c003b803c07ed1f1e0cdb38db1",
+      "miniaudio_incremental_1f49a2f_sha256": "611c4dddfade1283ded1fca3bbbf7be4d58bb01d925c5344bf9fbd2462935dd2",
+      "timer_wheels_full_392cab5_sha256": "98c5d154aeffab5780d23b9ca76ebf2cfd75a40f8f610e91450e67011589ca84"
+    }
+  },
+  "host": {
+    "name": "work-computer-ai-dev",
+    "account": "ai-dev",
+    "os": "macOS 26.5.2 (25F84)",
+    "architecture": "arm64",
+    "xcode": "26.6 (17F113)",
+    "sdk": "macOS 26.5 (25F70)",
+    "compiler": "Apple clang 21.0.0",
+    "cmake": "4.3.4",
+    "ninja": "1.13.2",
+    "git": "2.50.1 (Apple Git-155)",
+    "pkg_config": "2.5.1",
+    "tool_sha256": {
+      "clang": "7def90dd8829726686213a747fc5bff1583df933dae5edc55d755479e0bfe00a",
+      "cmake": "fb32e700c58fa0d8f41c05e0f36cfeb144f6ccec7df1f66bbfa90ca931118645",
+      "ninja": "48761628046784f59bd789f5a72b88da99205c5849e5d19ae4d317854ae09e83",
+      "git": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818",
+      "pkg_config": "a819e53e8eb8017661e5d686ae8e63102239d1b9c2b7e75988fc8d565fe3ad53"
+    }
+  },
+  "gate": {
+    "result": "PASS",
+    "build_type": "Release",
+    "passed": 5,
+    "total": 5,
+    "tests": [
+      "miniaudio_cpp_engine_steamaudio_arch",
+      "miniaudio_cpp_engine",
+      "miniaudio_cpp_engine_allocations",
+      "miniaudio_cpp_engine_timer_wheels",
+      "miniaudio_cpp_engine_pkgconfig_spaces"
+    ],
+    "built_binary_architecture": "arm64",
+    "default_timer_pin_verified": true,
+    "steam_audio_sdk_present": false,
+    "steam_audio_adapter_compiled": false,
+    "coreaudio_enabled": false,
+    "physical_audio_exercised": false
+  },
+  "cleanup": {
+    "continuation_job": "29167d4b6671e27d",
+    "status": "deleted_and_both_paths_absent",
+    "candidate": "/Users/ai-dev/offload/miniaudio-cpp-1f49a2f-392cab5",
+    "quarantine": "/Users/ai-dev/offload/miniaudio-cpp-1f49a2f-392cab5.quarantine-29167d4b6671e27d-628f61ef30db4f3b90d7060b16faa364",
+    "no_matching_process_references": true,
+    "removed_file_logical_bytes": 581637000,
+    "removed_allocated_bytes": 595124224,
+    "no_other_paths_touched": true,
+    "unrelated_lsof_warning": "/Users/jonathankammerland/OrbStack NFS stat warning was recorded separately and did not reference the candidate",
+    "cleanup_artifact_sha256": {
+      "cleanup-result.json": "a039708bfc8680cda432d797a0c5b7d4ea75385f8430c24ef63a4c19d72cb151",
+      "lifecycle.json": "e8772931336acb68ac840c352f764fdd07069028f91dc7b1692e168dcfec4d1e",
+      "transcript.log": "4c7d4284bb433c43d3d55695e934c19e5d7481384908eb745e5f7f1cd272c966",
+      "evidence-hashes.sha256": "101728dbe470e022fac09a144e1c74f6a5b13392d101088141752f789e1095a8",
+      "evidence-hashes.sha256.sha256": "67fff151ead2f8570c16231e6b08814f9535ddb4664f0767b673b14f88e9280e"
+    }
+  },
+  "validation_artifact_sha256": {
+    "result-summary.json": "1ec77ce87745e395de1f37ed98e179a550d43a1af902e2dc974f623fdcc15775",
+    "lifecycle.json": "765732b70f8104831443275c05bc1785efb831d2d12627b8f7c1f9f387c8eea3",
+    "source-final-state.json": "abd288c50ac1ee9a2469b79c295728209ed3fb2c56edd45cd88640d485cd4711",
+    "remote-evidence-manifest.json": "464ba56cf0516d2388ba1a30d40b874bd09402d5ecc86615036151c1bfa45336",
+    "evidence-hashes.sha256": "acf0cfed02a760497551d76ce98f59984777ee8467b4ce8896dece4b3890bfef",
+    "evidence-hashes.sha256.sha256": "d5589788bd69d0941e17ef1c6a7d98b94569594042e4293d1859256b71e817b6",
+    "transcript.log": "757bda0683e55a4bf5ad888cf6476b1703735649b5b2479da31b0c6f07a33ff8"
+  }
+}

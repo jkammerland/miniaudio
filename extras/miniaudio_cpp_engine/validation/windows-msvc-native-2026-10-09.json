@@ -1,0 +1,113 @@
+{
+  "schema": 3,
+  "date": "2026-10-09",
+  "verdict": "PASS",
+  "scope": "native MSVC engine closure at the final implementation revision; Steam Audio SDK was absent",
+  "final_validation": {
+    "batch_job": "cc0e232fb5e12d4c",
+    "continuation_job": "61ee7c3793564c1f",
+    "model": "gpt-6-astra",
+    "reasoning_effort": "max",
+    "artifact_root": "C:\\Users\\codex-worker\\.codex\\codex-mcp-server\\job-artifacts\\cc0e232fb5e12d4c\\continuations\\61ee7c3793564c1f\\task-0"
+  },
+  "source": {
+    "miniaudio_commit": "1f49a2ff6ad1ae36b08b669562dd96244a9a4673",
+    "miniaudio_prerequisite_commit": "7de1c17e346801d45d11f82988668c8d9d0fc347",
+    "timer_wheels_commit": "392cab579f6c6556df16131bea878832a0b585ee",
+    "detached_worktrees_clean_before_and_after": true,
+    "verified_bundle_chain": {
+      "miniaudio_full_7de1c17_sha256": "3c45913e18267015e176c8d81c995807d59d75c003b803c07ed1f1e0cdb38db1",
+      "miniaudio_incremental_1f49a2f_sha256": "611c4dddfade1283ded1fca3bbbf7be4d58bb01d925c5344bf9fbd2462935dd2",
+      "timer_wheels_full_392cab5_sha256": "98c5d154aeffab5780d23b9ca76ebf2cfd75a40f8f610e91450e67011589ca84"
+    }
+  },
+  "host": {
+    "os": "Microsoft Windows 10.0.26200",
+    "architecture": "x64",
+    "compiler": "MSVC 19.44.35228",
+    "toolset": "14.44.35207",
+    "windows_sdk": "10.0.26100.0",
+    "git": "2.55.0.windows.3",
+    "cmake": "4.4.3",
+    "ninja": "1.12.1",
+    "powershell": "7.6.6"
+  },
+  "gates": {
+    "final_engine": {
+      "result": "PASS",
+      "build_type": "Debug",
+      "passed": 4,
+      "total": 4,
+      "tests": [
+        "miniaudio_cpp_engine_steamaudio_arch",
+        "miniaudio_cpp_engine",
+        "miniaudio_cpp_engine_allocations",
+        "miniaudio_cpp_engine_timer_wheels"
+      ],
+      "default_timer_pin_verified": true,
+      "dependency_fetches": 0,
+      "prohibited_tool_invocations": 0
+    },
+    "prior_same_timer_revision": {
+      "evidence_job": "cc0e232fb5e12d4c",
+      "continuation_job": "40a100864f87ff38",
+      "timer_pin_migration": "PASS",
+      "explicit_historical_override_failed_closed": "PASS",
+      "dependency_free_cxx20_cxx23_portability": "2/2 passed",
+      "throwing_and_noexcept_cvref_forms": 12
+    },
+    "steam_audio": {
+      "sdk_present": false,
+      "native_adapter_compiled": false,
+      "architecture_mapping_script": "PASS",
+      "linux_adapter_result_not_relabeled_as_windows": true
+    }
+  },
+  "cross_validation": {
+    "linux_release": "26/26 passed",
+    "linux_clang_asan_ubsan_engine": "6/6 passed",
+    "linux_gcc_asan_ubsan_steam_audio": "1/1 passed",
+    "linux_clang_tsan_core_and_timer": "2/2 passed",
+    "timer_wheels_full_suite": "1695/1695 passed",
+    "macos_arm64_native": "5/5 passed; see macos-native-2026-10-09.json"
+  },
+  "portability_repairs": [
+    {
+      "finding": "MSVC could not deduce a Boolean from noexcept(Noex) in the fallback move_only_function partial specialization",
+      "repair_commit": "f5853d075ba011efc5bd872ce892f1162d51db8a"
+    },
+    {
+      "finding": "the focused portability check unnecessarily inherited Gentest LLVM and Boost dependencies",
+      "repair_commit": "a46be19e251888a259bbe18051cab4d67920fe65"
+    },
+    {
+      "finding": "taking the address of an implementation-private inherited std::move_only_function call operator was not portable",
+      "repair_commit": "392cab579f6c6556df16131bea878832a0b585ee"
+    }
+  ],
+  "mingw_policy": {
+    "status": "permanently_owner_rejected",
+    "final_validation_invoked_mingw_or_gcc": false,
+    "windows_results_are_msvc_only": true,
+    "reopen_condition": "only an explicit owner policy reversal"
+  },
+  "cleanup": {
+    "record": "windows-msvc-native-cleanup-2026-10-09.json",
+    "record_sha256": "b69635330457df8d05d227e6eae650527dfe7d59206c3c6991bc240184b03703",
+    "historical_removed_bytes": 2667218986,
+    "final_exact_commit_status": "retained_pending_cleanup",
+    "final_retained_bytes": 685911482,
+    "blocker": "Win32_Process enumeration returned access denied; fail-closed cleanup attempted no rename or deletion",
+    "remote_job_artifacts_retained": true
+  },
+  "retrieved_final_artifact_sha256": {
+    "transport_manifest_content": "92ccf81d49271cac95ab720e61659d2bd80bd5277367cda8bbebe372f1126694",
+    "transport_manifest_file": "bf118e7660181b507f502a0027b507e9367497b0b6d18045a5d99e463712e98b",
+    "result-summary.json": "5e57ebb87d0be5e2c4e6b08cfc2595d08948fa6f1b8adefe1b7f69f45091154c",
+    "complete-transcript.txt": "22e97e2a935e44c93d9eaf84553d82b0fc9b3a495f00817c614b128e13341740",
+    "lifecycle-manifest.json": "a7c4f24a51c6e0793ffa4a5c9bda7c304b026664ccef4cdb96245a21fc9e2e77",
+    "source-final-state.json": "29f473a29600a04a65dfdb33a8ef6de812775809ad2abada6be3409d330e949d",
+    "A-ctest.log": "414d635dcee7356f309a8a654761a65a06c60beea243e12799f2cddd0b12e365",
+    "evidence-hashes.json": "f710f15cce573c64613de44a9e28c6c6f6e721831075be33d66a02275bc03c83"
+  }
+}
