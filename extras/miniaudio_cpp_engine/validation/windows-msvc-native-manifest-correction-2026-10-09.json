@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "date": "2026-10-09",
+  "kind": "sealed_evidence_metadata_correction",
+  "scope": "Windows/MSVC exact-tip validation job ef3a0f5d647322de, task 0",
+  "original_manifest": {
+    "name": "evidence-manifest.json",
+    "sha256": "b92aa88594793b03b5ff8702b593592ed626d3915fafadeaa5f15273cec5c179",
+    "file_count": 379,
+    "reported_payload_bytes": 0
+  },
+  "correction": {
+    "payload_bytes": 3338548,
+    "method": "sum of the integer bytes field for all 379 serialized files rows",
+    "independent_calculations_agreed": true,
+    "all_379_files_re_read_with_declared_byte_count_and_sha256": true
+  },
+  "root_cause": "The sealing script's Measure-Object expression emitted zero and its verifier checked every individual row and the sealed manifest hash but did not compare payloadBytes with the row-size sum.",
+  "preservation": {
+    "sealed_original_modified": false,
+    "sealed_original_hash_remains_authoritative_for_original_contents": true,
+    "native_test_result_affected": false,
+    "native_test_result": "4/4 passed"
+  },
+  "future_guard": "Future evidence sealers and verifiers must accumulate row sizes in an explicit 64-bit value and reject fileCount or payloadBytes values that differ from the serialized files array."
+}

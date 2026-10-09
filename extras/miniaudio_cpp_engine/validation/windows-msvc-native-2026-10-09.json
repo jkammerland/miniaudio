@@ -1,36 +1,60 @@
 {
-  "schema": 3,
+  "schema": 4,
   "date": "2026-10-09",
   "verdict": "PASS",
-  "scope": "native MSVC engine closure at the final implementation revision; Steam Audio SDK was absent",
+  "scope": "native MSVC engine closure at the final implementation and timer revisions; Steam Audio SDK was absent",
   "final_validation": {
-    "batch_job": "cc0e232fb5e12d4c",
-    "continuation_job": "61ee7c3793564c1f",
+    "batch_job": "ef3a0f5d647322de",
+    "task": 0,
     "model": "gpt-6-astra",
     "reasoning_effort": "max",
-    "artifact_root": "C:\\Users\\codex-worker\\.codex\\codex-mcp-server\\job-artifacts\\cc0e232fb5e12d4c\\continuations\\61ee7c3793564c1f\\task-0"
+    "artifact_root": "C:\\Users\\codex-worker\\.codex\\codex-mcp-server\\job-artifacts\\ef3a0f5d647322de\\tasks\\task-0",
+    "retrieved_files": 381,
+    "internal_manifest_payloads": 379,
+    "all_internal_manifest_payloads_verified": true,
+    "internal_manifest_sha256": "b92aa88594793b03b5ff8702b593592ed626d3915fafadeaa5f15273cec5c179",
+    "transport_manifest_id_sha256": "f85086ff4adf96353462e8d30e9364682eafda06fec1cd5d0ec37ddc92de2667",
+    "supersedes_validation_job": "cc0e232fb5e12d4c"
+  },
+  "sealed_manifest_correction": {
+    "record": "windows-msvc-native-manifest-correction-2026-10-09.json",
+    "record_sha256": "aecb0812fcd08a89bc90bcc79426fb36fb0d98964dd2edccabdb86e2dc31bccd",
+    "original_reported_payload_bytes": 0,
+    "corrected_payload_bytes": 3338548,
+    "sealed_original_preserved": true,
+    "native_test_verdict_affected": false
   },
   "source": {
-    "miniaudio_commit": "1f49a2ff6ad1ae36b08b669562dd96244a9a4673",
-    "miniaudio_prerequisite_commit": "7de1c17e346801d45d11f82988668c8d9d0fc347",
-    "timer_wheels_commit": "392cab579f6c6556df16131bea878832a0b585ee",
+    "miniaudio_commit": "75c81e7e3616cdd710f404e9d74198f7efb9a825",
+    "miniaudio_prerequisite_commit": "1f49a2ff6ad1ae36b08b669562dd96244a9a4673",
+    "timer_wheels_commit": "38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9",
     "detached_worktrees_clean_before_and_after": true,
+    "all_source_and_git_file_hashes_unchanged": true,
+    "timer_gate_relevant_tree_equivalence": true,
     "verified_bundle_chain": {
-      "miniaudio_full_7de1c17_sha256": "3c45913e18267015e176c8d81c995807d59d75c003b803c07ed1f1e0cdb38db1",
-      "miniaudio_incremental_1f49a2f_sha256": "611c4dddfade1283ded1fca3bbbf7be4d58bb01d925c5344bf9fbd2462935dd2",
-      "timer_wheels_full_392cab5_sha256": "98c5d154aeffab5780d23b9ca76ebf2cfd75a40f8f610e91450e67011589ca84"
+      "miniaudio_incremental_75c81e7_sha256": "63e081c4bbb6edd86bb811f98788a2de9a1889913a84df8e2aa86eaeb7743faf",
+      "timer_wheels_full_38d087f_sha256": "a781deb2b73b09048b7aeba11f6a032577d5019f59eaa7f893a1be4988d4210d"
     }
   },
   "host": {
-    "os": "Microsoft Windows 10.0.26200",
+    "os": "Microsoft Windows 10.0.26200 (Windows 11 Professional 25H2, build 26200.9457)",
     "architecture": "x64",
+    "cpu": "13th Gen Intel Core i5-13600KF",
+    "visual_studio_build_tools": "2022 17.14.37628.2",
     "compiler": "MSVC 19.44.35228",
     "toolset": "14.44.35207",
     "windows_sdk": "10.0.26100.0",
     "git": "2.55.0.windows.3",
     "cmake": "4.4.3",
-    "ninja": "1.12.1",
-    "powershell": "7.6.6"
+    "ninja": "1.13.2",
+    "powershell": "7.6.6",
+    "selected_tool_sha256": {
+      "cl.exe": "88c8344236a27a6e727e0a8edc49aaa2690bdc7a9464b9d18cc7abe70a9f1c0d",
+      "cmake.exe": "ab8247ca4554871e5d75c0ee118ee8663727bd6fdf37ad76b17e9cc8d5f286a8",
+      "ninja.exe": "e52a7ad9538d9618c67a0bd777964e2eec8a30f68b810a2f6adce1f2daf847b8",
+      "git.exe": "7b7971dd13f0c3a284e538601f2f9770b3a87dfaccb5fb52d68141c67ed22364",
+      "pwsh.exe": "bfb46af89433268872ddb43d1ca7a3f433452ee91ed356a9786940f90118e285"
+    }
   },
   "gates": {
     "final_engine": {
@@ -45,16 +69,16 @@
         "miniaudio_cpp_engine_timer_wheels"
       ],
       "default_timer_pin_verified": true,
+      "timer_revision_override": "",
+      "timer_revision_verification_enabled": true,
       "dependency_fetches": 0,
-      "prohibited_tool_invocations": 0
+      "prohibited_tool_invocations": 0,
+      "compiler_warning_lines": 0,
+      "cmake_policy_warnings_retained": 97
     },
-    "prior_same_timer_revision": {
-      "evidence_job": "cc0e232fb5e12d4c",
-      "continuation_job": "40a100864f87ff38",
-      "timer_pin_migration": "PASS",
-      "explicit_historical_override_failed_closed": "PASS",
-      "dependency_free_cxx20_cxx23_portability": "2/2 passed",
-      "throwing_and_noexcept_cvref_forms": 12
+    "pkg_config": {
+      "quoting_module_accepted_by_native_cmake": true,
+      "linux_runtime_linking_covered": false
     },
     "steam_audio": {
       "sdk_present": false,
@@ -68,21 +92,34 @@
     "linux_clang_asan_ubsan_engine": "6/6 passed",
     "linux_gcc_asan_ubsan_steam_audio": "1/1 passed",
     "linux_clang_tsan_core_and_timer": "2/2 passed",
-    "timer_wheels_full_suite": "1695/1695 passed",
-    "macos_arm64_native": "5/5 passed; see macos-native-2026-10-09.json"
+    "linux_pkg_config_absolute_runtime_path_consumer": "configured, built, and ran",
+    "timer_wheels_full_suite": "1697/1697 passed",
+    "timer_wheels_clang_cxx20_cxx23_portability": "2/2 passed",
+    "macos_arm64_native": "5/5 passed at the same exact commits; see macos-native-2026-10-09.json"
   },
-  "portability_repairs": [
+  "timer_portability_repairs": [
+    {
+      "finding": "GCC required parentheses around the inline-input constraint expression",
+      "repair_commit": "c7300b8"
+    },
     {
       "finding": "MSVC could not deduce a Boolean from noexcept(Noex) in the fallback move_only_function partial specialization",
-      "repair_commit": "f5853d075ba011efc5bd872ce892f1162d51db8a"
+      "repair_commit": "f0fd1b2"
     },
     {
-      "finding": "the focused portability check unnecessarily inherited Gentest LLVM and Boost dependencies",
-      "repair_commit": "a46be19e251888a259bbe18051cab4d67920fe65"
+      "finding": "the contract needed all 12 throwing and non-throwing cv/ref forms",
+      "repair_commit": "c0daed0"
     },
     {
-      "finding": "taking the address of an implementation-private inherited std::move_only_function call operator was not portable",
-      "repair_commit": "392cab579f6c6556df16131bea878832a0b585ee"
+      "finding": "the comparison assumed std::move_only_function declared rather than inherited its call operator",
+      "repair_commits": [
+        "1e31ba1",
+        "38d087f"
+      ]
+    },
+    {
+      "finding": "the focused portability gate unnecessarily inherited Gentest LLVM and Boost development dependencies",
+      "repair_commit": "667984c"
     }
   ],
   "mingw_policy": {
@@ -93,21 +130,19 @@
   },
   "cleanup": {
     "record": "windows-msvc-native-cleanup-2026-10-09.json",
-    "record_sha256": "b69635330457df8d05d227e6eae650527dfe7d59206c3c6991bc240184b03703",
+    "record_sha256": "43b2414e2e857bde0bdae8c7373a5eb8aca5d0f88af3215a521899b41d5c6a47",
     "historical_removed_bytes": 2667218986,
-    "final_exact_commit_status": "retained_pending_cleanup",
-    "final_retained_bytes": 685911482,
-    "blocker": "Win32_Process enumeration returned access denied; fail-closed cleanup attempted no rename or deletion",
+    "final_status": "four exact roots retained fail-closed",
+    "final_retained_bytes": 1048956819,
+    "blocker": "Restart Manager registered all 1,421 files but RmGetList returned ERROR_ACCESS_DENIED (5), leaving lock status inconclusive; no rename or deletion was attempted",
     "remote_job_artifacts_retained": true
   },
-  "retrieved_final_artifact_sha256": {
-    "transport_manifest_content": "92ccf81d49271cac95ab720e61659d2bd80bd5277367cda8bbebe372f1126694",
-    "transport_manifest_file": "bf118e7660181b507f502a0027b507e9367497b0b6d18045a5d99e463712e98b",
-    "result-summary.json": "5e57ebb87d0be5e2c4e6b08cfc2595d08948fa6f1b8adefe1b7f69f45091154c",
-    "complete-transcript.txt": "22e97e2a935e44c93d9eaf84553d82b0fc9b3a495f00817c614b128e13341740",
-    "lifecycle-manifest.json": "a7c4f24a51c6e0793ffa4a5c9bda7c304b026664ccef4cdb96245a21fc9e2e77",
-    "source-final-state.json": "29f473a29600a04a65dfdb33a8ef6de812775809ad2abada6be3409d330e949d",
-    "A-ctest.log": "414d635dcee7356f309a8a654761a65a06c60beea243e12799f2cddd0b12e365",
-    "evidence-hashes.json": "f710f15cce573c64613de44a9e28c6c6f6e721831075be33d66a02275bc03c83"
+  "selected_retrieved_artifact_sha256": {
+    "retrieval_manifest_file": "70e20d89ad5130cb0f48be922ce4bea041c521ccd49e482ff5a97be77eaea7f0",
+    "result-summary.json": "b10f149d935927ab25f6dd566458aabb848eb4ee746e98153f3b7d6e0ec88904",
+    "CTest-LastTest.log": "9a2da97bed6ef94510dab842f23be05f529e014ea4239665b9ef110c0fdcfdbc",
+    "build.log": "3d1041a18a86cccf502fdb62b6b3945ec2c8aee4dcb1f654d43ba9687aaa9874",
+    "native-environment.json": "5748bfd94b2374a263d10aa51c8121a95c22d7fcccab1f4294d5b90b20319db8",
+    "execution-audit.json": "b62056964ae062c5790c696e2ebf294391375ccc3b76914d56e3842332e9df66"
   }
 }

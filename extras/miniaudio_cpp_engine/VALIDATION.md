@@ -9,8 +9,8 @@ miniaudio build remains the default.
 | Item | Value |
 | --- | --- |
 | miniaudio base | `ab4bd4bfb30e2321b37207fad7cc6c1eb906c096` |
-| validated implementation tip | `1f49a2ff6ad1ae36b08b669562dd96244a9a4673` |
-| timer_wheels integration | `392cab579f6c6556df16131bea878832a0b585ee` (clean worktree) |
+| validated implementation tip | `75c81e7e3616cdd710f404e9d74198f7efb9a825` |
+| timer_wheels integration | `38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9` (clean worktree) |
 | Steam Audio source | `4b37ab1aaff9cb7af3df531d0374112856ecc6ca` |
 | Steam Audio release library SHA-256 | `fb8511340a25c1846e110952f5c7f2c5467293b30f1815b0e20fb418441ead28` |
 | Steam Audio release ELF build ID | `10bf67cf9cb9187184faed347ea168318c90fd19` |
@@ -26,7 +26,8 @@ Ninja `1.14.0.git`.
 
 The release configuration enabled the C++ engine, all repository tests, the
 allocation contract test, the benchmark, the exact timer_wheels source path,
-and the source-built Steam Audio library. The final commands were:
+and the source-built Steam Audio library. It was reconfigured after the final
+timer pin and pkg-config repair. The final commands were:
 
 ```sh
 cmake --build build/cpp-engine -j 16
@@ -48,14 +49,14 @@ regressions establish:
   plan publication, and cancelled-candidate destruction on the owner thread;
 - exact Steam Audio SDK platform selection, including negative Android,
   FreeBSD, iOS, and Windows ARM64 cases; and
-- valid installed `pkg-config` metadata when the install prefix contains
-  spaces.
+- valid installed `pkg-config` metadata when the install prefix or an absolute
+  private runtime-library path contains spaces.
 
 ## Sanitizers
 
 All three sanitizer build directories were reconfigured after the timer_wheels
 tip advanced. Each configure reported the exact revision
-`392cab579f6c6556df16131bea878832a0b585ee` before the following tests were
+`38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9` before the following tests were
 rerun. Earlier seeded-cache checks independently exercised migration from each
 project-owned historical pin rather than treating a stale default as a user
 override.
@@ -116,11 +117,12 @@ Fresh focused configurations produced these results:
 | static miniaudio and engine linked into a shared consumer | passed, no text relocations |
 | deliberately wrong timer revision with Git unavailable | configuration failed closed |
 | wrong timer revision with a pre-existing timer target | configuration failed closed |
-| existing cache containing the immediately preceding `a46be19` project pin | migrated to `392cab5`; timer integration passed on MSVC |
-| explicit `a46be19` revision override against `392cab5` source | configuration failed closed with both revisions in the diagnostic |
+| existing cache containing an earlier project-owned pin | migrated to `38d087f`; timer integration passed |
+| explicit historical revision override against `38d087f` source | configuration failed closed with both revisions in the diagnostic |
 | dependency-free timer portability build, GCC 16 and Clang 22 | C++20 and C++23 targets passed 2/2 with each compiler |
 | staged install and `pkg-config --static miniaudio-cpp-engine` consumer | built successfully |
 | staged install below an absolute prefix containing spaces | metadata regression passed; a real CMake/pkg-config consumer built and ran |
+| absolute private runtime libraries below a directory containing spaces | every `.pc` token remained one argument; the installed static consumer built and ran |
 | packaged Steam Audio SDK root (`include`, `lib/<platform>`) | GCC ASan+UBSan adapter test passed with the matching instrumented library |
 | synthetic FreeBSD target with a Linux Steam Audio SDK root | SDK correctly reported unavailable; no Linux library was selected |
 
@@ -129,16 +131,16 @@ quoted include/library paths, and the platform runtime flags emitted by
 pkg-config. Optional Steam Audio and timer_wheels development dependencies
 remain external and are never copied into the install tree.
 
-The timer_wheels integration worktree independently passed its complete
-**1695/1695** test suite at `392cab5`.
+The timer_wheels integration worktree independently passed its complete fresh
+Debug **1697/1697** test suite at `38d087f`. Its dependency-free Clang 22
+C++20/C++23 portability gate also passed **2/2**.
 
 ## Native Windows/MSVC
 
-The exact committed sources were transferred as hash-verified complete and
-incremental Git bundles and checked out detached on the Windows worker. The
-validated revisions were miniaudio
-`1f49a2ff6ad1ae36b08b669562dd96244a9a4673` and timer_wheels
-`392cab579f6c6556df16131bea878832a0b585ee`.
+The exact committed sources were transferred as hash-verified Git bundles and
+checked out detached on the Windows worker. The validated revisions were
+miniaudio `75c81e7e3616cdd710f404e9d74198f7efb9a825` and timer_wheels
+`38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9`.
 
 The first MSVC run exposed a real portability defect in timer_wheels: MSVC did
 not deduce the Boolean parameter in a fallback `move_only_function` partial
@@ -151,16 +153,17 @@ not portable. The final dependency-free targets retain exact member-signature
 checks for timer_wheels itself and compare the standard wrapper through its
 specified cv/ref invocability, exact return type, and `noexcept` behavior.
 
-The final closure used Windows `10.0.26200` x64, Visual Studio 2022 Build Tools,
-MSVC `19.44.35228`, Windows SDK `10.0.26100.0`, CMake `4.4.3`, and Ninja
-`1.12.1`. Fresh Debug builds produced these results:
+The final closure used native Windows 11 x64, Visual Studio 2022 Build Tools,
+MSVC `19.44.35228` / toolset `14.44.35207`, Windows SDK `10.0.26100.0`,
+CMake `4.4.3`, and Ninja `1.13.2`. A fresh Debug build produced these results:
 
 | Gate | Result |
 | --- | --- |
 | final miniaudio architecture, core, allocation, and timer integration | 4/4 passed |
-| cached `a46be19` project pin migration | migrated to `392cab5`; timer test passed |
-| explicit historical override | configuration rejected it and named both exact revisions |
-| dependency-free C++20/C++23 portability | 2/2 passed; all 12 throwing/noexcept cv/ref forms compiled and ran in both modes |
+| default timer pin, empty override, and exact revision gate | passed at `38d087f` |
+| gate-relevant timer tree comparison against the prior validated stack | byte/mode/path equivalent |
+| pkg-config quoting module | native CMake configure accepted and invoked it; runtime linking remains Linux evidence |
+| dependency-fetch and prohibited-tool audit | passed |
 
 The final configure trace recorded zero dependency fetches and prohibited tool
 invocations. Steam Audio was not installed, so Windows validates the portable
@@ -169,34 +172,41 @@ optional adapter. The final Windows result is MSVC-only. MinGW/GCC is
 permanently owner-rejected and was neither installed, probed, nor invoked; only
 an explicit owner policy reversal can reopen that target.
 
-The final exact-commit Astra/max continuation is `61ee7c3793564c1f` under
-Batch Codex job `cc0e232fb5e12d4c`. The earlier continuation
-`40a100864f87ff38` supplies the unchanged timer migration, fail-closed, and
-C++20/C++23 portability evidence at the same timer revision. Compact results
-and hashes of the retrieved transcripts, summaries, lifecycle records, and
-test logs are in
+The final exact-commit Astra/max Batch Codex job is `ef3a0f5d647322de`.
+The controller fetched 381 evidence files, independently matched all 379 rows
+of the internal manifest by byte count and SHA-256, and matched that manifest
+to SHA-256
+`b92aa88594793b03b5ff8702b593592ed626d3915fafadeaa5f15273cec5c179`.
+That sealed manifest correctly identifies and hashes every payload but contains
+one metadata error: `payloadBytes` is zero instead of the verified row-size sum
+of 3,338,548 bytes. The original is preserved, and the durable correction is
+[`validation/windows-msvc-native-manifest-correction-2026-10-09.json`](validation/windows-msvc-native-manifest-correction-2026-10-09.json).
+Compact results and selected hashes are in
 [`validation/windows-msvc-native-2026-10-09.json`](validation/windows-msvc-native-2026-10-09.json).
-All 99 final artifact hashes were independently verified after retrieval.
-
-Historical task roots totaling 2,667,218,986 bytes were removed after evidence
-verification. The two final exact-commit roots total 685,911,482 logical bytes
-and remain retained: Windows denied the process-enumeration query needed to
-exclude executable or command-line references, so the cleanup failed closed
-without renaming or deleting them. The durable cleanup record is
+The durable lifecycle and cleanup record, including the earlier fail-closed
+attempt that encountered denied CIM access, is
 [`validation/windows-msvc-native-cleanup-2026-10-09.json`](validation/windows-msvc-native-cleanup-2026-10-09.json).
+Historical task roots totaling 2,667,218,986 bytes were removed after their
+evidence was verified. Four later exact-tip roots totaling 1,048,956,819
+logical bytes remain unchanged. A second cleanup used the native Restart
+Manager API and registered all 1,421 files, but `RmGetList` returned
+`ERROR_ACCESS_DENIED` for every root. Lock status therefore remains
+inconclusive; no rename or deletion was attempted. Host maintenance must
+restore that query before the same exact-root cleanup can safely resume.
 
 ## Native macOS/Apple Clang
 
-The returned work Mac validated the same exact commits in detached clean
-worktrees. macOS `26.5.2` arm64, Xcode `26.6`, Apple Clang `21.0.0`,
-CMake `4.3.4`, Ninja `1.13.2`, and pkg-config `2.5.1` produced a fresh
-Release result of **5/5 passed**:
+The returned work Mac validated the final exact commits in detached clean
+worktrees: miniaudio `75c81e7e3616cdd710f404e9d74198f7efb9a825` and
+timer_wheels `38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9`. macOS `26.5.2`
+arm64, Xcode `26.6`, Apple Clang `21.0.0`, CMake `4.3.4`, Ninja `1.13.2`,
+and pkg-config `2.5.1` produced a fresh Release result of **5/5 passed**:
 
 - Steam Audio architecture mapping;
 - core rendering and exchange behavior;
 - allocation invariants;
 - timer_wheels integration; and
-- pkg-config prefixes containing spaces.
+- pkg-config prefixes and absolute private-library tokens containing spaces.
 
 The three built executables were verified as arm64 Mach-O files. Steam Audio
 was not installed on this host, so its adapter was not compiled; the
@@ -205,13 +215,13 @@ physical audio was attempted because this gate targets deterministic engine
 and packaging behavior; the separate hardening record covers interactive
 device testing.
 
-The Astra/max validation job was `1415dacb35f1b348`. Its 196-file evidence
-manifest was independently hash-verified. Cleanup continuation
-`29167d4b6671e27d` used native process, command-line, cwd, open-file, mount,
-identity, and source checks before atomically quarantining and deleting only
-the exact validation root. Both original and quarantine paths are absent;
-595,124,224 allocated bytes were removed. The compact evidence and hashes are
-in [`validation/macos-native-2026-10-09.json`](validation/macos-native-2026-10-09.json).
+The Astra/max validation job was `2b46073081e9ccee`. Its complete SHA-256
+manifest was independently verified. After evidence sealing and process,
+open-file, mount, path-identity, and source checks, the job atomically
+quarantined and removed only its exact attempt and incoming roots. All original
+and quarantine paths are absent; 578,339,960 logical bytes (589,520,896
+allocated bytes) were removed. The compact evidence and hashes are in
+[`validation/macos-native-2026-10-09.json`](validation/macos-native-2026-10-09.json).
 
 ## Cache benchmark
 
@@ -257,6 +267,25 @@ system/architecture mapping with negative regressions. Final continuations
 tracks with no P0-P3 findings. Reproduced findings were converted into
 regression tests or focused configuration checks rather than waived.
 
+A later three-track review at the then-current tips (`53d04f6bae64a9f1`)
+found two more evidence-backed issues. An absolute private runtime-library path
+containing spaces was emitted as multiple `pkg-config` tokens, and the recorded
+complete timer_wheels count was 1,695 after the suite had grown to 1,697. The
+first was fixed by quoting and escaping absolute library tokens before `.pc`
+generation, with both a synthetic exact-token regression and a real installed
+static consumer. The second was fixed by rebasing the integration worktree onto
+the latest PR evidence tip, pinning `38d087f`, and freshly running all
+**1,697/1,697** tests. Neither discrepancy was waived or relabeled.
+
+The final three-track Astra/max job `948283b4fa204a2e` reviewed the complete
+implementation plus the latest timer stack and final native records. Its
+real-time/concurrency and build/portability tracks reported no P0-P3 findings.
+The evidence track found one P3 metadata defect: the sealed Windows manifest's
+aggregate payload byte count was zero although its 379 individually verified
+rows total 3,338,548 bytes. The sealed artifact remains unchanged; the compact
+record now links the explicit correction above. The 4/4 native result and every
+individual payload hash were unaffected.
+
 ## Remaining limits
 
 - This is a playback vertical slice, not a complete replacement for
@@ -273,3 +302,7 @@ regression tests or focused configuration checks rather than waived.
 - Additional architecture-specific DSP and packing combinations remain
   untested. Windows x64 and macOS arm64 results are native and are not inferred
   from Linux.
+- Four task-owned Windows staging roots remain because both CIM process
+  enumeration and Restart Manager locker enumeration were access-denied. Their
+  identities and unchanged contents are recorded; cleanup must remain
+  fail-closed until the host exposes a conclusive lock query.

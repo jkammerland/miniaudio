@@ -1,9 +1,9 @@
 {
-  "schema": 2,
+  "schema": 3,
   "date": "2026-10-09",
   "host": "WIN11-offload",
   "account": "codex-worker",
-  "status": "partial_historical_cleanup_with_final_roots_retained",
+  "status": "historical_roots_removed_but_four_final_roots_retained_fail_closed",
   "evidence_retrieved_and_hash_verified_before_each_cleanup_decision": true,
   "historical_removals": {
     "total_removed_bytes": 2667218986,
@@ -29,43 +29,70 @@
       }
     ]
   },
-  "final_exact_commit_cleanup": {
+  "first_final_cleanup_attempt": {
     "batch_job": "cc0e232fb5e12d4c",
     "continuation_job": "faeb1620a14990c6",
     "status": "retained_pending_cleanup",
     "removed_bytes": 0,
     "retained_bytes": 685911482,
+    "blocker": "Get-CimInstance Win32_Process returned access denied; no rename or deletion was attempted",
+    "no_other_roots_touched": true
+  },
+  "latest_scoped_cleanup_attempt": {
+    "validation_job": "ef3a0f5d647322de",
+    "continuation_job": "3e941fb9918d2647",
+    "model": "gpt-6-astra",
+    "reasoning_effort": "max",
+    "status": "retained_pending_host_maintenance",
+    "category": "infrastructure_failure",
+    "removed_roots": 0,
+    "removed_logical_bytes": 0,
+    "retained_roots": 4,
+    "retained_files": 1421,
+    "retained_logical_bytes": 1048956819,
+    "root_mutations": 0,
+    "all_retained_trees_unchanged": true,
+    "prior_artifacts_and_lifecycle_ledgers_intact": true,
+    "path_identity_ownership_no_reparse_and_source_checks": "PASS",
+    "exclusive_read_checks": "PASS for all 1,421 files; supplementary only",
+    "restart_manager_check": {
+      "registration": "all 1,421 actual files registered successfully",
+      "enumeration": "inconclusive",
+      "error": "RmGetList returned ERROR_ACCESS_DENIED (5) for each root",
+      "disposition": "fail closed; no rename or deletion attempted"
+    },
     "retained_paths": [
       {
-        "path": "C:\\codex-worker\\offload\\attempts\\miniaudio-final-7de1c17-392cab5",
-        "files": 739,
-        "logical_bytes": 418757250
+        "path": "C:\\codex-worker\\offload\\incoming\\miniaudio-final-75c81e7-38d087f",
+        "files": 2,
+        "logical_bytes": 967367
+      },
+      {
+        "path": "C:\\codex-worker\\offload\\attempts\\miniaudio-final-75c81e7-38d087f",
+        "files": 677,
+        "logical_bytes": 362077970
       },
       {
         "path": "C:\\codex-worker\\offload\\incoming\\miniaudio-final-7de1c17-392cab5",
         "files": 3,
         "logical_bytes": 267154232
+      },
+      {
+        "path": "C:\\codex-worker\\offload\\attempts\\miniaudio-final-7de1c17-392cab5",
+        "files": 739,
+        "logical_bytes": 418757250
       }
     ],
-    "safe_path_identity_and_source_checks": "PASS",
-    "process_reference_check": {
-      "complete": false,
-      "query": "Get-CimInstance Win32_Process for executable and command-line references",
-      "error": "Access denied (HRESULT 0x80041003)",
-      "disposition": "fail closed; no rename or deletion attempted"
-    },
-    "no_other_roots_touched": true,
+    "remediation": "Resolve the host Restart Manager RmGetList access failure, then rerun the same four-root lock check and literal-path quarantine cleanup.",
     "artifact_verification": {
-      "retrieved_files": 20,
+      "retrieved_files": 145,
+      "internal_payload_hashes": 143,
       "all_internal_hashes_verified": true,
-      "evidence_hashes_json_sha256": "195e7506d2851d6488bd64d611f98f798749835e6ca4ffcc56aff919deb06a3f",
-      "cleanup_result_sha256": "e1b352e5eb0ec22881739aa04fd240f8b8b6cd0500710e409bfea4f89520487b",
-      "complete_transcript_sha256": "a1ccb0949f5d075aad837bf98dd401974f0578d29f9be902ef9f1b047f0df2af",
-      "lifecycle_manifest_sha256": "5d5603f600a760c02a0d89b7dd4e124688c6387891761bed867618d259f1db58",
-      "transport_manifest_content_sha256": "c757e6936189816a4daf2fc437b4c1460cfe243f50bf1e8ea617fcda382d25a8",
-      "transport_manifest_file_sha256": "d5771f4aae7cdeb91d87e40ca3c5f44acf1c800132a7642ae30b2db8cd1de98a"
+      "cleanup_evidence_manifest_sha256": "2f27cc3c3b41bcdcb4e7d76d617282bb271035ee412b437557089e5cfb4aae79",
+      "cleanup_result_sha256": "9ded57cc1e73c8710afcfcf41a2a87f9cf0385173744e0022b46d2771163ec3e",
+      "transport_manifest_sha256": "d4fae2a1434839d275b7b0926f55685f6342c8fd697abb25b458a46c37d69bf7"
     }
   },
   "remote_job_artifacts_retained": true,
-  "recovery": "Historical build and staging bytes are reproducible from clean committed sources and recorded commands. The final exact-commit roots were not deleted and remain recoverable in place."
+  "recovery": "All four retained roots are unchanged and reproducible from committed sources and recorded commands. No unrelated repository, cache, tool installation, lifecycle ledger, or artifact path was touched."
 }
