@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace miniaudio::cpp_engine {
 
@@ -14,6 +15,22 @@ struct steam_audio_hrtf_render_state {
 };
 
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+
+steam_audio_hrtf_render_lease::steam_audio_hrtf_render_lease(steam_audio_hrtf_render_state* state) noexcept {
+    if (!state->active.test_and_set(std::memory_order_acquire)) {
+        state_ = state;
+    } else {
+        state->suppressed_overlap_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+steam_audio_hrtf_render_lease::steam_audio_hrtf_render_lease(steam_audio_hrtf_render_lease&& other) noexcept
+    : state_(std::exchange(other.state_, nullptr)) {}
+
+steam_audio_hrtf_render_lease::~steam_audio_hrtf_render_lease() {
+    if (state_ != nullptr)
+        state_->active.clear(std::memory_order_release);
+}
 
 namespace {
 auto valid_audio_settings(IPLAudioSettings settings) noexcept -> bool {
@@ -36,6 +53,10 @@ steam_audio_hrtf::steam_audio_hrtf(IPLContext context, IPLAudioSettings audio_se
 }
 
 steam_audio_hrtf::~steam_audio_hrtf() { iplHRTFRelease(&hrtf_); }
+
+auto steam_audio_hrtf::try_acquire_render() const noexcept -> steam_audio_hrtf_render_lease {
+    return steam_audio_hrtf_render_lease{render_state_.get()};
+}
 
 auto steam_audio_hrtf::suppressed_overlap_count() const noexcept -> std::uint32_t {
     return render_state_->suppressed_overlap_count.load(std::memory_order_relaxed);
@@ -123,15 +144,11 @@ void steam_audio_binaural_node::process(process_context context, std::span<const
         return;
     }
 
-    if (hrtf_render_state_->active.test_and_set(std::memory_order_acquire)) {
-        hrtf_render_state_->suppressed_overlap_count.fetch_add(1, std::memory_order_relaxed);
+    auto render_lease = steam_audio_hrtf_render_lease{hrtf_render_state_.get()};
+    if (!render_lease) {
         clear(output);
         return;
     }
-    struct release_render_lease {
-        std::atomic_flag& active;
-        ~release_render_lease() { active.clear(std::memory_order_release); }
-    } release{hrtf_render_state_->active};
 
     const auto input = inputs.front();
     std::array<float*, 2> input_planes{};

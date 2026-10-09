@@ -13,6 +13,25 @@ namespace miniaudio::cpp_engine {
 
 struct steam_audio_hrtf_render_state;
 
+class steam_audio_hrtf_render_lease {
+  public:
+    steam_audio_hrtf_render_lease(const steam_audio_hrtf_render_lease&) = delete;
+    auto operator=(const steam_audio_hrtf_render_lease&) -> steam_audio_hrtf_render_lease& = delete;
+    steam_audio_hrtf_render_lease(steam_audio_hrtf_render_lease&& other) noexcept;
+    auto operator=(steam_audio_hrtf_render_lease&&) -> steam_audio_hrtf_render_lease& = delete;
+    ~steam_audio_hrtf_render_lease();
+
+    [[nodiscard]] explicit operator bool() const noexcept { return state_ != nullptr; }
+
+  private:
+    friend class steam_audio_hrtf;
+    friend class steam_audio_binaural_node;
+
+    explicit steam_audio_hrtf_render_lease(steam_audio_hrtf_render_state* state) noexcept;
+
+    steam_audio_hrtf_render_state* state_{};
+};
+
 struct direction3 {
     float x{};
     float y{};
@@ -28,6 +47,7 @@ class steam_audio_hrtf {
 
     [[nodiscard]] auto audio_settings() const noexcept -> IPLAudioSettings { return audio_settings_; }
     [[nodiscard]] auto native_handle() const noexcept -> IPLHRTF { return hrtf_; }
+    [[nodiscard]] auto try_acquire_render() const noexcept -> steam_audio_hrtf_render_lease;
     [[nodiscard]] auto suppressed_overlap_count() const noexcept -> std::uint32_t;
 
   private:

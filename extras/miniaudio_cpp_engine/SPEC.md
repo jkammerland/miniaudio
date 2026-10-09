@@ -128,8 +128,10 @@ HRTF, so nodes that share one `steam_audio_hrtf` may execute only in one active
 render domain at a time. Sequential nodes in one plan are valid. If two calls
 overlap, the later entrant clears its output without waiting or allocating and
 increments `suppressed_overlap_count()`; independent concurrent render domains
-should use independent HRTF objects. Tail and explicit EOF draining are not yet
-part of this vertical slice.
+should use independent HRTF objects. Direct callers of `native_handle()` use
+`try_acquire_render()` around every render operation and keep the HRTF wrapper
+alive until the returned lease is destroyed. Tail and explicit EOF draining
+are not yet part of this vertical slice.
 
 ## timer_wheels boundary
 

@@ -51,7 +51,8 @@ size at that boundary. A checkout root (`unity/include/phonon` and
 `unity/lib/<platform>`) or a packaged SDK root (`include` and
 `lib/<platform>`) is accepted. Nodes may share an HRTF when their renders are
 serialized; overlapping use is suppressed without blocking because Steam
-Audio's HRTF interpolation scratch is mutable.
+Audio's HRTF interpolation scratch is mutable. Direct native-handle rendering
+participates in the same exclusion contract through `try_acquire_render()`.
 
 With `MINIAUDIO_INSTALL=ON`, the core and optional Steam Audio archives, public
 headers, and `miniaudio-cpp-engine.pc` metadata are installed. The timer and
