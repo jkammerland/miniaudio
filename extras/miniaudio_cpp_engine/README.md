@@ -47,7 +47,11 @@ built dependency avoids changing Steam Audio's compile contract from here.
 The C++ adapter creates HRTFs through `steam_audio_hrtf`, which binds the sample
 rate and frame size to the handle. Raw HRTF handles are intentionally not
 accepted by a binaural node because Steam Audio cannot validate a mismatched FFT
-size at that boundary.
+size at that boundary. A checkout root (`unity/include/phonon` and
+`unity/lib/<platform>`) or a packaged SDK root (`include` and
+`lib/<platform>`) is accepted. Nodes may share an HRTF when their renders are
+serialized; overlapping use is suppressed without blocking because Steam
+Audio's HRTF interpolation scratch is mutable.
 
 With `MINIAUDIO_INSTALL=ON`, the core and optional Steam Audio archives, public
 headers, and `miniaudio-cpp-engine.pc` metadata are installed. The timer and
