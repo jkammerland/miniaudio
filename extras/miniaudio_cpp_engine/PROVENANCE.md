@@ -6,7 +6,7 @@ are provenance, not vendored snapshots.
 | Component | Revision | Role |
 | --- | --- | --- |
 | miniaudio | `ab4bd4bfb30e2321b37207fad7cc6c1eb906c096` | Worktree base |
-| timer_wheels integration tip | `17156fe1b395123b32eebc74a87231e8ca454168` | Latest PR stack plus GCC/MSVC compatibility fixes and full cv/ref/noexcept coverage |
+| timer_wheels integration tip | `0b7a10ef1e84287968ff3354e0560efb8a43f1bf` | Latest PR stack plus GCC/MSVC compatibility fixes and portable full cv/ref/noexcept coverage |
 | Steam Audio source checkout | `4b37ab1aaff9cb7af3df531d0374112856ecc6ca` | Optional binaural implementation reference |
 
 The timer stack, oldest to newest, is:
@@ -18,6 +18,7 @@ The timer stack, oldest to newest, is:
 5. `e9272b5` — parenthesized the inline-input constraint so GCC 16 can parse the public C++20 fanout header; Clang 22 already accepted the original spelling;
 6. `f5853d0` — split throwing and non-throwing fallback function-type specializations so MSVC 19.44 does not need to deduce a Boolean from `noexcept(Noex)`;
 7. `17156fe` — exercise all 12 throwing/non-throwing cv/ref forms in the shared C++20/C++23 contract suite.
+8. `0b7a10e` — compare the standard wrapper's complete call signature without assuming that its implementation declares, rather than inherits, `operator()`.
 
 Initial Linux validation environment:
 
