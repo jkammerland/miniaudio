@@ -42,11 +42,12 @@ endif()
 
 set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR "" CACHE PATH
     "timer_wheels source checkout used by the experimental integration tests")
-set(_tw_pinned_revision "0b7a10ef1e84287968ff3354e0560efb8a43f1bf")
+set(_tw_pinned_revision "a46be19e251888a259bbe18051cab4d67920fe65")
 set(_tw_previous_pinned_revisions
     "e9272b5d263859abbe15c4dfd6d123c542e9e9c0"
     "f5853d075ba011efc5bd872ce892f1162d51db8a"
-    "17156fe1b395123b32eebc74a87231e8ca454168")
+    "17156fe1b395123b32eebc74a87231e8ca454168"
+    "0b7a10ef1e84287968ff3354e0560efb8a43f1bf")
 set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE "" CACHE STRING
     "Explicit timer_wheels revision override; empty uses the tested project pin")
 
