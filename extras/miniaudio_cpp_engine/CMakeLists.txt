@@ -237,16 +237,49 @@ if(MINIAUDIO_INSTALL)
            NOT IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
             set(_pc_space_prefix "${CMAKE_CURRENT_BINARY_DIR}/install with spaces")
             set(_pc_space_dir "${CMAKE_CURRENT_BINARY_DIR}/pkgconfig-space")
+            set(_pc_space_runtime_dir
+                "${CMAKE_CURRENT_BINARY_DIR}/runtime libraries with spaces")
             file(MAKE_DIRECTORY "${_pc_space_dir}")
+            file(MAKE_DIRECTORY "${_pc_space_runtime_dir}")
             set(_saved_install_prefix "${CMAKE_INSTALL_PREFIX}")
+            set(_saved_pc_includedir "${MINIAUDIO_PC_INCLUDEDIR}")
+            set(_saved_pc_libdir "${MINIAUDIO_PC_LIBDIR}")
+            set(_saved_pc_libs_private "${MINIAUDIO_PC_LIBS_PRIVATE}")
             set(CMAKE_INSTALL_PREFIX "${_pc_space_prefix}")
             configure_file(miniaudio-cpp-engine.pc.in
                 "${_pc_space_dir}/miniaudio-cpp-engine.pc" @ONLY)
             set(MINIAUDIO_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
             set(MINIAUDIO_PC_LIBDIR "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+
+            set(_pc_space_private_input)
+            set(_pc_space_expected_private)
+            foreach(_pc_runtime_library IN LISTS COMMON_LINK_LIBRARIES)
+                if(IS_ABSOLUTE "${_pc_runtime_library}")
+                    get_filename_component(_pc_runtime_name "${_pc_runtime_library}" NAME)
+                    set(_pc_runtime_link "${_pc_space_runtime_dir}/${_pc_runtime_name}")
+                    file(REMOVE "${_pc_runtime_link}")
+                    file(CREATE_LINK "${_pc_runtime_library}" "${_pc_runtime_link}"
+                        SYMBOLIC RESULT _pc_link_result)
+                    if(NOT _pc_link_result STREQUAL "0")
+                        message(FATAL_ERROR
+                            "Could not create pkg-config runtime-library fixture: ${_pc_link_result}")
+                    endif()
+                    list(APPEND _pc_space_private_input "${_pc_runtime_link}")
+                    list(APPEND _pc_space_expected_private "${_pc_runtime_link}")
+                else()
+                    list(APPEND _pc_space_private_input "${_pc_runtime_library}")
+                endif()
+            endforeach()
+            miniaudio_pkgconfig_link_flags(
+                MINIAUDIO_PC_LIBS_PRIVATE ${_pc_space_private_input})
+            string(JOIN "|" _pc_space_expected_private_encoded
+                ${_pc_space_expected_private})
             configure_file("${PROJECT_SOURCE_DIR}/miniaudio.pc.in"
                 "${_pc_space_dir}/miniaudio.pc" @ONLY)
             set(CMAKE_INSTALL_PREFIX "${_saved_install_prefix}")
+            set(MINIAUDIO_PC_INCLUDEDIR "${_saved_pc_includedir}")
+            set(MINIAUDIO_PC_LIBDIR "${_saved_pc_libdir}")
+            set(MINIAUDIO_PC_LIBS_PRIVATE "${_saved_pc_libs_private}")
             add_test(
                 NAME miniaudio_cpp_engine_pkgconfig_spaces
                 COMMAND ${CMAKE_COMMAND}
@@ -255,6 +288,7 @@ if(MINIAUDIO_INSTALL)
                     "-DEXPECTED_CPP_INCLUDE=${_pc_space_prefix}/${CMAKE_INSTALL_INCLUDEDIR}/miniaudio"
                     "-DEXPECTED_C_INCLUDE=${_pc_space_prefix}/${CMAKE_INSTALL_INCLUDEDIR}"
                     "-DEXPECTED_LIBDIR=${_pc_space_prefix}/${CMAKE_INSTALL_LIBDIR}"
+                    "-DEXPECTED_PRIVATE_LIBRARIES=${_pc_space_expected_private_encoded}"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pkgconfig_space_tests.cmake"
             )
         endif()

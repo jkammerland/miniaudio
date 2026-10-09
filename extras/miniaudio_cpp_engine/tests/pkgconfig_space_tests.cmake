@@ -1,4 +1,10 @@
-foreach(required IN ITEMS PKG_CONFIG_EXECUTABLE PC_DIR EXPECTED_CPP_INCLUDE EXPECTED_C_INCLUDE EXPECTED_LIBDIR)
+foreach(required IN ITEMS
+        PKG_CONFIG_EXECUTABLE
+        PC_DIR
+        EXPECTED_CPP_INCLUDE
+        EXPECTED_C_INCLUDE
+        EXPECTED_LIBDIR
+        EXPECTED_PRIVATE_LIBRARIES)
     if(NOT DEFINED ${required})
         message(FATAL_ERROR "${required} is required")
     endif()
@@ -28,3 +34,14 @@ foreach(expected IN ITEMS
         message(FATAL_ERROR "missing one-token argument '${expected}' in: ${output}")
     endif()
 endforeach()
+
+if(EXPECTED_PRIVATE_LIBRARIES)
+    string(REPLACE "|" ";" expected_private_libraries "${EXPECTED_PRIVATE_LIBRARIES}")
+    foreach(expected IN LISTS expected_private_libraries)
+        list(FIND arguments "${expected}" index)
+        if(index EQUAL -1)
+            message(FATAL_ERROR
+                "runtime library was not preserved as one token '${expected}' in: ${output}")
+        endif()
+    endforeach()
+endif()
