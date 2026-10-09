@@ -138,6 +138,13 @@ if(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_TARGET)
 endif()
 
 if(MINIAUDIO_BUILD_TESTS)
+    add_test(
+        NAME miniaudio_cpp_engine_steamaudio_arch
+        COMMAND ${CMAKE_COMMAND}
+            "-DMINIAUDIO_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/steamaudio_arch_tests.cmake"
+    )
+
     add_executable(miniaudio_cpp_engine_tests tests/core_tests.cpp)
     target_compile_features(miniaudio_cpp_engine_tests PRIVATE cxx_std_20)
     set_target_properties(miniaudio_cpp_engine_tests PROPERTIES CXX_EXTENSIONS OFF)
@@ -223,6 +230,36 @@ if(MINIAUDIO_INSTALL)
         set(MINIAUDIO_CPP_ENGINE_PC_LIBDIR "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
     endif()
     configure_file(miniaudio-cpp-engine.pc.in miniaudio-cpp-engine.pc @ONLY)
+
+    if(MINIAUDIO_BUILD_TESTS AND UNIX)
+        find_package(PkgConfig QUIET)
+        if(PKG_CONFIG_FOUND AND NOT IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}" AND
+           NOT IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+            set(_pc_space_prefix "${CMAKE_CURRENT_BINARY_DIR}/install with spaces")
+            set(_pc_space_dir "${CMAKE_CURRENT_BINARY_DIR}/pkgconfig-space")
+            file(MAKE_DIRECTORY "${_pc_space_dir}")
+            set(_saved_install_prefix "${CMAKE_INSTALL_PREFIX}")
+            set(CMAKE_INSTALL_PREFIX "${_pc_space_prefix}")
+            configure_file(miniaudio-cpp-engine.pc.in
+                "${_pc_space_dir}/miniaudio-cpp-engine.pc" @ONLY)
+            set(MINIAUDIO_PC_INCLUDEDIR "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+            set(MINIAUDIO_PC_LIBDIR "\${exec_prefix}/${CMAKE_INSTALL_LIBDIR}")
+            configure_file("${PROJECT_SOURCE_DIR}/miniaudio.pc.in"
+                "${_pc_space_dir}/miniaudio.pc" @ONLY)
+            set(CMAKE_INSTALL_PREFIX "${_saved_install_prefix}")
+            add_test(
+                NAME miniaudio_cpp_engine_pkgconfig_spaces
+                COMMAND ${CMAKE_COMMAND}
+                    "-DPKG_CONFIG_EXECUTABLE=${PKG_CONFIG_EXECUTABLE}"
+                    "-DPC_DIR=${_pc_space_dir}"
+                    "-DEXPECTED_CPP_INCLUDE=${_pc_space_prefix}/${CMAKE_INSTALL_INCLUDEDIR}/miniaudio"
+                    "-DEXPECTED_C_INCLUDE=${_pc_space_prefix}/${CMAKE_INSTALL_INCLUDEDIR}"
+                    "-DEXPECTED_LIBDIR=${_pc_space_prefix}/${CMAKE_INSTALL_LIBDIR}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/pkgconfig_space_tests.cmake"
+            )
+        endif()
+    endif()
+
     install(TARGETS miniaudio_cpp_engine
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

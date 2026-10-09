@@ -10,6 +10,6 @@ License: Unlicense OR MIT-0
 Version: @PROJECT_VERSION@
 
 Requires.private: @MINIAUDIO_PC_REQUIRES_PRIVATE@
-Cflags: -I${includedir} @MINIAUDIO_PC_CFLAGS@
-Libs: -L${libdir} -lminiaudio
+Cflags: -I"${includedir}" @MINIAUDIO_PC_CFLAGS@
+Libs: -L"${libdir}" -lminiaudio
 Libs.private: @MINIAUDIO_PC_LIBS_PRIVATE@

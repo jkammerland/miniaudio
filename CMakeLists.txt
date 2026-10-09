@@ -471,23 +471,13 @@ elseif(CMAKE_GENERATOR_PLATFORM)
 else()
     set(STEAMAUDIO_TARGET_PROCESSOR "${STEAMAUDIO_PROCESSOR}")
 endif()
-if(APPLE)
-    set(STEAMAUDIO_ARCH osx)
-elseif(WIN32)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND STEAMAUDIO_TARGET_PROCESSOR MATCHES "^(amd64|x86_64|x64)$")
-        set(STEAMAUDIO_ARCH windows-x64)
-    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4 AND
-           STEAMAUDIO_TARGET_PROCESSOR MATCHES "^(amd64|x86_64|x64|win32|x86|i[3-6]86)$")
-        set(STEAMAUDIO_ARCH windows-x86)
-    endif()
-elseif(UNIX)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8 AND STEAMAUDIO_PROCESSOR MATCHES "^(amd64|x86_64|x64)$")
-        set(STEAMAUDIO_ARCH linux-x64)
-    elseif(CMAKE_SIZEOF_VOID_P EQUAL 4 AND
-           STEAMAUDIO_PROCESSOR MATCHES "^(amd64|x86_64|x64|x86|i[3-6]86)$")
-        set(STEAMAUDIO_ARCH linux-x86)
-    endif()
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/miniaudio_steamaudio_arch.cmake")
+miniaudio_select_steamaudio_arch(
+    STEAMAUDIO_ARCH
+    "${CMAKE_SYSTEM_NAME}"
+    "${STEAMAUDIO_PROCESSOR}"
+    "${STEAMAUDIO_TARGET_PROCESSOR}"
+    "${CMAKE_SIZEOF_VOID_P}")
 
 # When searching for SteamAudio, we'll support installing it in the external/steamaudio directory.
 set(STEAMAUDIO_FIND_LIBRARY_HINTS)

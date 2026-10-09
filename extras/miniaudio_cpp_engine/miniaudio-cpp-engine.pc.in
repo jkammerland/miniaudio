@@ -10,5 +10,5 @@ License: Unlicense OR MIT-0
 Version: @PROJECT_VERSION@
 
 Requires: miniaudio
-Cflags: -I${includedir}/miniaudio
-Libs: -L${libdir} -lminiaudio_cpp_engine
+Cflags: -I"${includedir}/miniaudio"
+Libs: -L"${libdir}" -lminiaudio_cpp_engine
