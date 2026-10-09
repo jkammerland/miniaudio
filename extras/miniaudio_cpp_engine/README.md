@@ -19,8 +19,12 @@ ctest --test-dir build/cpp-engine --output-on-failure \
 
 The source-path dependency is consumed in place as headers. It is not copied
 into this repository. Configuration verifies the Git revision and fails closed
-if it differs or cannot be read. For an independently verified exported tree,
-this check can be explicitly disabled with
+if it differs or cannot be read. The project-owned revision pin is not stored
+as a user cache value, so an existing build directory follows pin updates. An
+intentional alternate revision must use
+`MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE`; this is separate from
+the tested default. For an independently verified exported tree, revision
+checking can be explicitly disabled with
 `MINIAUDIO_CPP_ENGINE_VERIFY_TIMER_WHEELS_REVISION=OFF`.
 The supplied scheduling helper can own and publish a prepared render plan after
 a cancellable timer expires; both the timer queue and coroutine object remain

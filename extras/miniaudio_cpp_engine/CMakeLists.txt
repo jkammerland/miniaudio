@@ -42,9 +42,37 @@ endif()
 
 set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR "" CACHE PATH
     "timer_wheels source checkout used by the experimental integration tests")
-set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION
-    "f5853d075ba011efc5bd872ce892f1162d51db8a" CACHE STRING
-    "Expected timer_wheels revision for source-checkout integration")
+set(_tw_pinned_revision "17156fe1b395123b32eebc74a87231e8ca454168")
+set(_tw_previous_pinned_revisions
+    "e9272b5d263859abbe15c4dfd6d123c542e9e9c0"
+    "f5853d075ba011efc5bd872ce892f1162d51db8a")
+set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE "" CACHE STRING
+    "Explicit timer_wheels revision override; empty uses the tested project pin")
+
+# The original option stored the project default in the cache, so an existing
+# build directory could retain an earlier project pin after it advanced.
+# Migrate known defaults. Preserve custom legacy values as explicit overrides.
+if(DEFINED CACHE{MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION})
+    get_property(_tw_legacy_revision CACHE MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION PROPERTY VALUE)
+    if(_tw_legacy_revision IN_LIST _tw_previous_pinned_revisions)
+        message(STATUS "Migrating cached timer_wheels project pin from ${_tw_legacy_revision} to ${_tw_pinned_revision}")
+    elseif(_tw_legacy_revision STREQUAL _tw_pinned_revision)
+        message(STATUS "Removing the legacy cached timer_wheels project pin ${_tw_legacy_revision}")
+    elseif(_tw_legacy_revision AND NOT MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE)
+        set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE
+            "${_tw_legacy_revision}" CACHE STRING
+            "Explicit timer_wheels revision override; empty uses the tested project pin" FORCE)
+        message(DEPRECATION
+            "MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION is now "
+            "MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE")
+    endif()
+    unset(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION CACHE)
+endif()
+
+set(_tw_expected_revision "${_tw_pinned_revision}")
+if(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE)
+    set(_tw_expected_revision "${MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION_OVERRIDE}")
+endif()
 option(MINIAUDIO_CPP_ENGINE_VERIFY_TIMER_WHEELS_REVISION
     "Require Git verification of the timer_wheels source revision" ON)
 
@@ -61,7 +89,7 @@ if(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR)
     target_include_directories(miniaudio_cpp_engine_timer_wheels_headers INTERFACE "${_tw_include}")
     set(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_TARGET miniaudio_cpp_engine_timer_wheels_headers)
 
-    if(MINIAUDIO_CPP_ENGINE_VERIFY_TIMER_WHEELS_REVISION AND MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION)
+    if(MINIAUDIO_CPP_ENGINE_VERIFY_TIMER_WHEELS_REVISION AND _tw_expected_revision)
         find_package(Git QUIET)
         if(NOT Git_FOUND)
             message(FATAL_ERROR
@@ -81,10 +109,10 @@ if(MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR)
                 "${MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR}")
         endif()
         message(STATUS "timer_wheels source revision: ${_tw_revision}")
-        if(NOT _tw_revision STREQUAL MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION)
+        if(NOT _tw_revision STREQUAL _tw_expected_revision)
             message(FATAL_ERROR
                 "timer_wheels is ${_tw_revision}; expected PR-stack revision "
-                "${MINIAUDIO_CPP_ENGINE_TIMER_WHEELS_REVISION}")
+                "${_tw_expected_revision}")
         endif()
     endif()
 elseif(TARGET timer_wheels::timer_wheels)
