@@ -6,7 +6,7 @@ are provenance, not vendored snapshots.
 | Component | Revision | Role |
 | --- | --- | --- |
 | miniaudio | `ab4bd4bfb30e2321b37207fad7cc6c1eb906c096` | Worktree base |
-| timer_wheels integration tip | `392cab579f6c6556df16131bea878832a0b585ee` | Latest PR stack plus GCC/MSVC compatibility fixes and dependency-free full cv/ref/noexcept coverage |
+| timer_wheels integration tip | `38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9` | Latest PR stack plus GCC/MSVC compatibility fixes and dependency-free full cv/ref/noexcept coverage |
 | Steam Audio source checkout | `4b37ab1aaff9cb7af3df531d0374112856ecc6ca` | Optional binaural implementation reference |
 
 The timer stack, oldest to newest, is:
@@ -14,13 +14,13 @@ The timer stack, oldest to newest, is:
 1. `c14ba06` — cancellable timer waits;
 2. `25c1a22` — current cancellation usage contract;
 3. `7efaead` — fanouts, optional operation startup, direct callback operations;
-4. `f47830f` — preserved comparison evidence;
-5. `e9272b5` — parenthesized the inline-input constraint so GCC 16 can parse the public C++20 fanout header; Clang 22 already accepted the original spelling;
-6. `f5853d0` — split throwing and non-throwing fallback function-type specializations so MSVC 19.44 does not need to deduce a Boolean from `noexcept(Noex)`;
-7. `17156fe` — exercise all 12 throwing/non-throwing cv/ref forms in the shared C++20/C++23 contract suite.
-8. `0b7a10e` — compare the standard wrapper's complete call signature without assuming that its implementation declares, rather than inherits, `operator()`.
-9. `a46be19` — add a dependency-free C++20/C++23 portability gate so compiler qualification does not require Gentest's LLVM development stack.
-10. `392cab5` — compare the standard wrapper through specified cv/ref, return, and `noexcept` behavior without taking the address of an implementation-private inherited call operator.
+4. `077e8a4` — latest benchmark-evidence PR tip, with compact comparison artifacts;
+5. `c7300b8` — parenthesized the inline-input constraint so GCC 16 can parse the public C++20 fanout header; Clang 22 already accepted the original spelling;
+6. `f0fd1b2` — split throwing and non-throwing fallback function-type specializations so MSVC 19.44 does not need to deduce a Boolean from `noexcept(Noex)`;
+7. `c0daed0` — exercise all 12 throwing/non-throwing cv/ref forms in the shared C++20/C++23 contract suite;
+8. `1e31ba1` — compare the standard wrapper's complete call signature without assuming that its implementation declares, rather than inherits, `operator()`;
+9. `667984c` — add a dependency-free C++20/C++23 portability gate so compiler qualification does not require Gentest's LLVM development stack; and
+10. `38d087f` — compare the standard wrapper through specified cv/ref, return, and `noexcept` behavior without taking the address of an implementation-private inherited call operator.
 
 Initial Linux validation environment:
 

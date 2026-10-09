@@ -16,7 +16,7 @@ cmake -S . -B build/cpp-engine -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DMINIAUDIO_BUILD_CPP_ENGINE=ON \
   -DMINIAUDIO_BUILD_TESTS=ON \
-  -DMINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR="$HOME/repos/timer_wheels-miniaudio-integration"
+  -DMINIAUDIO_CPP_ENGINE_TIMER_WHEELS_SOURCE_DIR="$HOME/repos/timer_wheels-miniaudio-latest"
 cmake --build build/cpp-engine
 ctest --test-dir build/cpp-engine --output-on-failure \
   -R miniaudio_cpp_engine
