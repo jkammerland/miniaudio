@@ -123,8 +123,13 @@ the control domain, never inside the callback.
 Direction publication is single-producer/single-consumer. Dry/wet changes use a
 single atomic scalar and are ramped over a quantum. Direction updates are
 normalized in double precision on the control domain and reject zero or
-non-finite vectors. Tail and explicit EOF draining are not yet part of this
-vertical slice.
+non-finite vectors. Steam Audio uses mutable interpolation scratch inside an
+HRTF, so nodes that share one `steam_audio_hrtf` may execute only in one active
+render domain at a time. Sequential nodes in one plan are valid. If two calls
+overlap, the later entrant clears its output without waiting or allocating and
+increments `suppressed_overlap_count()`; independent concurrent render domains
+should use independent HRTF objects. Tail and explicit EOF draining are not yet
+part of this vertical slice.
 
 ## timer_wheels boundary
 

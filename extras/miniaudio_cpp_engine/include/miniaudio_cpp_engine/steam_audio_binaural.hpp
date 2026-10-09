@@ -7,8 +7,11 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 namespace miniaudio::cpp_engine {
+
+struct steam_audio_hrtf_render_state;
 
 struct direction3 {
     float x{};
@@ -25,10 +28,14 @@ class steam_audio_hrtf {
 
     [[nodiscard]] auto audio_settings() const noexcept -> IPLAudioSettings { return audio_settings_; }
     [[nodiscard]] auto native_handle() const noexcept -> IPLHRTF { return hrtf_; }
+    [[nodiscard]] auto suppressed_overlap_count() const noexcept -> std::uint32_t;
 
   private:
+    friend class steam_audio_binaural_node;
+
     IPLAudioSettings audio_settings_{};
     IPLHRTF hrtf_{};
+    std::shared_ptr<steam_audio_hrtf_render_state> render_state_;
 };
 
 struct steam_audio_binaural_config {
@@ -74,6 +81,7 @@ class steam_audio_binaural_node final : public node {
     IPLAudioSettings audio_settings_{};
     IPLContext context_{};
     IPLHRTF hrtf_{};
+    std::shared_ptr<steam_audio_hrtf_render_state> hrtf_render_state_;
     IPLBinauralEffect effect_{};
     IPLHRTFInterpolation interpolation_{};
     std::array<direction3, 3> directions_{};

@@ -5,15 +5,18 @@
 
 #include <array>
 #include <atomic>
+#include <barrier>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <thread>
 
 #if defined(_MSC_VER)
 #include <malloc.h>
@@ -172,6 +175,113 @@ void require(bool condition, const char* message) {
         throw std::runtime_error(message);
 }
 
+auto is_silent(const planar_buffer& buffer) noexcept -> bool {
+    const auto view = buffer.view();
+    for (std::uint32_t channel = 0; channel < buffer.channels(); ++channel) {
+        for (const auto sample : view.channel(channel)) {
+            if (sample != 0.0f)
+                return false;
+        }
+    }
+    return true;
+}
+
+auto buffers_match(const planar_buffer& left, const planar_buffer& right) noexcept -> bool {
+    const auto left_view = left.view();
+    const auto right_view = right.view();
+    for (std::uint32_t channel = 0; channel < left.channels(); ++channel) {
+        for (std::uint32_t frame = 0; frame < left.frames(); ++frame) {
+            if (!nearly_equal(left_view.channel_data(channel)[frame], right_view.channel_data(channel)[frame]))
+                return false;
+        }
+    }
+    return true;
+}
+
+void verify_shared_hrtf_overlap_is_suppressed(IPLContext context) {
+    constexpr std::uint32_t overlap_frames = 2'048;
+    constexpr std::uint32_t rounds = 32;
+    IPLAudioSettings settings{};
+    settings.samplingRate = 48'000;
+    settings.frameSize = overlap_frames;
+    IPLHRTFSettings hrtf_settings{};
+    hrtf_settings.type = IPL_HRTFTYPE_DEFAULT;
+    hrtf_settings.volume = 1.0f;
+
+    steam_audio_hrtf shared_hrtf{context, settings, hrtf_settings};
+    steam_audio_hrtf left_reference_hrtf{context, settings, hrtf_settings};
+    steam_audio_hrtf right_reference_hrtf{context, settings, hrtf_settings};
+    planar_buffer left_input{channel_layout::mono(), overlap_frames};
+    planar_buffer right_input{channel_layout::mono(), overlap_frames};
+    for (std::uint32_t frame = 0; frame < overlap_frames; ++frame) {
+        left_input.view().channel_data(0)[frame] = source_sample(frame, 0);
+        right_input.view().channel_data(0)[frame] = source_sample(frame + 11, 1);
+    }
+
+    std::atomic<bool> corrupt_output{};
+    std::atomic<bool> silent_reference{};
+    std::atomic<std::uint32_t> suppressed_outputs{};
+    const auto overlap_count_before = shared_hrtf.suppressed_overlap_count();
+
+    for (std::uint32_t round = 0; round < rounds; ++round) {
+        steam_audio_binaural_node shared_left{steam_audio_binaural_config{
+            channel_layout::mono(), settings, context, &shared_hrtf, IPL_HRTFINTERPOLATION_BILINEAR, 1.0f}};
+        steam_audio_binaural_node shared_right{steam_audio_binaural_config{
+            channel_layout::mono(), settings, context, &shared_hrtf, IPL_HRTFINTERPOLATION_BILINEAR, 1.0f}};
+        steam_audio_binaural_node reference_left{steam_audio_binaural_config{
+            channel_layout::mono(), settings, context, &left_reference_hrtf, IPL_HRTFINTERPOLATION_BILINEAR, 1.0f}};
+        steam_audio_binaural_node reference_right{steam_audio_binaural_config{
+            channel_layout::mono(), settings, context, &right_reference_hrtf, IPL_HRTFINTERPOLATION_BILINEAR, 1.0f}};
+        require(shared_left.set_direction({-1.0f, 0.25f, -1.0f}) &&
+                    reference_left.set_direction({-1.0f, 0.25f, -1.0f}) &&
+                    shared_right.set_direction({1.0f, -0.25f, -1.0f}) &&
+                    reference_right.set_direction({1.0f, -0.25f, -1.0f}),
+                "could not configure HRTF overlap test directions");
+
+        planar_buffer shared_left_output{channel_layout::stereo(), overlap_frames};
+        planar_buffer shared_right_output{channel_layout::stereo(), overlap_frames};
+        planar_buffer reference_left_output{channel_layout::stereo(), overlap_frames};
+        planar_buffer reference_right_output{channel_layout::stereo(), overlap_frames};
+        std::barrier start{3};
+
+        auto render = [&](steam_audio_binaural_node& shared_node, steam_audio_binaural_node& reference_node,
+                          const planar_buffer& input, planar_buffer& shared_output, planar_buffer& reference_output) {
+            const std::array<const_planar_view, 1> inputs{input.view()};
+            start.arrive_and_wait();
+            shared_node.process({round * overlap_frames, overlap_frames, 48'000}, inputs, shared_output.view());
+            reference_node.process({round * overlap_frames, overlap_frames, 48'000}, inputs, reference_output.view());
+            if (is_silent(reference_output))
+                silent_reference.store(true, std::memory_order_relaxed);
+            if (is_silent(shared_output))
+                suppressed_outputs.fetch_add(1, std::memory_order_relaxed);
+            else if (!buffers_match(shared_output, reference_output))
+                corrupt_output.store(true, std::memory_order_relaxed);
+        };
+
+        std::thread left{render,
+                         std::ref(shared_left),
+                         std::ref(reference_left),
+                         std::cref(left_input),
+                         std::ref(shared_left_output),
+                         std::ref(reference_left_output)};
+        std::thread right{render,
+                          std::ref(shared_right),
+                          std::ref(reference_right),
+                          std::cref(right_input),
+                          std::ref(shared_right_output),
+                          std::ref(reference_right_output)};
+        start.arrive_and_wait();
+        left.join();
+        right.join();
+    }
+
+    const auto overlaps = shared_hrtf.suppressed_overlap_count() - overlap_count_before;
+    require(!silent_reference.load(std::memory_order_relaxed), "HRTF overlap reference was silent");
+    require(!corrupt_output.load(std::memory_order_relaxed), "shared HRTF produced corrupt bilinear output");
+    require(overlaps > 0 && overlaps == suppressed_outputs.load(std::memory_order_relaxed),
+            "shared HRTF overlap suppression was not exercised");
+}
+
 void run_tests(IPLContext context) {
 #if defined(MINIAUDIO_CPP_ENGINE_WRAP_C_ALLOCATIONS)
     const auto interception_before = host_allocation_count.load(std::memory_order_relaxed);
@@ -193,6 +303,7 @@ void run_tests(IPLContext context) {
     hrtf_settings.type = IPL_HRTFTYPE_DEFAULT;
     hrtf_settings.volume = 1.0f;
     steam_audio_hrtf hrtf{context, audio_settings, hrtf_settings};
+    verify_shared_hrtf_overlap_is_suppressed(context);
 
     auto rejected_short_frame = false;
     try {

@@ -8,6 +8,13 @@
 
 namespace miniaudio::cpp_engine {
 
+struct steam_audio_hrtf_render_state {
+    std::atomic_flag active = ATOMIC_FLAG_INIT;
+    std::atomic<std::uint32_t> suppressed_overlap_count{};
+};
+
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+
 namespace {
 auto valid_audio_settings(IPLAudioSettings settings) noexcept -> bool {
     // Steam Audio's overlap window is undefined for frame sizes 4..7. This
@@ -22,12 +29,17 @@ steam_audio_hrtf::steam_audio_hrtf(IPLContext context, IPLAudioSettings audio_se
     : audio_settings_(audio_settings) {
     if (context == nullptr || !valid_audio_settings(audio_settings_))
         throw std::invalid_argument("invalid Steam Audio HRTF configuration");
+    render_state_ = std::make_shared<steam_audio_hrtf_render_state>();
     auto copied_settings = settings;
     if (iplHRTFCreate(context, &audio_settings_, &copied_settings, &hrtf_) != IPL_STATUS_SUCCESS)
         throw std::runtime_error("could not create Steam Audio HRTF");
 }
 
 steam_audio_hrtf::~steam_audio_hrtf() { iplHRTFRelease(&hrtf_); }
+
+auto steam_audio_hrtf::suppressed_overlap_count() const noexcept -> std::uint32_t {
+    return render_state_->suppressed_overlap_count.load(std::memory_order_relaxed);
+}
 
 steam_audio_binaural_node::steam_audio_binaural_node(const steam_audio_binaural_config& config)
     : input_layout_(config.input_layout), audio_settings_(config.audio_settings), interpolation_(config.interpolation),
@@ -41,6 +53,7 @@ steam_audio_binaural_node::steam_audio_binaural_node(const steam_audio_binaural_
         throw std::invalid_argument("invalid Steam Audio binaural configuration");
     }
 
+    hrtf_render_state_ = config.hrtf->render_state_;
     context_ = iplContextRetain(config.context);
     hrtf_ = iplHRTFRetain(config.hrtf->native_handle());
     if (context_ == nullptr || hrtf_ == nullptr) {
@@ -109,6 +122,16 @@ void steam_audio_binaural_node::process(process_context context, std::span<const
         clear(output);
         return;
     }
+
+    if (hrtf_render_state_->active.test_and_set(std::memory_order_acquire)) {
+        hrtf_render_state_->suppressed_overlap_count.fetch_add(1, std::memory_order_relaxed);
+        clear(output);
+        return;
+    }
+    struct release_render_lease {
+        std::atomic_flag& active;
+        ~release_render_lease() { active.clear(std::memory_order_release); }
+    } release{hrtf_render_state_->active};
 
     const auto input = inputs.front();
     std::array<float*, 2> input_planes{};
