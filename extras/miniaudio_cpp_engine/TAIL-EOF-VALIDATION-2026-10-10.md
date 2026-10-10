@@ -157,6 +157,15 @@ misreported as recovered space. Review date `2026-10-11` is a reconciliation
 trigger, not authority to delete. No worker permission escalation or host
 configuration change was attempted.
 
+The controller's single task-created temporary directory,
+`/tmp/miniaudio-eof-validation.UFuB2N` (27,982,771 logical bytes), is also
+retained: its exact-root `lsof` check warned of incomplete results from
+unrelated container mounts. Every nested file's ownership was verified and no
+symlinks were found, but that did not justify bypassing the open-file warning.
+Its complete validation evidence was already archived and committed before
+this cleanup check. The lifecycle ledger records the next valid action; no
+original worktree/build cache or user directory was removed.
+
 ## Provenance
 
 The timer pin remains `38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9` with a clean

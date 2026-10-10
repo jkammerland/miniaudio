@@ -9,6 +9,25 @@
     {"name": "miniaudio-eof-2437bea.bundle", "bytes": 1392431, "sha256": "ff91d2e23bb98c877251c87c6e985745b5bcb643258bf20fdc1f05637563dff2", "requires": "835a14fc28a14d96c54f6932ee6121acfcd58a90"},
     {"name": "timer-miniaudio-eof-2437bea.bundle", "bytes": 951672, "sha256": "a781deb2b73b09048b7aeba11f6a032577d5019f59eaa7f893a1be4988d4210d", "requires": null}
   ],
+  "controller_scratch": {
+    "root": "/tmp/miniaudio-eof-validation.UFuB2N",
+    "purpose": "Task-created Git bundle staging, installed consumer fixture, retrieved evidence, and verification helpers",
+    "owner": "ai-dev1",
+    "owner_uid": 1005,
+    "root_mode": "0700",
+    "root_inode": 811089,
+    "root_device": 53,
+    "regular_files": 231,
+    "logical_regular_file_bytes": 27982771,
+    "all_nested_ownership_verified": true,
+    "symlinks": 0,
+    "evidence_state": "Complete Linux/native gate and cleanup evidence archived, independently hash-verified, and committed before this cleanup check",
+    "cleanup": "retained_open_file_check_inconclusive",
+    "logical_bytes_removed": 0,
+    "reason": "Exact-root lsof query warned that unrelated container shm/overlay mounts could not be stat-ed and output might be incomplete",
+    "next_action": "An authorized conclusive open-file check is required before exact-root deletion; no container mounts or permissions were changed",
+    "review_date": "2026-10-11"
+  },
   "hosts": [
     {
       "endpoint": "windows-offload",
