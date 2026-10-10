@@ -4,6 +4,9 @@ This opt-in prototype tests a smaller engine contract without replacing
 miniaudio's mature device and codec backends. See [SPEC.md](SPEC.md) before using
 the API.
 
+The [2026-10-10 synchronization report](SYNC-REPORT-2026-10-10.md) records the
+validated revisions, remaining work, and proposed Steam Audio tail/EOF contract.
+
 The current playback slice has no decoder or resource-manager layer, so it does
 not require Opus or Vorbis development packages. Those remain optional future
 decoder-adapter dependencies and should be supplied by the consuming build
