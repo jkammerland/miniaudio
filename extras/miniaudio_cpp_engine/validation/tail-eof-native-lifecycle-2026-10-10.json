@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-10",
+  "implementation": "2437bea582ef085621adf5b50e628f8ecede8f90",
+  "timer_wheels": "38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9",
+  "ledger_created_before_native_staging": true,
+  "retention_policy": "Retain task-owned roots only until evidence retrieval and hash verification, then reconcile exact ownership and locks before cleanup. Original checkouts, worktrees, user data, shared caches, and existing retained roots are outside cleanup scope.",
+  "review_date": "2026-10-11",
+  "bundles": [
+    {"name": "miniaudio-eof-2437bea.bundle", "bytes": 1392431, "sha256": "ff91d2e23bb98c877251c87c6e985745b5bcb643258bf20fdc1f05637563dff2", "requires": "835a14fc28a14d96c54f6932ee6121acfcd58a90"},
+    {"name": "timer-miniaudio-eof-2437bea.bundle", "bytes": 951672, "sha256": "a781deb2b73b09048b7aeba11f6a032577d5019f59eaa7f893a1be4988d4210d", "requires": null}
+  ],
+  "hosts": [
+    {
+      "endpoint": "windows-offload",
+      "account": "codex-worker",
+      "job_id": "5ed2f6c9914b1375",
+      "task_id": 0,
+      "attempt_root": "C:\\codex-worker\\offload\\miniaudio-eof-2437bea",
+      "owned_incoming_files": ["C:\\codex-worker\\offload\\incoming\\miniaudio-eof-2437bea.bundle", "C:\\codex-worker\\offload\\incoming\\timer-miniaudio-eof-2437bea.bundle"],
+      "shared_cache": null,
+      "preflight_free_bytes": 439793078272,
+      "estimated_additional_peak_bytes": 2147483648,
+      "existing_retained_roots": "Four prior exact-tip task roots, 1048956819 logical bytes, remain untouched because Restart Manager returned ERROR_ACCESS_DENIED. See windows-msvc-native-cleanup-2026-10-09.json.",
+      "status": "validated_cleanup_retained",
+      "evidence_fetch_hash_state": "Gate and cleanup evidence fetched and independently verified; archived durably in this directory.",
+      "cleanup": "retained_blocked_process_locker_visibility",
+      "cleanup_job_id": "c6296c17279a94b8",
+      "logical_bytes_removed": 0,
+      "logical_bytes_retained": 113364205,
+      "retention_reason": "Required CIM process query returned access denied (0x80041003); no rename, deletion, retry, bypass, or permission change.",
+      "next_action": "Owner/native-host maintenance must establish conclusive process/locker visibility, then perform fresh ownership, path, Git/hash, and lock checks before exact-target cleanup.",
+      "durable_record": "tail-eof-windows-msvc-native-2026-10-10.json"
+    },
+    {
+      "endpoint": "mac-offload",
+      "account": "ai-dev",
+      "job_id": "2d78782e802f5c36",
+      "task_id": 0,
+      "attempt_root": "/Users/ai-dev/offload/miniaudio-eof-2437bea",
+      "owned_incoming_files": ["/Users/ai-dev/offload/incoming/miniaudio-eof-2437bea.bundle", "/Users/ai-dev/offload/incoming/timer-miniaudio-eof-2437bea.bundle"],
+      "shared_cache": null,
+      "preflight_free_bytes": 44933382144,
+      "estimated_additional_peak_bytes": 2147483648,
+      "existing_retained_roots": "Prior native gate roots were removed after verified evidence; versioned source repositories remain outside scope.",
+      "status": "validated_cleanup_retained",
+      "evidence_fetch_hash_state": "Gate and cleanup evidence fetched and independently verified; archived durably in this directory.",
+      "cleanup": "retained_open_file_check_inconclusive",
+      "cleanup_job_id": "39180ff0d55f90c8",
+      "logical_bytes_removed": 0,
+      "logical_bytes_retained": 55875578,
+      "retention_reason": "Exact-target lsof output warned of incomplete results from an unrelated OrbStack NFS mount; no rename/deletion or user-mount/permission changes.",
+      "next_action": "Owner/native-host maintenance must resolve the warning or provide an authorized conclusive open-file query, then perform fresh exact-target cleanup checks.",
+      "durable_record": "tail-eof-macos-native-2026-10-10.json"
+    }
+  ]
+}

@@ -1,5 +1,10 @@
 # Validation record
 
+The finite-stream/Steam Audio tail implementation has a separate dated record:
+[TAIL-EOF-VALIDATION-2026-10-10.md](TAIL-EOF-VALIDATION-2026-10-10.md).
+The checks below describe the preceding implementation snapshot; their counts
+and revisions are not evidence for the later EOF change.
+
 Date: 2026-10-09. All paths below refer to the dedicated
 `feat/cpp-engine-contract` worktree. The implementation is opt-in; the existing
 miniaudio build remains the default.
@@ -289,8 +294,9 @@ individual payload hash were unaffected.
 ## Remaining limits
 
 - This is a playback vertical slice, not a complete replacement for
-  `ma_engine`; capture, codecs/resource management, hotplug, resampling, and
-  Steam Audio tail/EOF draining still need contracts and implementations.
+  `ma_engine`; capture, codecs/resource management, hotplug, and resampling
+  still need contracts and implementations. C++ stream/tail draining was
+  subsequently implemented and is covered by the separate dated record above.
 - The exchange deliberately fails compilation where pointer or 64-bit atomics
   are not always lock-free. No 32-bit runtime was available for execution.
 - The benchmark does not show a throughput win: the cursor cache was about

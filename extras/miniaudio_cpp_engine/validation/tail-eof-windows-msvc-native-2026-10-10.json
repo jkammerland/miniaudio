@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-10",
+  "implementation": "2437bea582ef085621adf5b50e628f8ecede8f90",
+  "timer_wheels": "38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9",
+  "timer_override": "",
+  "job_id": "5ed2f6c9914b1375",
+  "task_id": 0,
+  "platform": "Windows 11 x64 (10.0.26200), standard-medium win11\\codex-worker",
+  "configuration": "MSVC 19.51.36257.0 Debug static, NMake, VsDevCmd -arch=amd64",
+  "engine": {"tests_run": 5, "tests_passed": 5, "tests_failed": 0, "tests_skipped": 0, "invocations": 1},
+  "installed_consumer": {"tests_run": 1, "tests_passed": 1, "tests_failed": 0, "tests_skipped": 0, "invocations": 1, "prefix_contains_spaces": true, "installed_only_headers_and_archives": true, "physical_device_opened": false},
+  "tools": {
+    "cl": {"path": "C:\\Program Files\\Microsoft Visual Studio\\2026\\BuildTools\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\cl.exe", "version": "19.51.36257.0", "sha256": "315a654ea116864516a1674858e587e535e3bc3045ff32ed2f2739a2c1ec5640"},
+    "nmake": {"path": "C:\\Program Files\\Microsoft Visual Studio\\2026\\BuildTools\\VC\\Tools\\MSVC\\14.51.36231\\bin\\HostX64\\x64\\nmake.exe", "version": "14.51.36257.0", "sha256": "9b42a1803e0b8cffd3003b1efeba7d349968f60f93e1dd3b1f2c695769cc33bd"},
+    "cmake": {"path": "C:\\Program Files\\CMake\\bin\\cmake.exe", "version": "4.4.3", "sha256": "ab8247ca4554871e5d75c0ee118ee8663727bd6fdf37ad76b17e9cc8d5f286a8"},
+    "ctest": {"path": "C:\\Program Files\\CMake\\bin\\ctest.exe", "version": "4.4.3", "sha256": "083f482c8656c86932c28906445cb3c10c0c5ee649a90ff3e0080ee4447d3dfc"},
+    "windows_sdk": "10.0.26100.0"
+  },
+  "source_integrity": {"clean_before_after": true, "file_hashes_unchanged": 591},
+  "dependency_fetch_audit": {"expanded_executed_cmake_trace_commands": 12010, "dependency_fetch_invocations": 0, "opus_vorbis_fetch_flags": "OFF", "timer_verification": "ON"},
+  "windows_gcc_mingw_policy": "Permanently owner-rejected; no installation, probe, or invocation. No Linux result relabeled as Windows.",
+  "artifact_directory": "C:\\Users\\codex-worker\\.codex\\codex-mcp-server\\job-artifacts\\5ed2f6c9914b1375\\tasks\\task-0",
+  "manifest": {"sha256": "9b10c15d8ece43df328f8b55235a57a7d17a27d877c707292bf5f8c7d1e44fcc", "payload_files": 53, "payload_bytes": 16234550, "ordering": "ASCII case-insensitive, native PowerShell Sort-Object", "seal": "manifest.seal.json", "retrieved_files": 55, "retrieval_manifest_sha256": "8d61df086d4de5e7910863291ff869cee5c63ea7c6bdf49e3db6bd05065b9c23", "controller_verified": true},
+  "archive": {"path": "tail-eof-windows-msvc-native-2026-10-10.tar.xz", "bytes": 610360, "sha256": "00439b23ecd6ce19fbb34c561d104d67a33829124d0f66c76c8eb08f0d9e04b8", "contains": "Complete fetched text evidence including configure trace, seals, and retrieval index; no executable snapshots", "compared_to_verified_payload": true},
+  "selected_sha256": {"engine_last_test": "ea18070cd16f5c433fadc993c2137db9d20cdde468e7c1889e484693ff8a5513", "consumer_last_test": "7a6c75c6beab6c6ef63a60990606e1c0fb9c55c6eabc2cbd9dbbef38d4430150", "provenance": "a841193637379f5d1c08ef9205453e69cf85d6b76cc32c73411dd03cf2c5ba49", "summary": "11232325b20c6eed871e944a8f8c5b98ebcbea7934e47252bffb8e6e2fe6e730"},
+  "omissions": ["Steam Audio SDK absent: native SDK compilation/tail testing not claimed", "No native Windows pkg-config runtime gate", "No physical/acoustic I/O or hardware audibility claim"],
+  "diagnostics": ["Incremental bundle needed explicit advertised-ref acquisition because it does not advertise HEAD", "Unavailable historical timer benchmark LFS observations were retained as exact committed pointers using process-local GIT_LFS_SKIP_SMUDGE; they are not used by these engine/header gates and no data-asset or benchmark validation is claimed", "CMake policy compatibility warnings and NMake parallelism diagnostic retained without suppression", "Controller's initial checker assumed case-sensitive ordering and a text seal; actual PowerShell case-insensitive ordering and JSON seal were then explicitly verified with all hashes, bytes, row sums, inventory, and uniqueness checks unchanged"],
+  "cleanup": {"job_id": "c6296c17279a94b8", "status": "retained_blocked_process_locker_visibility", "logical_bytes_removed": 0, "logical_bytes_retained": 113364205, "observed_free_byte_delta": -360448, "free_byte_delta_is_cleanup_recovery": false, "reason": "Required Get-CimInstance Win32_Process query returned access denied (0x80041003); locker visibility remained inconclusive", "next_action": "Owner/native-host maintenance must establish conclusive process/locker visibility before fresh exact-path cleanup; no worker escalation or ACL change authorized", "artifact_directory": "C:\\Users\\codex-worker\\.codex\\codex-mcp-server\\job-artifacts\\5ed2f6c9914b1375\\continuations\\c6296c17279a94b8\\task-0", "manifest_sha256": "a84e626cafe6117172ae1dac04e428f861e04396872a5f6c0a7db38b97a05222", "payload_files": 14, "payload_bytes": 46189, "retrieved_files": 16, "controller_verified": true, "retrieval_manifest_sha256": "93868d80c79c30fdbf27aebcec323ca809c916de56e2dcaface3396f1f114af8", "old_evidence_unchanged": true},
+  "cleanup_archive": {"path": "tail-eof-windows-msvc-cleanup-2026-10-10.tar.gz", "bytes": 12757, "sha256": "31058e860fe66c0d3740ec7671891bbac796fde59fbb2d19c66e5392fade35a0", "compared_to_verified_payload": true}
+}

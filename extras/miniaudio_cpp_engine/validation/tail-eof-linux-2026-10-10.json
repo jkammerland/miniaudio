@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-10",
+  "implementation": "2437bea582ef085621adf5b50e628f8ecede8f90",
+  "timer_wheels": "38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9",
+  "steam_audio": "4b37ab1aaff9cb7af3df531d0374112856ecc6ca",
+  "platform": "Linux 7.2.7-200.native.fc44.x86_64, AMD Ryzen 9 7950X",
+  "compiler_versions": {"gcc": "16.2.1 20260819 (Red Hat 16.2.1-2)", "clang": "22.1.8 (Fedora 22.1.8-4.fc44)"},
+  "build_tool_versions": {"cmake": "4.4.2", "ninja": "1.14.0.git", "pkg_config": "2.5.1"},
+  "tool_sha256": {
+    "/usr/bin/g++": "579d25c2d1e45abeed0c63a517b5c52f6d09ea811a787bf7a7c677a7fd0726f6",
+    "/usr/bin/clang++": "4ea85504401d9f5c05109d6cb05778b241aa8d56fde1da2e5bc7ba46cffd44f5",
+    "/usr/bin/cmake": "6ada98c4f457916b95b0a9b3fdd1d5618b3fbe0ee777c6c5aee8203763eb4068",
+    "/usr/bin/ninja": "0108fce2fda36061dd0b1b3c35ba14f28a5034abfbaee54799abcfc9fff29826"
+  },
+  "sdk_sha256": {
+    "release_libphonon.so": "fb8511340a25c1846e110952f5c7f2c5467293b30f1815b0e20fb418441ead28",
+    "gcc_asan_ubsan_libphonon.so": "3fde8d10a248ce19f552659b2e6229209a15f716984c9f3f40d1eaccfd1d490f",
+    "phonon.h": "b71e88724121b0a83d70281a4c0ad75de61588915049bd8208963f17177ffebd"
+  },
+  "archive": {"path": "tail-eof-linux-2026-10-10.tar.gz", "bytes": 3850, "sha256": "afb11085aa86f9ed57e2198bc44346c5d87b4eb7ffbbb10fcbdacb91820d1a57", "files": 5, "payload_bytes": 40922, "contains": "CTest text logs only; no source, dependency payloads, or executable snapshots"},
+  "logs": [
+    {"path": "linux-release.log", "bytes": 28149, "sha256": "5e8a466cb8b3d5ee91db3629cc5c12df940028c88e08c7894519142ab9f1e9d4", "tests_run": 27, "tests_passed": 27},
+    {"path": "linux-clang-asan.log", "bytes": 7899, "sha256": "2b07931628cd76af0245b3fe0f400981063f73d9118ef5e170a82d11c9258e56", "tests_run": 7, "tests_passed": 7},
+    {"path": "linux-clang-tsan.log", "bytes": 3129, "sha256": "fb92e8ac7edbc1ca3fdb8470da916a69108f7576b99212903ace5938a60ea860", "tests_run": 3, "tests_passed": 3},
+    {"path": "linux-gcc-asan-steam.log", "bytes": 951, "sha256": "a9e83279f182ed2c86285980f03e5dfadb094678cae913a6a779c3c2bd782c6c", "tests_run": 1, "tests_passed": 1},
+    {"path": "linux-installed-consumer.log", "bytes": 794, "sha256": "ad0b4b91f606fc278df7841bff9c72eb090865ac798efa1e086f3bc50cb62679", "tests_run": 1, "tests_passed": 1}
+  ],
+  "verification": "Controller independently re-read every archive member, matched exact byte counts and SHA256 hashes, checked unique inventory, row sum, and CTest Test Passed counts.",
+  "additional_gate": {"test": "miniaudio_cpp_engine_pkgconfig_spaces", "reason": "after configuring the actual staged install prefix", "tests_run": 1, "tests_passed": 1},
+  "omissions": ["No physical I/O or audible spatialization claim", "No 32-bit runtime", "External Steam Audio binary not TSan-instrumented", "Allocation-interposition executable not combined with TSan", "No throughput benchmark rerun or speedup claim"],
+  "setup_diagnostics": ["An install-time --prefix did not rewrite the configured absolute .pc paths", "The failed consumer CMake configure retained stale pkg-config results; a fresh consumer build with the correct configured prefix resolved discovery"],
+  "unrelated_warning": "Unchanged miniaudio.h:82882 emitted -Wtype-limits for an always-false size comparison on this 64-bit target."
+}

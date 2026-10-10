@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-10",
+  "implementation": "2437bea582ef085621adf5b50e628f8ecede8f90",
+  "timer_wheels": "38d087f02dc4fb9f00a36d10fbf5ca97e02e2aa9",
+  "timer_override": "",
+  "job_id": "2d78782e802f5c36",
+  "task_id": 0,
+  "platform": "macOS 26.5.2 arm64, Xcode 26.6, isolated ai-dev account",
+  "configuration": "Release static, Apple Clang 21.0.0, Ninja, null backend only",
+  "engine": {"tests_run": 6, "tests_passed": 6, "tests_failed": 0, "invocations": 1},
+  "installed_consumer": {"tests_run": 1, "tests_passed": 1, "tests_failed": 0, "invocations": 1, "prefix_contains_spaces": true, "installed_only_headers_and_archives": true, "pkg_config_static": true},
+  "tools": {
+    "actual_clang": {"path": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang", "version": "21.0.0 (clang-2100.1.1.101)", "sha256": "7def90dd8829726686213a747fc5bff1583df933dae5edc55d755479e0bfe00a"},
+    "clang_launcher": {"path": "/usr/bin/clang++", "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818"},
+    "cmake": {"path": "/opt/homebrew/Cellar/cmake/4.3.4/bin/cmake", "version": "4.3.4", "sha256": "fb32e700c58fa0d8f41c05e0f36cfeb144f6ccec7df1f66bbfa90ca931118645"},
+    "ninja": {"path": "/opt/homebrew/Cellar/ninja/1.13.2/bin/ninja", "version": "1.13.2", "sha256": "48761628046784f59bd789f5a72b88da99205c5849e5d19ae4d317854ae09e83"},
+    "pkg_config": {"path": "/opt/homebrew/Cellar/pkgconf/2.5.1/bin/pkgconf", "version": "2.5.1", "sha256": "a819e53e8eb8017661e5d686ae8e63102239d1b9c2b7e75988fc8d565fe3ad53"}
+  },
+  "source_integrity": "Staged source/timer and original base remained clean; all recorded tracked hashes unchanged.",
+  "artifact_directory": "/Users/ai-dev/.codex/codex-mcp-server/job-artifacts/2d78782e802f5c36/tasks/task-0",
+  "manifest": {"sha256": "cd71d50757d6472d55a39b5f02c1bfad0c469e227157b3305d0fa9d4f55d5768", "payload_files": 81, "payload_bytes": 300964, "ordering": "ordinal", "retrieved_files": 83, "retrieval_manifest_sha256": "46ff1afc5567252a71e71336fdb4523a4a28b09b4e129aabc0abe5a588fbc1a1", "controller_verified": true},
+  "archive": {"path": "tail-eof-macos-native-2026-10-10.tar.gz", "bytes": 72032, "sha256": "20f7443faacc44cf7a52e84c97d55d70cd6e8fa96ed860d5bdba124c3f80f1db", "contains": "Complete fetched text evidence, seals, and retrieval index; no executable snapshots", "compared_to_verified_payload": true},
+  "selected_sha256": {"engine_ctest": "11fff2627b149009c7a5561c4d6c8baab980fa4772c85d9bfc6fed57c353719c", "consumer_ctest": "c870c9e696403481e3987b3c3583fd278f0df77c756f1faa3d3b054a3184f963", "consumer_isolation": "96e9df4ccbfcd3b6018ce530c4f81f5f8bf20aa366ef910a3964ea9f3487a123", "provenance": "c281da3e229813cbfbe9205308e1ba45a32bcb872b41d5269f04aee8f7ec82c1"},
+  "omissions": ["Steam Audio SDK absent: native SDK compilation/tail testing not claimed", "No physical/acoustic I/O or hardware audibility claim"],
+  "diagnostics": ["Initial bundle fetch needed the explicitly advertised ref because the incremental bundle does not advertise HEAD; no tests retried", "Null-only miniaudio build warns about an unused C notification helper; no new C++ warning observed"],
+  "cleanup": {"job_id": "39180ff0d55f90c8", "status": "retained_open_file_check_inconclusive", "logical_bytes_removed": 0, "logical_bytes_retained": 55875578, "observed_free_byte_delta": 8302592, "free_byte_delta_is_cleanup_recovery": false, "reason": "Exact-target lsof queries warned that an unrelated OrbStack NFS mount could not be stat-ed and results might be incomplete", "next_action": "Owner/native-host maintenance must resolve the warning or provide an authorized conclusive open-file check before a fresh exact-path cleanup", "artifact_directory": "/Users/ai-dev/.codex/codex-mcp-server/job-artifacts/2d78782e802f5c36/continuations/39180ff0d55f90c8/task-0", "manifest_sha256": "0746dfa01f9d4b1cd0149a6597d41955cbe7ebb3cd913b5ca2786babe7727035", "payload_files": 8, "payload_bytes": 33225, "retrieved_files": 10, "controller_verified": true, "retrieval_manifest_sha256": "a8a0f89a08e4d5baf8a28e37e8688599c6f0ac6b175b1b65f2667261ede8270a", "old_evidence_unchanged": true},
+  "cleanup_archive": {"path": "tail-eof-macos-cleanup-2026-10-10.tar.gz", "bytes": 9680, "sha256": "23fd8b99e3c6b98fd66d636386da2f3ca60816f69a7ce91fd4d86ebd76035d87", "compared_to_verified_payload": true}
+}

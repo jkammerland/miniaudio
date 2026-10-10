@@ -8,6 +8,7 @@ The [2026-10-10 synchronization report](SYNC-REPORT-2026-10-10.md) records the
 validated revisions, remaining work, and proposed Steam Audio tail/EOF contract.
 That report is a historical snapshot; the implemented stream/tail API is
 specified below and in [SPEC.md](SPEC.md).
+Its checks have a separate [dated validation record](TAIL-EOF-VALIDATION-2026-10-10.md).
 
 The current playback slice has no decoder or resource-manager layer, so it does
 not require Opus or Vorbis development packages. Those remain optional future

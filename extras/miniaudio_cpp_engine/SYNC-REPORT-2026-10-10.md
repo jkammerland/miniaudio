@@ -251,3 +251,18 @@ The SDK call change is small. The graph-wide EOF, completion, and lifetime
 contract is the substantive work. It is a bounded follow-on feature once those
 rules are chosen; it should not be represented as already completed by the
 current playback slice.
+
+## Follow-up: finite streams implemented on 2026-10-10
+
+The tail/EOF status above describes the earlier synchronization snapshot.
+The approved follow-on feature was implemented in
+`2437bea582ef085621adf5b50e628f8ecede8f90`: opt-in finite-source callbacks,
+stream-aware graph compilation, SDK-driven binaural tail draining, cached final
+output delivery, and generation-scoped graceful requests. Legacy render APIs
+and immediate `stop()` remain available. A decoder or seek API was not added.
+
+The updated contract is [SPEC.md](SPEC.md), usage is in [README.md](README.md),
+and the separate dated evidence is
+[TAIL-EOF-VALIDATION-2026-10-10.md](TAIL-EOF-VALIDATION-2026-10-10.md).
+The old snapshot's revisions and test counts are not relabeled as evidence for
+this later implementation.
