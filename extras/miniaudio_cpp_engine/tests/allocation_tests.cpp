@@ -172,6 +172,66 @@ auto verify_publication_failure_preserves_candidate(stream_contract contract, so
     allocations_until_failure.store(-1, std::memory_order_relaxed);
     return threw && candidate != nullptr && !exchange.pending() && exchange.acknowledged_generation() == 0;
 }
+
+struct finite_state { std::uint32_t remaining{}; std::uint32_t calls{}; };
+auto fill_finite(void* opaque, process_context, planar_view output) noexcept -> source_result {
+    auto& state = *static_cast<finite_state*>(opaque);
+    ++state.calls;
+    const auto count = std::min(output.frames(), state.remaining);
+    for (std::uint32_t channel = 0; channel < output.channels(); ++channel)
+        std::fill_n(output.channel_data(channel), count, 0.5f);
+    state.remaining -= count;
+    return {count, state.remaining == 0};
+}
+
+auto make_stream_plan(stream_contract contract, finite_state& state) -> std::unique_ptr<render_plan> {
+    render_plan_builder builder{contract};
+    const auto source = builder.add(std::make_unique<finite_source_node>(contract.layout, &state, fill_finite));
+    const std::array input{source};
+    const auto gained = builder.add(std::make_unique<gain_node>(contract.layout, 0.5f), input);
+    const std::array mixed{gained};
+    const auto mixer = builder.add(std::make_unique<mixer_node>(contract.layout, 1), mixed);
+    const std::array effect_input{mixer};
+    const auto output = builder.add(std::make_unique<tail_free_effect_node>(contract.layout, contract.layout, nullptr, invert), effect_input);
+    return std::move(builder).compile_stream(output);
+}
+
+auto verify_stream_render_allocations(stream_contract contract) -> bool {
+    finite_state first{1024}, replacement{17};
+    plan_exchange exchange{contract};
+    auto plan = make_stream_plan(contract, first);
+    if (exchange.try_publish(plan) != publish_status::published)
+        return false;
+    render_plan* active = nullptr;
+    quantum_output_adapter adapter{contract};
+    std::array<float, 2 * 127> output{};
+    auto render = [&](process_context context, planar_view block) noexcept -> stream_result {
+        exchange.audio_acquire(active);
+        if (exchange.audio_drain_requested())
+            active->begin_drain();
+        return active->process_stream(context, block);
+    };
+    const auto before = allocation_count.load(std::memory_order_relaxed);
+    track_allocations.store(true, std::memory_order_relaxed);
+    static_cast<void>(adapter.pull_stream(interleaved_view{output.data(), contract.layout, 1}, render));
+    const auto drain = exchange.request_drain();
+    const auto end = adapter.pull_stream(interleaved_view{output.data(), contract.layout, 127}, render);
+    track_allocations.store(false, std::memory_order_relaxed);
+    if (drain != drain_request_status::queued || end.state != stream_state::complete || first.calls != 1)
+        return false;
+
+    auto candidate = make_stream_plan(contract, replacement);
+    if (exchange.try_publish(candidate) != publish_status::published)
+        return false;
+    track_allocations.store(true, std::memory_order_relaxed);
+    exchange.audio_acquire(active);
+    adapter.restart_stream();
+    constexpr std::array<std::uint32_t, 5> requests{1, 17, 64, 95, 127};
+    for (std::uint32_t index = 0; index < 10'000; ++index)
+        static_cast<void>(adapter.pull_stream(interleaved_view{output.data(), contract.layout, requests[index % requests.size()]}, render));
+    track_allocations.store(false, std::memory_order_relaxed);
+    return allocation_count.load(std::memory_order_relaxed) == before && replacement.calls == 1 && adapter.stream_finished();
+}
 } // namespace
 
 int main() {
@@ -239,8 +299,13 @@ int main() {
         std::cerr << "failed plan publication consumed its candidate\n";
         return 1;
     }
+    if (!verify_stream_render_allocations(contract)) {
+        std::cerr << "finite first-use/drain/replacement render allocated or broke EOF ownership\n";
+        return 1;
+    }
 
     std::cout << "PASS first_use_adoption_and_steady_state_render_do_not_allocate\n";
     std::cout << "PASS failed_publication_preserves_candidate\n";
+    std::cout << "PASS finite_first_use_drain_replacement_do_not_allocate\n";
     return 0;
 }

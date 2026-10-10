@@ -135,19 +135,24 @@ auto steam_audio_binaural_node::consume_direction() noexcept -> direction3 {
 
 void steam_audio_binaural_node::process(process_context context, std::span<const const_planar_view> inputs,
                                         planar_view output) noexcept {
+    static_cast<void>(apply(context, inputs, output));
+}
+
+auto steam_audio_binaural_node::apply(process_context context, std::span<const const_planar_view> inputs,
+                                      planar_view output) noexcept -> bool {
     if (inputs.size() != 1 || inputs.front().layout() != input_layout_ ||
         inputs.front().frames() != static_cast<std::uint32_t>(audio_settings_.frameSize) ||
         context.frame_count != static_cast<std::uint32_t>(audio_settings_.frameSize) ||
         context.sample_rate != static_cast<std::uint32_t>(audio_settings_.samplingRate) ||
         output.layout() != output_layout_ || output.frames() != static_cast<std::uint32_t>(audio_settings_.frameSize)) {
         clear(output);
-        return;
+        return false;
     }
 
     auto render_lease = steam_audio_hrtf_render_lease{hrtf_render_state_.get()};
     if (!render_lease) {
         clear(output);
-        return;
+        return false;
     }
 
     const auto input = inputs.front();
@@ -176,6 +181,13 @@ void steam_audio_binaural_node::process(process_context context, std::span<const
     output_buffer.data = output_planes.data();
     static_cast<void>(iplBinauralEffectApply(effect_, &parameters, &input_buffer, &output_buffer));
 
+    blend(context, &input, output);
+    return true;
+}
+
+void steam_audio_binaural_node::blend(process_context context, const const_planar_view* input,
+                                      planar_view output) noexcept {
+
     const auto target = std::bit_cast<float>(dry_wet_bits_.load(std::memory_order_acquire));
     if (applied_dry_wet_ != 1.0f || target != 1.0f) {
         for (std::uint32_t frame = 0; frame < context.frame_count; ++frame) {
@@ -185,12 +197,62 @@ void steam_audio_binaural_node::process(process_context context, std::span<const
                                                             static_cast<float>(frame + 1) /
                                                             static_cast<float>(context.frame_count);
             for (std::uint32_t ear = 0; ear < 2; ++ear) {
-                const auto dry = input.channel_data(input.channels() == 1 ? 0 : ear)[frame];
+                const auto dry = input ? input->channel_data(input->channels() == 1 ? 0 : ear)[frame] : 0.0f;
                 output.channel_data(ear)[frame] = (1.0f - wet) * dry + wet * output.channel_data(ear)[frame];
             }
         }
     }
     applied_dry_wet_ = target;
+}
+
+auto steam_audio_binaural_node::process_stream(process_context context, std::span<const stream_input> inputs,
+                                               planar_view output) noexcept -> stream_result {
+    clear(output);
+    if (inputs.size() != 1 || !valid_stream_result(inputs.front().result, context.frame_count) ||
+        inputs.front().result.state == stream_state::failed || inputs.front().samples.layout() != input_layout_ ||
+        inputs.front().samples.frames() != static_cast<std::uint32_t>(audio_settings_.frameSize) ||
+        context.frame_count != static_cast<std::uint32_t>(audio_settings_.frameSize) ||
+        context.sample_rate != static_cast<std::uint32_t>(audio_settings_.samplingRate) ||
+        output.layout() != output_layout_ || output.frames() != static_cast<std::uint32_t>(audio_settings_.frameSize))
+        return {0, stream_state::failed};
+
+    const auto input = inputs.front();
+    if (!input_ended_ && input.result.valid_frames != 0) {
+        const std::array audio{input.samples};
+        if (!apply(context, audio, output))
+            return {0, stream_state::failed};
+        input_ended_ = input.result.state == stream_state::complete;
+        const auto remaining = iplBinauralEffectGetTailSize(effect_);
+        if (remaining < 0) {
+            clear(output);
+            return {0, stream_state::failed};
+        }
+        // The padded final Apply block may itself contain filtered output.
+        return {context.frame_count, input_ended_ && remaining == 0 ? stream_state::complete : stream_state::running};
+    }
+    if (input.result.state != stream_state::complete || input.result.valid_frames != 0)
+        return {0, stream_state::failed};
+    input_ended_ = true;
+
+    const auto remaining = iplBinauralEffectGetTailSize(effect_);
+    if (remaining < 0)
+        return {0, stream_state::failed};
+    if (remaining == 0)
+        return {0, stream_state::complete};
+
+    auto render_lease = steam_audio_hrtf_render_lease{hrtf_render_state_.get()};
+    if (!render_lease)
+        return {0, stream_state::failed};
+    std::array<float*, 2> planes{output.channel_data(0), output.channel_data(1)};
+    IPLAudioBuffer buffer{2, audio_settings_.frameSize, planes.data()};
+    const auto state = iplBinauralEffectGetTail(effect_, &buffer);
+    if (state != IPL_AUDIOEFFECTSTATE_TAILREMAINING && state != IPL_AUDIOEFFECTSTATE_TAILCOMPLETE) {
+        clear(output);
+        return {0, stream_state::failed};
+    }
+    blend(context, nullptr, output);
+    const auto valid = static_cast<std::uint32_t>(std::min(audio_settings_.frameSize, remaining));
+    return {valid, state == IPL_AUDIOEFFECTSTATE_TAILCOMPLETE ? stream_state::complete : stream_state::running};
 }
 
 } // namespace miniaudio::cpp_engine

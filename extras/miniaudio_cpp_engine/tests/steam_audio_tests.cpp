@@ -1,5 +1,6 @@
 #include "miniaudio_cpp_engine/render_plan.hpp"
 #include "miniaudio_cpp_engine/steam_audio_binaural.hpp"
+#include "miniaudio_cpp_engine/quantum_adapter.hpp"
 
 #include <phonon.h>
 
@@ -14,6 +15,7 @@
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <vector>
 
 #if defined(_MSC_VER)
 #include <malloc.h>
@@ -251,6 +253,214 @@ void verify_shared_hrtf_overlap_is_suppressed(IPLContext context) {
             "accepted shared HRTF render changed the suppression count");
 }
 
+struct finite_pcm {
+    std::span<const float> interleaved;
+    std::uint32_t channels{};
+    std::uint32_t cursor{};
+    std::uint32_t calls{};
+};
+
+auto read_finite_pcm(void* opaque, process_context, planar_view output) noexcept -> source_result {
+    auto& pcm = *static_cast<finite_pcm*>(opaque);
+    ++pcm.calls;
+    const auto length = static_cast<std::uint32_t>(pcm.interleaved.size() / pcm.channels);
+    const auto count = std::min(output.frames(), length - pcm.cursor);
+    for (std::uint32_t channel = 0; channel < pcm.channels; ++channel)
+        for (std::uint32_t frame = 0; frame < count; ++frame)
+            output.channel_data(channel)[frame] = pcm.interleaved[(pcm.cursor + frame) * pcm.channels + channel];
+    pcm.cursor += count;
+    return {count, pcm.cursor == length};
+}
+
+struct reference_stream {
+    std::vector<float> samples;
+    float tail_peak{};
+    bool partial_tail{};
+};
+
+auto sdk_stream(IPLContext context, steam_audio_hrtf& hrtf, std::span<const float> samples,
+                 std::uint32_t channels, float wet) -> reference_stream {
+    auto settings = hrtf.audio_settings();
+    const auto quantum = static_cast<std::uint32_t>(settings.frameSize);
+    const auto length = static_cast<std::uint32_t>(samples.size() / channels);
+    effect_owner effect;
+    IPLBinauralEffectSettings effect_settings{};
+    effect_settings.hrtf = hrtf.native_handle();
+    require(iplBinauralEffectCreate(context, &settings, &effect_settings, &effect.value) == IPL_STATUS_SUCCESS,
+            "could not create finite SDK oracle");
+    std::array<std::array<float, frame_count>, 2> input{}, output{};
+    std::array<float*, 2> in_planes{input[0].data(), input[1].data()};
+    std::array<float*, 2> out_planes{output[0].data(), output[1].data()};
+    IPLAudioBuffer in{static_cast<IPLint32>(channels), settings.frameSize, in_planes.data()};
+    IPLAudioBuffer out{2, settings.frameSize, out_planes.data()};
+    IPLBinauralEffectParams params{};
+    params.direction = {0, 0, -1};
+    params.interpolation = IPL_HRTFINTERPOLATION_NEAREST;
+    params.spatialBlend = 1.0f;
+    params.hrtf = hrtf.native_handle();
+    reference_stream reference;
+    for (std::uint32_t offset = 0; offset < length; offset += quantum) {
+        for (auto& channel : input)
+            channel.fill(0);
+        const auto count = std::min(quantum, length - offset);
+        for (std::uint32_t channel = 0; channel < channels; ++channel)
+            for (std::uint32_t frame = 0; frame < count; ++frame)
+                input[channel][frame] = samples[(offset + frame) * channels + channel];
+        auto lease = hrtf.try_acquire_render();
+        require(static_cast<bool>(lease), "SDK oracle HRTF lease unavailable");
+        static_cast<void>(iplBinauralEffectApply(effect.value, &params, &in, &out));
+        for (std::uint32_t frame = 0; frame < quantum; ++frame)
+            for (std::uint32_t ear = 0; ear < 2; ++ear)
+                reference.samples.push_back(wet == 1.0f ? output[ear][frame]
+                    : (1.0f - wet) * input[channels == 1 ? 0 : ear][frame] + wet * output[ear][frame]);
+    }
+    const auto initial_tail = iplBinauralEffectGetTailSize(effect.value);
+    require(initial_tail >= 0 && initial_tail <= 16'384, "SDK oracle tail exceeds bounded fixture capacity");
+    for (int step = 0; step <= initial_tail / settings.frameSize && iplBinauralEffectGetTailSize(effect.value) > 0; ++step) {
+        const auto remaining = iplBinauralEffectGetTailSize(effect.value);
+        const auto valid = std::min(settings.frameSize, remaining);
+        auto lease = hrtf.try_acquire_render();
+        require(static_cast<bool>(lease), "SDK tail oracle HRTF lease unavailable");
+        const auto state = iplBinauralEffectGetTail(effect.value, &out);
+        reference.partial_tail = reference.partial_tail || valid < settings.frameSize;
+        for (int frame = 0; frame < valid; ++frame) {
+            for (std::uint32_t ear = 0; ear < 2; ++ear) {
+                reference.tail_peak = std::max(reference.tail_peak, std::abs(output[ear][frame]));
+                reference.samples.push_back(wet == 1.0f ? output[ear][frame] : wet * output[ear][frame]);
+            }
+        }
+        require((state == IPL_AUDIOEFFECTSTATE_TAILCOMPLETE) == (iplBinauralEffectGetTailSize(effect.value) == 0),
+                "SDK oracle tail state/count disagree");
+    }
+    require(iplBinauralEffectGetTailSize(effect.value) == 0, "SDK oracle did not finish within its initial tail bound");
+    return reference;
+}
+
+void verify_finite_stream(IPLContext context, steam_audio_hrtf& hrtf, std::span<const float> samples,
+                          std::uint32_t channels, float wet, bool serial) {
+    const auto settings = hrtf.audio_settings();
+    const stream_contract contract{channel_layout::stereo(), 48'000, static_cast<std::uint32_t>(settings.frameSize)};
+    auto expected = sdk_stream(context, hrtf, samples, channels, wet);
+    if (serial)
+        expected = sdk_stream(context, hrtf, expected.samples, 2, wet);
+    const auto length = static_cast<std::uint32_t>(samples.size() / channels);
+    if (length == contract.quantum / 2 && !serial) {
+        require(expected.tail_peak > 1.0e-5f, "impulse-at-EOF SDK tail positive control was not discriminating");
+        if (contract.quantum == 40)
+            require(expected.partial_tail, "non-power-of-two quantum did not exercise a partial tail block");
+    }
+    finite_pcm pcm{samples, channels};
+    render_plan_builder builder{contract};
+    const auto input_layout = channels == 1 ? channel_layout::mono() : channel_layout::stereo();
+    auto output = builder.add(std::make_unique<finite_source_node>(input_layout, &pcm, read_finite_pcm));
+    const std::array input{output};
+    output = builder.add(std::make_unique<steam_audio_binaural_node>(steam_audio_binaural_config{
+        input_layout, settings, context, &hrtf, IPL_HRTFINTERPOLATION_NEAREST, wet}), input);
+    if (serial) {
+        const std::array second_input{output};
+        output = builder.add(std::make_unique<steam_audio_binaural_node>(steam_audio_binaural_config{
+            channel_layout::stereo(), settings, context, &hrtf, IPL_HRTFINTERPOLATION_NEAREST, wet}), second_input);
+    }
+    auto plan = std::move(builder).compile_stream(output);
+    quantum_output_adapter adapter{contract};
+    std::array<float, 8192> actual{};
+    std::array<float, 2 * (frame_count + 1)> callback{};
+    constexpr std::array<std::uint32_t, 5> requests{1, 17, 39, frame_count + 1, 3};
+    std::size_t used = 0;
+    bool complete = false;
+    const auto steam_before = steam_allocation_count.load(std::memory_order_relaxed);
+    const auto host_before = host_allocation_count.load(std::memory_order_relaxed);
+    for (std::size_t step = 0; step < 512 && !complete; ++step) {
+        const auto requested = requests[step % requests.size()];
+        track_steam_allocations.store(true, std::memory_order_relaxed);
+        track_host_allocations.store(true, std::memory_order_relaxed);
+        const auto result = adapter.pull_stream(interleaved_view{callback.data(), contract.layout, requested},
+            [&](process_context ctx, planar_view block) noexcept { return plan->process_stream(ctx, block); });
+        track_host_allocations.store(false, std::memory_order_relaxed);
+        track_steam_allocations.store(false, std::memory_order_relaxed);
+        require(result.state != stream_state::failed && result.valid_frames <= requested, "finite Steam stream failed");
+        const auto count = static_cast<std::size_t>(result.valid_frames) * 2;
+        require(used + count <= actual.size(), "finite Steam fixture output exceeded its capacity");
+        std::copy_n(callback.begin(), count, actual.begin() + used);
+        used += count;
+        for (auto index = count; index < static_cast<std::size_t>(requested) * 2; ++index)
+            require(callback[index] == 0, "finite Steam callback suffix was not silent");
+        complete = result.state == stream_state::complete;
+    }
+    require(complete && used == expected.samples.size(), "finite Steam output length or termination differs from SDK oracle");
+    for (std::size_t index = 0; index < used; ++index)
+        require(nearly_equal(actual[index], expected.samples[index]), "finite Steam samples differ from apply-plus-tail oracle");
+    require(steam_allocation_count.load(std::memory_order_relaxed) == steam_before &&
+            host_allocation_count.load(std::memory_order_relaxed) == host_before, "finite Steam first-use/EOF/tail render allocated");
+    const auto expected_calls = length == 0 ? 1U : (length + contract.quantum - 1) / contract.quantum;
+    require(pcm.calls == expected_calls && pcm.cursor == length, "finite Steam graph read input after EOF");
+}
+
+void verify_tail_ramp_and_suppression(IPLContext context) {
+    IPLAudioSettings settings{48'000, 40};
+    IPLHRTFSettings hrtf_settings{};
+    hrtf_settings.type = IPL_HRTFTYPE_DEFAULT;
+    hrtf_settings.volume = 1;
+    steam_audio_hrtf hrtf{context, settings, hrtf_settings};
+    steam_audio_binaural_node node{steam_audio_binaural_config{
+        channel_layout::mono(), settings, context, &hrtf, IPL_HRTFINTERPOLATION_NEAREST, 1}};
+    planar_buffer input{channel_layout::mono(), 40}, output{channel_layout::stereo(), 40};
+    input.view().channel_data(0)[19] = 1;
+    const std::array final_input{stream_input{input.view(), {20, stream_state::complete}}};
+    require(node.process_stream({0, 40, 48'000}, final_input, output.view()).state == stream_state::running,
+            "EOF input did not leave a tail");
+    const std::array<float, 20> silence{};
+    std::array<float, 20> pulse = silence;
+    pulse.back() = 1;
+    const auto oracle = sdk_stream(context, hrtf, pulse, 1, 1);
+    clear(input.view());
+    const std::array ended{stream_input{input.view(), {0, stream_state::complete}}};
+    const auto suppressed_before = hrtf.suppressed_overlap_count();
+    {
+        auto lease = hrtf.try_acquire_render();
+        require(static_cast<bool>(lease), "could not hold tail suppression lease");
+        const auto result = node.process_stream({40, 40, 48'000}, ended, output.view());
+        require(result.state == stream_state::failed && result.valid_frames == 0 && is_silent(output),
+                "suppressed tail falsely completed or emitted output");
+    }
+    require(hrtf.suppressed_overlap_count() == suppressed_before + 1, "tail suppression not counted exactly once");
+    require(node.set_dry_wet(0), "tail wet update rejected");
+    const auto tail = node.process_stream({80, 40, 48'000}, ended, output.view());
+    require(tail.valid_frames == 40 && tail.state == stream_state::running, "suppression consumed tail state");
+    for (std::uint32_t frame = 0; frame < 40; ++frame) {
+        const auto wet = frame == 39 ? 0.0f : 1.0f - static_cast<float>(frame + 1) / 40.0f;
+        for (std::uint32_t ear = 0; ear < 2; ++ear)
+            require(nearly_equal(output.view().channel_data(ear)[frame], wet * oracle.samples[(40 + frame) * 2 + ear]),
+                    "tail wet ramp differs or suppressed call advanced DSP");
+    }
+}
+
+void verify_finite_steam_audio(IPLContext context) {
+    for (const auto quantum : std::array<IPLint32, 2>{40, 256}) {
+        const IPLAudioSettings settings{48'000, quantum};
+        IPLHRTFSettings hrtf_settings{};
+        hrtf_settings.type = IPL_HRTFTYPE_DEFAULT;
+        hrtf_settings.volume = 1;
+        steam_audio_hrtf hrtf{context, settings, hrtf_settings};
+        for (const auto channels : std::array<std::uint32_t, 2>{1, 2}) {
+            for (const auto length : std::array<std::uint32_t, 6>{0, 1, static_cast<std::uint32_t>(quantum / 2),
+                    static_cast<std::uint32_t>(quantum - 1), static_cast<std::uint32_t>(quantum),
+                    static_cast<std::uint32_t>(quantum + 1)}) {
+                std::vector<float> samples(static_cast<std::size_t>(length) * channels);
+                for (std::uint32_t frame = 0; frame < length; ++frame)
+                    for (std::uint32_t channel = 0; channel < channels; ++channel)
+                        samples[frame * channels + channel] = length == static_cast<std::uint32_t>(quantum / 2)
+                            ? (frame + 1 == length ? 1.0f : 0.0f) : source_sample(frame, channel);
+                for (const auto wet : std::array<float, 3>{0, 0.375f, 1})
+                    verify_finite_stream(context, hrtf, samples, channels, wet, false);
+                if (length == static_cast<std::uint32_t>(quantum + 1))
+                    verify_finite_stream(context, hrtf, samples, channels, 1, true);
+            }
+        }
+    }
+    verify_tail_ramp_and_suppression(context);
+}
+
 void run_tests(IPLContext context) {
 #if defined(MINIAUDIO_CPP_ENGINE_WRAP_C_ALLOCATIONS)
     const auto interception_before = host_allocation_count.load(std::memory_order_relaxed);
@@ -445,6 +655,7 @@ int main() {
     auto result = 0;
     try {
         run_tests(context);
+        verify_finite_steam_audio(context);
         std::cout << "PASS steam_audio_planar_binaural_node\n";
     } catch (const std::exception& error) {
         std::cerr << "FAIL steam_audio_planar_binaural_node: " << error.what() << '\n';

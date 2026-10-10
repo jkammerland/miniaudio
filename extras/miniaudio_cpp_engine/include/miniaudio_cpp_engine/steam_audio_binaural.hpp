@@ -67,7 +67,7 @@ struct steam_audio_binaural_config {
     float dry_wet{1.0f};
 };
 
-class steam_audio_binaural_node final : public node {
+class steam_audio_binaural_node final : public stream_node {
   public:
     explicit steam_audio_binaural_node(const steam_audio_binaural_config& config);
     steam_audio_binaural_node(const steam_audio_binaural_node&) = delete;
@@ -84,6 +84,8 @@ class steam_audio_binaural_node final : public node {
         return index == 0 && layout == input_layout_;
     }
     void process(process_context context, std::span<const const_planar_view> inputs, planar_view output) noexcept override;
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
 
     // Single control-domain publisher; the render domain is the only consumer.
     [[nodiscard]] auto set_direction(direction3 direction) noexcept -> bool;
@@ -95,6 +97,9 @@ class steam_audio_binaural_node final : public node {
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 
     [[nodiscard]] auto consume_direction() noexcept -> direction3;
+    [[nodiscard]] auto apply(process_context context, std::span<const const_planar_view> inputs,
+                             planar_view output) noexcept -> bool;
+    void blend(process_context context, const const_planar_view* input, planar_view output) noexcept;
 
     channel_layout input_layout_;
     channel_layout output_layout_{channel_layout::stereo()};
@@ -110,6 +115,7 @@ class steam_audio_binaural_node final : public node {
     std::atomic<std::uint32_t> middle_direction_{1};
     std::atomic<std::uint32_t> dry_wet_bits_{};
     float applied_dry_wet_{1.0f};
+    bool input_ended_{};
 };
 
 } // namespace miniaudio::cpp_engine

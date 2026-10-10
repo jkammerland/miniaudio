@@ -31,6 +31,34 @@ struct process_context {
     std::uint32_t sample_rate{};
 };
 
+struct source_result {
+    std::uint32_t valid_frames{};
+    bool eof{};
+};
+
+enum class stream_state { running, complete, failed };
+
+struct stream_result {
+    std::uint32_t valid_frames{};
+    stream_state state{stream_state::running};
+};
+
+[[nodiscard]] inline auto valid_stream_result(stream_result result, std::uint32_t quantum) noexcept -> bool {
+    switch (result.state) {
+        case stream_state::running: return result.valid_frames == quantum;
+        case stream_state::complete: return result.valid_frames <= quantum;
+        case stream_state::failed: return result.valid_frames == 0;
+    }
+    return false;
+}
+
+struct stream_input {
+    const_planar_view samples;
+    stream_result result;
+};
+
+class stream_node;
+
 class node {
   public:
     virtual ~node() = default;
@@ -40,12 +68,23 @@ class node {
     [[nodiscard]] virtual auto input_count() const noexcept -> std::uint32_t = 0;
     [[nodiscard]] virtual auto accepts_input(std::uint32_t index, const channel_layout& layout) const noexcept -> bool = 0;
     virtual void process(process_context context, std::span<const const_planar_view> inputs, planar_view output) noexcept = 0;
+    // Resolved by the control-domain compiler, never by a render-time cast.
+    [[nodiscard]] virtual auto stream_interface() noexcept -> stream_node* { return nullptr; }
+};
+
+class stream_node : public node {
+  public:
+    [[nodiscard]] auto stream_interface() noexcept -> stream_node* final { return this; }
+    void process(process_context context, std::span<const const_planar_view> inputs, planar_view output) noexcept override;
+    [[nodiscard]] virtual auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                              planar_view output) noexcept -> stream_result = 0;
 };
 
 using source_callback = void (*)(void*, process_context, planar_view) noexcept;
 using effect_callback = void (*)(void*, process_context, const_planar_view, planar_view) noexcept;
+using finite_source_callback = source_result (*)(void*, process_context, planar_view) noexcept;
 
-class callback_source_node final : public node {
+class callback_source_node final : public stream_node {
   public:
     callback_source_node(channel_layout layout, void* state, source_callback callback);
 
@@ -53,6 +92,8 @@ class callback_source_node final : public node {
     [[nodiscard]] auto input_count() const noexcept -> std::uint32_t override { return 0; }
     [[nodiscard]] auto accepts_input(std::uint32_t, const channel_layout&) const noexcept -> bool override { return false; }
     void process(process_context context, std::span<const const_planar_view> inputs, planar_view output) noexcept override;
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
 
   private:
     channel_layout layout_;
@@ -60,7 +101,22 @@ class callback_source_node final : public node {
     source_callback callback_{};
 };
 
-class gain_node final : public node {
+class finite_source_node final : public stream_node {
+  public:
+    finite_source_node(channel_layout layout, void* state, finite_source_callback callback);
+    [[nodiscard]] auto output_layout() const noexcept -> const channel_layout& override { return layout_; }
+    [[nodiscard]] auto input_count() const noexcept -> std::uint32_t override { return 0; }
+    [[nodiscard]] auto accepts_input(std::uint32_t, const channel_layout&) const noexcept -> bool override { return false; }
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
+
+  private:
+    channel_layout layout_;
+    void* state_{};
+    finite_source_callback callback_{};
+};
+
+class gain_node final : public stream_node {
   public:
     gain_node(channel_layout layout, float gain) : layout_(layout), gain_(gain) {
         if (layout.empty())
@@ -73,13 +129,15 @@ class gain_node final : public node {
         return index == 0 && layout == layout_;
     }
     void process(process_context, std::span<const const_planar_view> inputs, planar_view output) noexcept override;
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
 
   private:
     channel_layout layout_;
     float gain_{};
 };
 
-class mixer_node final : public node {
+class mixer_node final : public stream_node {
   public:
     mixer_node(channel_layout layout, std::uint32_t input_count);
 
@@ -89,6 +147,8 @@ class mixer_node final : public node {
         return index < input_count_ && layout == layout_;
     }
     void process(process_context, std::span<const const_planar_view> inputs, planar_view output) noexcept override;
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
 
   private:
     channel_layout layout_;
@@ -113,6 +173,25 @@ class callback_effect_node final : public node {
     effect_callback callback_{};
 };
 
+// Explicit opt-in: this callback has no delayed output of its own.
+class tail_free_effect_node final : public stream_node {
+  public:
+    tail_free_effect_node(channel_layout input_layout, channel_layout output_layout, void* state, effect_callback callback);
+    [[nodiscard]] auto output_layout() const noexcept -> const channel_layout& override { return output_layout_; }
+    [[nodiscard]] auto input_count() const noexcept -> std::uint32_t override { return 1; }
+    [[nodiscard]] auto accepts_input(std::uint32_t index, const channel_layout& layout) const noexcept -> bool override {
+        return index == 0 && layout == input_layout_;
+    }
+    [[nodiscard]] auto process_stream(process_context context, std::span<const stream_input> inputs,
+                                      planar_view output) noexcept -> stream_result override;
+
+  private:
+    channel_layout input_layout_;
+    channel_layout output_layout_;
+    void* state_{};
+    effect_callback callback_{};
+};
+
 struct node_id {
     std::uint32_t value{};
     friend auto operator==(node_id, node_id) noexcept -> bool = default;
@@ -128,6 +207,10 @@ class render_plan {
 
     [[nodiscard]] auto contract() const noexcept -> const stream_contract& { return contract_; }
     void process(process_context context, planar_view output) noexcept;
+    [[nodiscard]] auto stream_processing() const noexcept -> bool { return stream_processing_; }
+    [[nodiscard]] auto process_stream(process_context context, planar_view output) noexcept -> stream_result;
+    // Render-domain operation: future source quanta become EOF.
+    void begin_drain() noexcept { draining_ = true; }
 
   private:
     friend class render_plan_builder;
@@ -136,13 +219,18 @@ class render_plan {
         std::unique_ptr<node> implementation;
         std::vector<node_id> inputs;
         planar_buffer output;
+        stream_node* stream_implementation{};
+        stream_result result{};
     };
 
-    render_plan(stream_contract contract, std::vector<operation> operations, node_id output);
+    render_plan(stream_contract contract, std::vector<operation> operations, node_id output, bool stream_processing = false);
 
     stream_contract contract_;
     std::vector<operation> operations_;
     node_id output_{};
+    bool stream_processing_{};
+    bool draining_{};
+    stream_state terminal_state_{stream_state::running};
 };
 
 class render_plan_builder {
@@ -151,6 +239,7 @@ class render_plan_builder {
 
     [[nodiscard]] auto add(std::unique_ptr<node> implementation, std::span<const node_id> inputs = {}) -> node_id;
     [[nodiscard]] auto compile(node_id output) && -> std::unique_ptr<render_plan>;
+    [[nodiscard]] auto compile_stream(node_id output) && -> std::unique_ptr<render_plan>;
 
   private:
     stream_contract contract_;

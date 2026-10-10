@@ -194,6 +194,56 @@ auto cancelling_plan_publication_retires_on_the_control_thread() -> bool {
     return require(destruction.destroyed && destruction.thread == control_thread,
                    "cancelled candidate was not destroyed on the control owner");
 }
+
+auto expiry_requests_drain_but_cancellation_does_not() -> bool {
+    using namespace miniaudio::cpp_engine;
+    clock_type::reset();
+    queue_type timers;
+    const stream_contract contract{channel_layout::mono(), 48'000, 8};
+    source_state source{0.75f};
+    plan_exchange exchange{contract};
+    render_plan_builder builder{contract};
+    const auto output_node = builder.add(std::make_unique<callback_source_node>(contract.layout, &source, fill_source));
+    auto plan = std::move(builder).compile_stream(output_node);
+    if (exchange.try_publish(plan) != publish_status::published)
+        return false;
+    render_plan* active = nullptr;
+    if (!exchange.audio_acquire(active))
+        return false;
+    bool action_ran = false;
+    bool owner_thread = false;
+    drain_request_status requested = drain_request_status::no_active_plan;
+    const auto owner = std::this_thread::get_id();
+    auto action = [&] {
+        action_ran = true;
+        owner_thread = std::this_thread::get_id() == owner;
+        requested = exchange.request_drain();
+    };
+    std::stop_source stop;
+    auto cancelled = schedule_control_action(timers, 1ms, stop.get_token(), action);
+    cancelled.resume();
+    stop.request_stop();
+    if (!require(cancelled.done() && cancelled.result() == awaitable_timer_status::cancelled && !action_ran &&
+                 timers.number_pending() == 0 && !exchange.audio_drain_requested(), "timer cancellation requested a drain"))
+        return false;
+    auto expiry = schedule_control_action(timers, 2ms, std::stop_token{}, action);
+    expiry.resume();
+    clock_type::advance(2ms);
+    timers.poll();
+    if (!require(expiry.done() && expiry.result() == awaitable_timer_status::expired && action_ran && owner_thread &&
+                 requested == drain_request_status::queued && exchange.audio_drain_requested(),
+                 "timer expiry did not publish an owner-thread drain request"))
+        return false;
+    planar_buffer output{contract.layout, contract.quantum};
+    const auto before = active->process_stream({0, contract.quantum, contract.sample_rate}, output.view());
+    if (!require(before.state == stream_state::running && before.valid_frames == contract.quantum,
+                 "control request itself executed render-domain draining"))
+        return false;
+    active->begin_drain();
+    const auto after = active->process_stream({contract.quantum, contract.quantum, contract.sample_rate}, output.view());
+    return require(after.state == stream_state::complete && after.valid_frames == 0,
+                   "render-domain drain did not end the continuous source");
+}
 } // namespace
 
 int main() {
@@ -202,6 +252,7 @@ int main() {
     const auto fanout = fanout_cancels_and_retires_the_loser();
     const auto scheduled_plan = timer_can_publish_a_plan_on_the_control_thread();
     const auto cancelled_plan = cancelling_plan_publication_retires_on_the_control_thread();
+    const auto drain = expiry_requests_drain_but_cancellation_does_not();
     if (expiry)
         std::cout << "PASS expiry_runs_on_the_control_owner\n";
     if (cancellation)
@@ -212,5 +263,7 @@ int main() {
         std::cout << "PASS timer_can_publish_a_plan_on_the_control_thread\n";
     if (cancelled_plan)
         std::cout << "PASS cancelling_plan_publication_retires_on_the_control_thread\n";
-    return expiry && cancellation && fanout && scheduled_plan && cancelled_plan ? 0 : 1;
+    if (drain)
+        std::cout << "PASS expiry_requests_drain_but_cancellation_does_not\n";
+    return expiry && cancellation && fanout && scheduled_plan && cancelled_plan && drain ? 0 : 1;
 }

@@ -103,6 +103,8 @@ void playback_device::uninitialize() noexcept {
     }
     renderer_.reset();
     active_plan_ = nullptr;
+    completed_generation_.store(0, std::memory_order_relaxed);
+    failed_generation_.store(0, std::memory_order_relaxed);
 }
 
 void playback_device::data_callback(ma_device* device, void* output, const void*, ma_uint32 frame_count) noexcept {
@@ -114,15 +116,33 @@ void playback_device::render(void* output, ma_uint32 frame_count) noexcept {
     if (output == nullptr || frame_count == 0)
         return;
 
-    auto render_quantum = [this](process_context context, planar_view block) noexcept {
+    // A terminal stream must still allow new publications. The finite adapter
+    // itself deliberately stops calling its renderer after its cache is empty.
+    if (renderer_.stream_finished() && exchange_.audio_acquire(active_plan_))
+        renderer_.restart_stream();
+
+    auto render_quantum = [this](process_context context, planar_view block) noexcept -> stream_result {
         exchange_.audio_acquire(active_plan_);
+        if (active_plan_ != nullptr && active_plan_->stream_processing()) {
+            if (exchange_.audio_drain_requested())
+                active_plan_->begin_drain();
+            return active_plan_->process_stream(context, block);
+        }
         if (active_plan_ != nullptr)
             active_plan_->process(context, block);
         else
             clear(block);
+        return {context.frame_count, stream_state::running};
     };
 
-    renderer_.pull(interleaved_view{static_cast<float*>(output), config_.contract.layout, frame_count}, render_quantum);
+    const auto result = renderer_.pull_stream(
+        interleaved_view{static_cast<float*>(output), config_.contract.layout, frame_count}, render_quantum);
+    if (active_plan_ != nullptr) {
+        if (result.state == stream_state::complete)
+            completed_generation_.store(exchange_.audio_generation(), std::memory_order_release);
+        else if (result.state == stream_state::failed)
+            failed_generation_.store(exchange_.audio_generation(), std::memory_order_release);
+    }
 }
 
 } // namespace miniaudio::cpp_engine

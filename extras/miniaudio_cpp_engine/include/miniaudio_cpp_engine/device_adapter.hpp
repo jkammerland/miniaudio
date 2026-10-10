@@ -5,6 +5,7 @@
 
 #include "miniaudio.h"
 
+#include <atomic>
 #include <optional>
 
 namespace miniaudio::cpp_engine {
@@ -25,12 +26,20 @@ class playback_device {
     auto initialize() noexcept -> ma_result;
     auto start() noexcept -> ma_result;
     auto stop() noexcept -> ma_result;
+    [[nodiscard]] auto request_drain() noexcept -> drain_request_status { return exchange_.request_drain(); }
+    [[nodiscard]] auto completed_generation() const noexcept -> std::uint64_t {
+        return completed_generation_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] auto failed_generation() const noexcept -> std::uint64_t {
+        return failed_generation_.load(std::memory_order_acquire);
+    }
     void uninitialize() noexcept;
 
     [[nodiscard]] auto initialized() const noexcept -> bool { return device_initialized_; }
     [[nodiscard]] auto counters_after_stop() const noexcept -> render_counters { return renderer_.counters(); }
 
   private:
+    friend struct playback_device_test_access;
     static void data_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) noexcept;
     void render(void* output, ma_uint32 frame_count) noexcept;
 
@@ -38,6 +47,8 @@ class playback_device {
     playback_device_config config_;
     quantum_output_adapter renderer_;
     render_plan* active_plan_{};
+    std::atomic<std::uint64_t> completed_generation_{};
+    std::atomic<std::uint64_t> failed_generation_{};
     ma_context context_{};
     ma_device device_{};
     bool context_initialized_{};
